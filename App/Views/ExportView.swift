@@ -1,0 +1,339 @@
+import SwiftUI
+
+struct ExportView: View {
+    let project: Project
+    let episodes: [Episode]
+    @Binding var settings: ExportSettings
+    let onExport: (Set<Int>?) -> Void
+    let onExportAll: () -> Void
+    
+    @State private var selectedEpisodes: Set<Int> = []
+    @State private var showingExportOptions = false
+    
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Formato do Vídeo") {
+                    Picker("Proporção", selection: $settings.aspectRatio) {
+                        ForEach(AspectRatio.allCases) { ratio in
+                            Text(ratio.rawValue).tag(ratio)
+                        }
+                    }
+                    
+                    Picker("Resolução", selection: $settings.resolution) {
+                        ForEach(ExportResolution.allCases) { res in
+                            Text(res.rawValue).tag(res)
+                        }
+                    }
+                    
+                    Picker("Enquadramento", selection: $settings.fitMode) {
+                        ForEach(FitMode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+                    
+                    Picker("Qualidade", selection: $settings.quality) {
+                        ForEach(ExportQuality.allCases) { quality in
+                            Text(quality.rawValue).tag(quality)
+                        }
+                    }
+                }
+                
+                Section("Capas dos Episódios") {
+                    Toggle("Gerar capas", isOn: $settings.includeCovers)
+                    
+                    if settings.includeCovers {
+                        Picker("Tipo de capa", selection: $settings.coverMode) {
+                            ForEach(CoverSettings.CoverMode.allCases) { mode in
+                                Text(mode.rawValue).tag(mode)
+                            }
+                        }
+                        
+                        if settings.coverMode == .captureFrame {
+                            HStack {
+                                Text("Tempo de captura")
+                                Spacer()
+                                Slider(value: $settings.coverCaptureTime, in: 0...project.sourceVideoDuration, step: 1)
+                                Text(formatTime(settings.coverCaptureTime))
+                                    .font(.caption.monospacedDigit())
+                                    .frame(width: 50)
+                            }
+                        }
+                    }
+                }
+                
+                Section("Nomenclatura") {
+                    TextField("Prefixo do arquivo", text: $settings.fileNamePrefix)
+                }
+                
+                Section("Episódios") {
+                    if episodes.isEmpty {
+                        Text("Nenhum episódio para exportar")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(episodes) { episode in
+                            EpisodeExportRow(
+                                episode: episode,
+                                isSelected: selectedEpisodes.contains(episode.index + 1) || selectedEpisodes.isEmpty,
+                                onToggle: { isSelected in
+                                    if isSelected {
+                                        selectedEpisodes.insert(episode.index + 1)
+                                    } else {
+                                        selectedEpisodes.remove(episode.index + 1)
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
+                
+                Section {
+                    Button {
+                        onExport(selectedEpisodes.isEmpty ? nil : selectedEpisodes)
+                    } label: {
+                        HStack {
+                            Spacer()
+                            Label(selectedEpisodes.isEmpty ? "Exportar Todos" : "Exportar Selecionados (\(selectedEpisodes.count))", systemImage: "square.and.arrow.up")
+                            Spacer()
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(episodes.isEmpty)
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets())
+                }
+                
+                Section {
+                    Button("Exportar Todos", systemImage: "square.and.arrow.up") {
+                        onExportAll()
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(episodes.isEmpty)
+                }
+                
+                Section("Estimativa") {
+                    ExportEstimateView(project: project, episodes: episodes, settings: settings)
+                }
+            }
+            .navigationTitle("Exportar")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+    
+    private func formatTime(_ seconds: Double) -> String {
+        let m = Int(seconds) / 60
+        let s = Int(seconds) % 60
+        return String(format: "%02d:%02d", m, s)
+    }
+}
+
+struct EpisodeExportRow: View {
+    let episode: Episode
+    let isSelected: Bool
+    let onToggle: (Bool) -> Void
+    
+    var body: some View {
+        Button {
+            onToggle(!isSelected)
+        } label: {
+            HStack {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.title2)
+                    .foregroundStyle(isSelected ? .accentColor : .secondary)
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Episódio \(episode.index + 1)")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.primary)
+                    
+                    HStack(spacing: 12) {
+                        if let intro = episode.effectiveIntro {
+                            Text("Intro: \(formatDuration(intro.duration))")
+                                .font(.caption)
+                        }
+                        if !episode.effectiveRecaps.isEmpty {
+                            let total = episode.effectiveRecaps.reduce(0) { $0 + $1.duration }
+                            Text("Recap: \(formatDuration(total))")
+                                .font(.caption)
+                        }
+                        Text("Principal: \(formatDuration(episode.mainDuration))")
+                            .font(.caption)
+                        if let outro = episode.effectiveOutro {
+                            Text("Outro: \(formatDuration(outro.duration))")
+                                .font(.caption)
+                        }
+                    }
+                    .foregroundStyle(.secondary)
+                }
+                
+                Spacer()
+                
+                Text(formatDuration(episode.totalDuration))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+    
+    private func formatDuration(_ seconds: Double) -> String {
+        let m = Int(seconds) / 60
+        let s = Int(seconds) % 60
+        return String(format: "%02d:%02d", m, s)
+    }
+}
+
+struct ExportEstimateView: View {
+    let project: Project
+    let episodes: [Episode]
+    let settings: ExportSettings
+    
+    private var totalDuration: Double {
+        episodes.reduce(0) { $0 + $1.totalDuration }
+    }
+    
+    private var estimatedTime: TimeInterval {
+        let qualityMultiplier: Double
+        switch settings.quality {
+        case .low: qualityMultiplier = 0.3
+        case .medium: qualityMultiplier = 0.5
+        case .high: qualityMultiplier = 0.8
+        case .maximum: qualityMultiplier = 1.2
+        }
+        return totalDuration * qualityMultiplier * Double(episodes.count)
+    }
+    
+    private var estimatedSize: Int64 {
+        let bitsPerPixel: Double
+        switch settings.resolution {
+        case .original: bitsPerPixel = 0.15
+        case .p480: bitsPerPixel = 0.1
+        case .p720: bitsPerPixel = 0.12
+        case .p1080: bitsPerPixel = 0.15
+        case .p1440: bitsPerPixel = 0.18
+        case .p2160: bitsPerPixel = 0.2
+        }
+        
+        let renderSize = calculateRenderSize()
+        let pixelsPerFrame = renderSize.width * renderSize.height
+        let frameRate = 30.0
+        let bitsPerSecond = pixelsPerFrame * frameRate * bitsPerPixel
+        let totalBits = bitsPerSecond * totalDuration
+        return Int64(totalBits / 8)
+    }
+    
+    private func calculateRenderSize() -> CGSize {
+        let naturalSize = project.sourceVideoNaturalSize.cgSize
+        let transform = project.sourceVideoTransform.cgAffineTransform
+        
+        guard let ratio = settings.aspectRatio.ratio else { return naturalSize }
+        guard let longSide = settings.resolution.longSide else { return naturalSize }
+        
+        if ratio >= 1 { return CGSize(width: longSide, height: longSide/ratio) }
+        return CGSize(width: longSide*ratio, height: longSide)
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("\(episodes.count) episódios", systemImage: "film.stack")
+                Spacer()
+                Text(formatDuration(totalDuration))
+                    .font(.subheadline.monospacedDigit().bold())
+            }
+            
+            HStack {
+                Label("Tempo estimado", systemImage: "clock")
+                Spacer()
+                Text(formatEstimatedTime(estimatedTime))
+                    .font(.subheadline.monospacedDigit().bold())
+            }
+            
+            HStack {
+                Label("Tamanho estimado", systemImage: "doc")
+                Spacer()
+                Text(ByteCountFormatter.string(fromByteCount: estimatedSize, countStyle: .file))
+                    .font(.subheadline.monospacedDigit().bold())
+            }
+            
+            HStack {
+                Label("Resolução de saída", systemImage: "rectangle")
+                Spacer()
+                Text("\(Int(calculateRenderSize().width)) × \(Int(calculateRenderSize().height))")
+                    .font(.subheadline.monospacedDigit().bold())
+            }
+        }
+        .font(.subheadline)
+        .foregroundStyle(.secondary)
+    }
+    
+    private func formatDuration(_ seconds: Double) -> String {
+        let h = Int(seconds) / 3600
+        let m = (Int(seconds) % 3600) / 60
+        let s = Int(seconds) % 60
+        if h > 0 { return String(format: "%d:%02d:%02d", h, m, s) }
+        return String(format: "%02d:%02d", m, s)
+    }
+    
+    private func formatEstimatedTime(_ seconds: TimeInterval) -> String {
+        let m = Int(seconds) / 60
+        let s = Int(seconds) % 60
+        if m > 0 { return "\(m) min \(s) s" }
+        return "\(s) s"
+    }
+}
+
+struct ExportProgressView: View {
+    @ObservedObject var viewModel: EditorViewModel
+    
+    @Environment(\.dismiss) private var dismiss
+    
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 24) {
+                if let progress = viewModel.exportProgress {
+                    VStack(spacing: 16) {
+                        ProgressView(value: progress.overallProgress)
+                            .progressViewStyle(.linear)
+                            .scaleEffect(y: 3)
+                        
+                        HStack {
+                            Text("\(Int(progress.overallProgress * 100))%")
+                                .font(.title.bold().monospacedDigit())
+                            Spacer()
+                            Text("\(progress.currentEpisode) / \(progress.totalEpisodes)")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        
+                        Text(progress.message)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                        
+                        if progress.currentStage == .completed || progress.currentStage == .failed {
+                            Button("Fechar") { dismiss() }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.large)
+                        }
+                    }
+                    .padding()
+                } else {
+                    ProgressView("Preparando exportação...")
+                        .scaleEffect(1.5)
+                }
+            }
+            .padding()
+            .navigationTitle("Exportando")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                if viewModel.exportProgress?.currentStage == .completed || viewModel.exportProgress?.currentStage == .failed {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Fechar") { dismiss() }
+                    }
+                }
+            }
+        }
+        .presentationDetents([.height(300)])
+    }
+}
