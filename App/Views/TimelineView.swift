@@ -38,19 +38,24 @@ extension TrackType {
     }
 }
 
-/// Storyline timeline: ruler, a single video lane with filmstrip clips, playhead and zoom.
+/// Storyline timeline: ruler, video lane with filmstrip clips, text and audio lanes, playhead and zoom.
 struct TimelineView: View {
     let segments: [TimelineSegment]
+    let overlays: [TextOverlay]
+    let audioClips: [AudioClip]
     let totalDuration: Double
     let currentTime: Double
-    let selectedSegmentID: UUID?
+    let selectedID: UUID?
     let canAddIntro: Bool
     let canAddOutro: Bool
     let sourceURL: (TimelineSegment) -> URL?
     let onSeek: (Double) -> Void
-    let onSelect: (TimelineSegment?) -> Void
+    let onSelect: (UUID?) -> Void
     let onAddIntro: () -> Void
     let onAddOutro: () -> Void
+    let onAddText: () -> Void
+    let onAddAudio: () -> Void
+    let onTransitionTap: (TimelineSegment) -> Void
 
     @State private var pixelsPerSecond: CGFloat = 20
     @State private var pinchBase: CGFloat?
@@ -59,8 +64,10 @@ struct TimelineView: View {
     private let headerWidth: CGFloat = 64
     private let leadingInset: CGFloat = 76
     private let trailingInset: CGFloat = 140
-    private let rulerHeight: CGFloat = 26
-    private let clipHeight: CGFloat = 62
+    private let rulerHeight: CGFloat = 24
+    private let clipHeight: CGFloat = 56
+    private let laneHeight: CGFloat = 30
+    private let laneSpacing: CGFloat = 6
     private let minPPS: CGFloat = 4
     private let maxPPS: CGFloat = 240
 
@@ -69,14 +76,15 @@ struct TimelineView: View {
     var body: some View {
         GeometryReader { geometry in
             VStack(spacing: 0) {
-                HStack(alignment: .top, spacing: 0) {
-                    trackHeaders
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        timelineContent
+                ScrollView(.vertical, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 0) {
+                        trackHeaders
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            timelineContent
+                        }
+                        .simultaneousGesture(pinchGesture)
                     }
-                    .simultaneousGesture(pinchGesture)
                 }
-                Spacer(minLength: 0)
                 zoomBar(width: geometry.size.width)
             }
             .onAppear {
@@ -92,24 +100,44 @@ struct TimelineView: View {
     }
 
     private var trackHeaders: some View {
-        VStack(spacing: 0) {
-            Color.clear.frame(height: rulerHeight + 10)
-            VStack(spacing: 4) {
-                Image(systemName: "film")
-                    .font(.system(size: 15, weight: .semibold))
-                Text("Vídeo")
-                    .font(.system(size: 10, weight: .medium))
-            }
-            .foregroundStyle(.white.opacity(0.75))
-            .frame(width: headerWidth, height: clipHeight)
-            .background(EditorTheme.panelRaised, in: RoundedRectangle(cornerRadius: 8))
-            .padding(.leading, 6)
+        VStack(spacing: laneSpacing) {
+            Color.clear.frame(height: rulerHeight + 4)
+            header(icon: "film", title: "Vídeo", height: clipHeight)
+            header(icon: "textformat", title: "Texto", height: laneHeight, action: onAddText)
+            header(icon: "music.note", title: "Áudio", height: laneHeight, action: onAddAudio)
         }
+        .padding(.leading, 6)
         .frame(width: headerWidth + 6)
+    }
+
+    @ViewBuilder
+    private func header(icon: String, title: String, height: CGFloat, action: (() -> Void)? = nil) -> some View {
+        let content = HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .semibold))
+            Text(title)
+                .font(.system(size: 10, weight: .medium))
+            if action != nil {
+                Image(systemName: "plus")
+                    .font(.system(size: 9, weight: .bold))
+            }
+        }
+        .foregroundStyle(.white.opacity(0.75))
+        .frame(width: headerWidth, height: height)
+        .background(EditorTheme.panelRaised, in: RoundedRectangle(cornerRadius: 8))
+        if let action {
+            Button(action: action) { content }.buttonStyle(.plain)
+        } else {
+            content
+        }
     }
 
     private var contentWidth: CGFloat {
         leadingInset + CGFloat(safeDuration) * pixelsPerSecond + trailingInset
+    }
+
+    private var contentHeight: CGFloat {
+        rulerHeight + 4 + clipHeight + laneHeight * 2 + laneSpacing * 3
     }
 
     private func xPosition(for time: Double) -> CGFloat {
@@ -122,13 +150,15 @@ struct TimelineView: View {
 
     private var timelineContent: some View {
         ZStack(alignment: .topLeading) {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: laneSpacing) {
                 ruler
-                lane
+                videoLane
+                textLane
+                audioLane
             }
             playhead
         }
-        .frame(width: contentWidth, alignment: .topLeading)
+        .frame(width: contentWidth, height: contentHeight, alignment: .topLeading)
     }
 
     private var ruler: some View {
@@ -158,7 +188,7 @@ struct TimelineView: View {
                 t = Double(tick) * minor
             }
         }
-        .frame(width: contentWidth, height: rulerHeight)
+        .frame(width: contentWidth, height: rulerHeight + 4)
         .contentShape(Rectangle())
         .gesture(
             DragGesture(minimumDistance: 0)
@@ -166,8 +196,9 @@ struct TimelineView: View {
         )
     }
 
-    private var lane: some View {
-        ZStack(alignment: .topLeading) {
+    private var videoLane: some View {
+        let ordered = segments.sorted { $0.startTime < $1.startTime }
+        return ZStack(alignment: .topLeading) {
             Color.clear
                 .frame(width: contentWidth, height: clipHeight)
                 .contentShape(Rectangle())
@@ -178,17 +209,25 @@ struct TimelineView: View {
                     .offset(x: 8)
             }
 
-            ForEach(segments) { segment in
+            ForEach(ordered) { segment in
                 let width = max(8, CGFloat(segment.duration) * pixelsPerSecond)
                 TimelineClipView(
                     segment: segment,
                     width: width,
                     height: clipHeight,
-                    isSelected: segment.id == selectedSegmentID,
+                    isSelected: segment.id == selectedID,
                     sourceURL: sourceURL(segment)
                 )
                 .offset(x: xPosition(for: segment.startTime))
-                .onTapGesture { onSelect(segment) }
+                .onTapGesture { onSelect(segment.id) }
+            }
+
+            ForEach(Array(ordered.enumerated()).filter { $0.offset > 0 }, id: \.element.id) { _, segment in
+                transitionBadge(for: segment)
+                    .offset(
+                        x: xPosition(for: segment.startTime + segment.overlapIn / 2) - 11,
+                        y: clipHeight / 2 - 11
+                    )
             }
 
             if canAddOutro {
@@ -197,6 +236,88 @@ struct TimelineView: View {
             }
         }
         .frame(width: contentWidth, height: clipHeight, alignment: .topLeading)
+    }
+
+    private func transitionBadge(for segment: TimelineSegment) -> some View {
+        Button {
+            onTransitionTap(segment)
+        } label: {
+            Image(systemName: segment.transition == .none ? "plus" : segment.transition.icon)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(segment.transition == .none ? Color.black : Color.white)
+                .frame(width: 22, height: 22)
+                .background(
+                    segment.transition == .none ? Color.white : EditorTheme.accent,
+                    in: RoundedRectangle(cornerRadius: 5)
+                )
+                .shadow(color: .black.opacity(0.5), radius: 2)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var textLane: some View {
+        ZStack(alignment: .topLeading) {
+            Color.white.opacity(0.03)
+                .frame(width: contentWidth, height: laneHeight)
+                .contentShape(Rectangle())
+                .onTapGesture { onSelect(nil) }
+            ForEach(overlays) { overlay in
+                laneItem(
+                    title: overlay.text,
+                    icon: "textformat",
+                    color: TrackType.overlay.color,
+                    start: overlay.startTime,
+                    duration: overlay.duration,
+                    isSelected: overlay.id == selectedID
+                )
+                .onTapGesture { onSelect(overlay.id) }
+            }
+        }
+        .frame(width: contentWidth, height: laneHeight, alignment: .topLeading)
+    }
+
+    private var audioLane: some View {
+        ZStack(alignment: .topLeading) {
+            Color.white.opacity(0.03)
+                .frame(width: contentWidth, height: laneHeight)
+                .contentShape(Rectangle())
+                .onTapGesture { onSelect(nil) }
+            ForEach(audioClips) { clip in
+                laneItem(
+                    title: clip.name,
+                    icon: clip.kind.icon,
+                    color: clip.kind == .narration ? .orange : .green,
+                    start: clip.timelineStart,
+                    duration: min(clip.duration, max(0.1, safeDuration - clip.timelineStart)),
+                    isSelected: clip.id == selectedID
+                )
+                .onTapGesture { onSelect(clip.id) }
+            }
+        }
+        .frame(width: contentWidth, height: laneHeight, alignment: .topLeading)
+    }
+
+    private func laneItem(title: String, icon: String, color: Color, start: Double, duration: Double, isSelected: Bool) -> some View {
+        let width = max(10, CGFloat(duration) * pixelsPerSecond)
+        return HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 9, weight: .bold))
+            if width > 40 {
+                Text(title)
+                    .font(.system(size: 10, weight: .semibold))
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 5)
+        .foregroundStyle(.white)
+        .frame(width: width, height: laneHeight - 4, alignment: .leading)
+        .background(color.opacity(0.75), in: RoundedRectangle(cornerRadius: 5))
+        .overlay(
+            RoundedRectangle(cornerRadius: 5)
+                .stroke(isSelected ? Color.white : color, lineWidth: isSelected ? 2.5 : 1)
+        )
+        .offset(x: xPosition(for: start), y: 2)
     }
 
     private func addButton(title: String, systemImage: String, action: @escaping () -> Void) -> some View {
@@ -216,11 +337,10 @@ struct TimelineView: View {
 
     private var playhead: some View {
         let x = xPosition(for: min(max(currentTime, 0), safeDuration))
-        let height = rulerHeight + 10 + clipHeight + 6
         return ZStack(alignment: .top) {
             Rectangle()
                 .fill(Color.white)
-                .frame(width: 2, height: height)
+                .frame(width: 2, height: contentHeight)
             Circle()
                 .fill(Color.white)
                 .frame(width: 10, height: 10)
@@ -441,94 +561,127 @@ struct SegmentEditorView: View {
     let segment: TimelineSegment
     let trackType: TrackType
     let project: Project
-    let episode: Episode?
     let onSave: (TimelineSegment) -> Void
-    let onDelete: () -> Void
-    
+    let onDelete: (() -> Void)?
+
     @Environment(\.dismiss) private var dismiss
-    @State private var startTime: Double
     @State private var sourceStartTime: Double
     @State private var sourceEndTime: Double
-    @State private var isEnabled: Bool
     @State private var sourceType: SourceType
     @State private var selectedAsset: MediaAsset?
-    
-    init(segment: TimelineSegment, trackType: TrackType, project: Project, episode: Episode?, onSave: @escaping (TimelineSegment) -> Void, onDelete: @escaping () -> Void) {
+    @State private var transition: TransitionStyle
+    @State private var transitionDuration: Double
+    @State private var clipVolume: Float
+    @State private var narrationVolume: Float
+    @State private var keepNarration: Bool
+
+    init(segment: TimelineSegment, trackType: TrackType, project: Project, onSave: @escaping (TimelineSegment) -> Void, onDelete: (() -> Void)?) {
         self.segment = segment
         self.trackType = trackType
         self.project = project
-        self.episode = episode
         self.onSave = onSave
         self.onDelete = onDelete
-        
-        _startTime = State(initialValue: segment.startTime)
         _sourceStartTime = State(initialValue: segment.sourceStartTime)
         _sourceEndTime = State(initialValue: segment.sourceEndTime)
-        _isEnabled = State(initialValue: segment.isEnabled)
         _sourceType = State(initialValue: segment.sourceType)
         _selectedAsset = State(initialValue: segment.assetID.flatMap { assetID in
             project.mediaAssets.first { $0.id == assetID }
         })
+        _transition = State(initialValue: segment.transition)
+        _transitionDuration = State(initialValue: segment.transitionDuration)
+        _clipVolume = State(initialValue: segment.clipVolume)
+        _narrationVolume = State(initialValue: segment.narrationVolume)
+        _keepNarration = State(initialValue: segment.narrationAssetID != nil)
     }
-    
+
+    private var maxSourceTime: Double {
+        selectedAsset?.duration ?? project.sourceVideoDuration
+    }
+
     var body: some View {
         NavigationStack {
             Form {
-                Section("Posição na Timeline") {
-                    HStack {
-                        Text("Início")
-                        Spacer()
-                        TextField("", value: $startTime, format: .number)
-                            .keyboardType(.decimalPad)
-                            .frame(width: 80)
-                            .textFieldStyle(.roundedBorder)
-                        Text("s")
-                    }
-                }
-                
-                Section("Origem do Conteúdo") {
-                    Picker("Tipo", selection: $sourceType) {
-                        ForEach(availableSourceTypes) { type in
-                            Text(type.rawValue).tag(type)
+                if trackType != .main {
+                    Section("Origem do conteúdo") {
+                        Picker("Tipo", selection: $sourceType) {
+                            ForEach(availableSourceTypes) { type in
+                                Text(type.rawValue).tag(type)
+                            }
                         }
-                    }
-                    .onChange(of: sourceType) { _ in
-                        if let selectedAsset, !filteredAssets.contains(where: { $0.id == selectedAsset.id }) {
-                            self.selectedAsset = nil
+                        .onChange(of: sourceType) { _ in
+                            if let selectedAsset, !filteredAssets.contains(where: { $0.id == selectedAsset.id }) {
+                                self.selectedAsset = nil
+                            }
                         }
-                    }
-                    
-                    if sourceType != .mainVideo {
-                        Picker("Asset", selection: $selectedAsset) {
-                            Text("Nenhum").tag(nil as MediaAsset?)
-                            ForEach(filteredAssets) { asset in
-                                Text(asset.name).tag(asset as MediaAsset?)
+                        if sourceType != .mainVideo {
+                            Picker("Vídeo", selection: $selectedAsset) {
+                                Text("Nenhum").tag(nil as MediaAsset?)
+                                ForEach(filteredAssets) { asset in
+                                    Text(asset.name).tag(asset as MediaAsset?)
+                                }
                             }
                         }
                     }
-                    
+                }
+
+                Section("Corte (trecho usado)") {
                     HStack {
-                        Text("Início no arquivo")
-                        Spacer()
-                        TextField("", value: $sourceStartTime, format: .number)
-                            .keyboardType(.decimalPad)
-                            .frame(width: 80)
-                            .textFieldStyle(.roundedBorder)
+                        Text("Início")
+                        Slider(value: $sourceStartTime, in: 0...max(maxSourceTime - 0.1, 0.1))
+                        Text(TimelineView.rulerLabel(sourceStartTime)).monospacedDigit()
+                    }
+                    .onChange(of: sourceStartTime) { newValue in
+                        sourceEndTime = max(sourceEndTime, min(newValue + 0.1, maxSourceTime))
                     }
                     HStack {
-                        Text("Fim no arquivo")
-                        Spacer()
-                        TextField("", value: $sourceEndTime, format: .number)
-                            .keyboardType(.decimalPad)
-                            .frame(width: 80)
-                            .textFieldStyle(.roundedBorder)
+                        Text("Fim")
+                        Slider(value: $sourceEndTime, in: min(sourceStartTime + 0.1, maxSourceTime)...max(maxSourceTime, 0.2))
+                        Text(TimelineView.rulerLabel(sourceEndTime)).monospacedDigit()
+                    }
+                    Text("Duração: \(String(format: "%.1f", max(0, sourceEndTime - sourceStartTime)))s")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Transição de entrada") {
+                    Picker("Estilo", selection: $transition) {
+                        ForEach(TransitionStyle.allCases) { style in
+                            Label(style.rawValue, systemImage: style.icon).tag(style)
+                        }
+                    }
+                    if transition != .none {
+                        HStack {
+                            Text("Duração")
+                            Slider(value: $transitionDuration, in: 0.2...2.0, step: 0.1)
+                            Text(String(format: "%.1fs", transitionDuration)).monospacedDigit()
+                        }
                     }
                 }
-                
-                Section {
-                    Button("Excluir Segmento", role: .destructive) {
-                        onDelete()
-                        dismiss()
+
+                Section("Áudio") {
+                    HStack {
+                        Image(systemName: clipVolume == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        Slider(value: $clipVolume, in: 0...1)
+                        Text("\(Int(clipVolume * 100))%").monospacedDigit().frame(width: 48)
+                    }
+                    if segment.narrationAssetID != nil {
+                        Toggle("Manter narração vinculada", isOn: $keepNarration)
+                        if keepNarration {
+                            HStack {
+                                Image(systemName: "mic.fill")
+                                Slider(value: $narrationVolume, in: 0...1)
+                                Text("\(Int(narrationVolume * 100))%").monospacedDigit().frame(width: 48)
+                            }
+                        }
+                    }
+                }
+
+                if let onDelete {
+                    Section {
+                        Button("Excluir clipe", role: .destructive) {
+                            onDelete()
+                            dismiss()
+                        }
                     }
                 }
             }
@@ -541,28 +694,30 @@ struct SegmentEditorView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Salvar") {
                         var updated = segment
-                        updated.startTime = startTime
                         updated.sourceStartTime = sourceStartTime
                         updated.sourceEndTime = sourceEndTime
                         updated.duration = sourceEndTime - sourceStartTime
-                        updated.isEnabled = isEnabled
                         updated.sourceType = sourceType
-                        updated.assetID = selectedAsset?.id
+                        updated.assetID = sourceType == .mainVideo ? nil : selectedAsset?.id
+                        updated.transition = transition
+                        updated.transitionDuration = transitionDuration
+                        updated.clipVolume = clipVolume
+                        updated.narrationVolume = narrationVolume
+                        updated.narrationAssetID = keepNarration ? segment.narrationAssetID : nil
                         onSave(updated)
                         dismiss()
                     }
                     .disabled(
-                        startTime < 0
-                            || sourceStartTime < 0
-                            || sourceEndTime <= sourceStartTime
+                        sourceStartTime < 0
+                            || sourceEndTime - sourceStartTime < 0.1
                             || (sourceType != .mainVideo && selectedAsset == nil)
-                            || sourceEndTime > (selectedAsset?.duration ?? project.sourceVideoDuration)
+                            || sourceEndTime > maxSourceTime + 0.01
                     )
                 }
             }
         }
     }
-    
+
     private var availableSourceTypes: [SourceType] {
         switch trackType {
         case .intro: return [.introAsset, .mainVideo]
@@ -573,12 +728,10 @@ struct SegmentEditorView: View {
         case .overlay: return [.imageAsset]
         }
     }
-    
+
     private var filteredAssets: [MediaAsset] {
         switch sourceType {
         case .introAsset, .outroAsset, .recapAsset: return project.mediaAssets.filter { $0.type == .video }
-        case .audioAsset: return project.mediaAssets.filter { $0.type == .audio }
-        case .imageAsset: return project.mediaAssets.filter { $0.type == .image }
         default: return []
         }
     }

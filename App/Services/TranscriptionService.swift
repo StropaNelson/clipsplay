@@ -1,5 +1,6 @@
 import Foundation
 import Speech
+import AVFoundation
 
 struct TranscriptCue: Identifiable {
     let id = UUID()
@@ -29,16 +30,35 @@ actor TranscriptionService {
         guard recognizer.isAvailable else {
             throw TranscriptionError.recognizerUnavailable
         }
-        guard recognizer.supportsOnDeviceRecognition else {
-            throw TranscriptionError.onDeviceRecognitionUnavailable
-        }
 
-        let videoInfo = try await VideoProcessor.shared.getVideoInfo(for: url)
+        let duration = try await AVURLAsset(url: url).load(.duration).seconds
+        guard duration.isFinite, duration > 0 else { throw TranscriptionError.noSpeechDetected }
+
+        // Prefer the offline model; fall back to Apple's server when it is missing or hears nothing.
+        var modes: [Bool] = []
+        if recognizer.supportsOnDeviceRecognition { modes.append(true) }
+        modes.append(false)
+
+        var lastError: Error?
+        for onDevice in modes {
+            do {
+                let cues = try await transcribe(url: url, duration: duration, recognizer: recognizer, onDevice: onDevice)
+                if !cues.isEmpty { return cues }
+            } catch {
+                lastError = error
+            }
+        }
+        if let lastError, !Self.isNoSpeechError(lastError) { throw lastError }
+        throw TranscriptionError.noSpeechDetected
+    }
+
+    private func transcribe(url: URL, duration: Double, recognizer: SFSpeechRecognizer, onDevice: Bool) async throws -> [TranscriptCue] {
         let chunkDuration = 45.0
         var allCues: [TranscriptCue] = []
         var chunkStart = 0.0
 
-        while chunkStart < videoInfo.duration {
+        while chunkStart < duration {
+            let length = min(chunkDuration, duration - chunkStart)
             let audioURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("\(UUID().uuidString).m4a")
             defer { try? FileManager.default.removeItem(at: audioURL) }
@@ -47,24 +67,11 @@ actor TranscriptionService {
                 from: url,
                 to: audioURL,
                 startTime: chunkStart,
-                duration: chunkDuration
+                duration: length
             )
 
-            let request = SFSpeechURLRecognitionRequest(url: audioURL)
-            request.requiresOnDeviceRecognition = true
-            request.shouldReportPartialResults = false
-
-            let transcription: SFTranscription = try await withCheckedThrowingContinuation { continuation in
-                recognizer.recognitionTask(with: request) { result, error in
-                    if let error {
-                        continuation.resume(throwing: error)
-                    } else if let result, result.isFinal {
-                        continuation.resume(returning: result.bestTranscription)
-                    }
-                }
-            }
-
-            allCues.append(contentsOf: Self.makeCues(from: transcription.segments).map {
+            let segments = try await recognize(audioURL: audioURL, recognizer: recognizer, onDevice: onDevice)
+            allCues.append(contentsOf: Self.makeCues(from: segments, chunkDuration: length).map {
                 TranscriptCue(
                     startTime: $0.startTime + chunkStart,
                     endTime: $0.endTime + chunkStart,
@@ -73,11 +80,73 @@ actor TranscriptionService {
             })
             chunkStart += chunkDuration
         }
-
         return allCues
     }
 
-    private static func makeCues(from segments: [SFTranscriptionSegment]) -> [TranscriptCue] {
+    /// Feeds decoded PCM to the recognizer. Silent chunks ("No speech detected") return no segments
+    /// instead of failing the whole transcription, and the last partial result is kept if the
+    /// recognizer ends with an error after already hearing words.
+    private func recognize(audioURL: URL, recognizer: SFSpeechRecognizer, onDevice: Bool) async throws -> [SFTranscriptionSegment] {
+        let file = try AVAudioFile(forReading: audioURL)
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.requiresOnDeviceRecognition = onDevice
+        request.shouldReportPartialResults = true
+        request.taskHint = .dictation
+        request.addsPunctuation = true
+
+        let format = file.processingFormat
+        let frameCapacity: AVAudioFrameCount = 8192
+        while file.framePosition < file.length {
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCapacity) else { break }
+            try file.read(into: buffer, frameCount: frameCapacity)
+            if buffer.frameLength == 0 { break }
+            request.append(buffer)
+        }
+        request.endAudio()
+
+        let state = RecognitionState()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[SFTranscriptionSegment], Error>) in
+                state.continuation = continuation
+                state.task = recognizer.recognitionTask(with: request) { result, error in
+                    if let result {
+                        state.latest = result.bestTranscription.segments
+                        if result.isFinal {
+                            state.finish(.success(result.bestTranscription.segments))
+                            return
+                        }
+                    }
+                    if let error {
+                        if let latest = state.latest, !latest.isEmpty {
+                            state.finish(.success(latest))
+                        } else if Self.isNoSpeechError(error) {
+                            state.finish(.success([]))
+                        } else {
+                            state.finish(.failure(error))
+                        }
+                    }
+                }
+            }
+        } onCancel: {
+            state.task?.cancel()
+        }
+    }
+
+    nonisolated private static func isNoSpeechError(_ error: Error) -> Bool {
+        if let transcriptionError = error as? TranscriptionError, case .noSpeechDetected = transcriptionError {
+            return true
+        }
+        let nsError = error as NSError
+        return nsError.domain == "kAFAssistantErrorDomain" && [203, 1110].contains(nsError.code)
+    }
+
+    private static func makeCues(from segments: [SFTranscriptionSegment], chunkDuration: Double) -> [TranscriptCue] {
+        guard !segments.isEmpty else { return [] }
+        // Partial results can lack timings; spread the words over the chunk in that case.
+        if segments.allSatisfy({ $0.timestamp == 0 && $0.duration == 0 }) {
+            let text = segments.map(\.substring).joined(separator: " ")
+            return [TranscriptCue(startTime: 0, endTime: chunkDuration, text: text)]
+        }
         var cues: [TranscriptCue] = []
         var words: [String] = []
         var cueStart: Double?
@@ -110,6 +179,7 @@ actor TranscriptionService {
         case recognizerUnavailable
         case onDeviceRecognitionUnavailable
         case invalidSubtitleFile
+        case noSpeechDetected
 
         var errorDescription: String? {
             switch self {
@@ -123,8 +193,25 @@ actor TranscriptionService {
                 return "Este dispositivo não oferece transcrição offline em português."
             case .invalidSubtitleFile:
                 return "O arquivo não contém legendas SRT ou VTT válidas."
+            case .noSpeechDetected:
+                return "Nenhuma fala foi reconhecida. Confira se o vídeo tem fala audível e se o idioma escolhido está correto."
             }
         }
+    }
+}
+
+private final class RecognitionState: @unchecked Sendable {
+    private let lock = NSLock()
+    var continuation: CheckedContinuation<[SFTranscriptionSegment], Error>?
+    var task: SFSpeechRecognitionTask?
+    var latest: [SFTranscriptionSegment]?
+
+    func finish(_ result: Result<[SFTranscriptionSegment], Error>) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(with: result)
     }
 }
 

@@ -26,7 +26,8 @@ let package = Package(
                 .portraitUpsideDown(.when(deviceFamilies: [.pad]))
             ],
             capabilities: [
-                .fileAccess(.userSelectedFiles, mode: .readWrite)
+                .fileAccess(.userSelectedFiles, mode: .readWrite),
+                .microphone(purposeString: "O ClipStudio usa o microfone para gravar narrações dos seus vídeos.")
             ],
             additionalInfoPlistContentFilePath: "Info.plist"
         )

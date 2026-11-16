@@ -7,9 +7,9 @@ struct MediaLibraryView: View {
     @Binding var assets: [MediaAsset]
     let onAdd: () -> Void
     let onRemove: (MediaAsset) -> Void
-    let onSelectForIntro: (MediaAsset, Double, Double) -> Void
-    let onSelectForOutro: (MediaAsset, Double, Double) -> Void
-    let onSelectForRecap: (MediaAsset, Double, Double) -> Void
+    let onSelectForIntro: (MediaAsset, ClipSelection) -> Void
+    let onSelectForOutro: (MediaAsset, ClipSelection) -> Void
+    let onSelectForRecap: (MediaAsset, ClipSelection) -> Void
     
     @State private var showingImporter = false
     @State private var selectedFilter: AssetType? = nil
@@ -115,11 +115,11 @@ struct MediaLibraryView: View {
             Text("Escolha como usar este \(asset.type.rawValue.lowercased())")
         }
         .sheet(item: $trimRequest) { request in
-            AssetTrimSheet(asset: request.asset, track: request.track) { start, end in
+            AssetTrimSheet(asset: request.asset, track: request.track) { selection in
                 switch request.track {
-                case .intro: onSelectForIntro(request.asset, start, end)
-                case .outro: onSelectForOutro(request.asset, start, end)
-                case .recap: onSelectForRecap(request.asset, start, end)
+                case .intro: onSelectForIntro(request.asset, selection)
+                case .outro: onSelectForOutro(request.asset, selection)
+                case .recap: onSelectForRecap(request.asset, selection)
                 default: break
                 }
             }
@@ -140,16 +140,19 @@ struct AssetTrimRequest: Identifiable {
 struct AssetTrimSheet: View {
     let asset: MediaAsset
     let track: TrackType
-    let onAssign: (Double, Double) -> Void
+    let onAssign: (ClipSelection) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var startTime = 0.0
     @State private var endTime: Double
     @State private var player: AVPlayer
+    @State private var narration: MediaAsset?
+    @State private var clipVolume: Float = 1
+    @State private var showingNarration = false
 
     private let minimumDuration = 0.1
 
-    init(asset: MediaAsset, track: TrackType, onAssign: @escaping (Double, Double) -> Void) {
+    init(asset: MediaAsset, track: TrackType, onAssign: @escaping (ClipSelection) -> Void) {
         self.asset = asset
         self.track = track
         self.onAssign = onAssign
@@ -199,6 +202,70 @@ struct AssetTrimSheet: View {
                 } footer: {
                     Text("Selecione o trecho do vídeo que será usado como \(track.rawValue.lowercased()).")
                 }
+
+                Section {
+                    if let narration {
+                        HStack {
+                            Image(systemName: "mic.fill").foregroundStyle(.orange)
+                            VStack(alignment: .leading) {
+                                Text(narration.name)
+                                Text(formatTime(narration.duration))
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button(role: .destructive) {
+                                self.narration = nil
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                        Button { showingNarration = true } label: {
+                            Label("Gravar de novo", systemImage: "mic.badge.plus")
+                        }
+                    } else {
+                        Button {
+                            player.pause()
+                            showingNarration = true
+                        } label: {
+                            Label("Gravar narração para este trecho", systemImage: "mic.badge.plus")
+                        }
+                    }
+                    HStack {
+                        Image(systemName: "speaker.wave.2")
+                        Text("Áudio do vídeo")
+                        Slider(value: $clipVolume, in: 0...1)
+                        Text("\(Int(clipVolume * 100))%")
+                            .monospacedDigit()
+                            .frame(width: 44)
+                    }
+                } header: {
+                    Text("Narração")
+                } footer: {
+                    Text("A narração fica vinculada a este clipe e acompanha ele em todos os episódios. Abaixe o áudio do vídeo para a voz ficar em destaque.")
+                }
+            }
+            .sheet(isPresented: $showingNarration) {
+                NarrationRecorderSheet(
+                    title: "Narração",
+                    hint: "Grave até \(formatTime(endTime - startTime)); o excedente é cortado no fim do clipe.",
+                    onRecordingChanged: { recording in
+                        guard recording else {
+                            player.pause()
+                            return
+                        }
+                        player.isMuted = true
+                        player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+                        player.currentItem?.forwardPlaybackEndTime = CMTime(seconds: endTime, preferredTimescale: 600)
+                        player.play()
+                    },
+                    onSave: { asset in
+                        player.isMuted = false
+                        narration = asset
+                        if clipVolume > 0.3 { clipVolume = 0.3 }
+                    }
+                )
             }
             .navigationTitle("Aparar vídeo")
             .navigationBarTitleDisplayMode(.inline)
@@ -212,7 +279,12 @@ struct AssetTrimSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Atribuir") {
                         player.pause()
-                        onAssign(startTime, endTime)
+                        onAssign(ClipSelection(
+                            startTime: startTime,
+                            endTime: endTime,
+                            narration: narration,
+                            clipVolume: clipVolume
+                        ))
                         dismiss()
                     }
                     .disabled(asset.duration < minimumDuration || endTime <= startTime)
@@ -332,6 +404,11 @@ extension AssetType {
 
 struct AssetImportSheet: View {
     let onComplete: (MediaAsset) -> Void
+
+    init(initialType: AssetType = .video, onComplete: @escaping (MediaAsset) -> Void) {
+        self.onComplete = onComplete
+        self._selectedType = State(initialValue: initialType)
+    }
     
     @Environment(\.dismiss) private var dismiss
     @State private var showingVideoImporter = false

@@ -10,10 +10,27 @@ struct TranscriptionView: View {
     @State private var showingSubtitleImporter = false
     @State private var shareItem: TranscriptShareItem?
     @State private var errorMessage: String?
+    @State private var localeIdentifier = "pt-BR"
+
+    private let languages: [(id: String, name: String)] = [
+        ("pt-BR", "Português (Brasil)"),
+        ("pt-PT", "Português (Portugal)"),
+        ("en-US", "Inglês"),
+        ("es-ES", "Espanhol")
+    ]
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 16) {
+                Picker("Idioma da fala", selection: $localeIdentifier) {
+                    ForEach(languages, id: \.id) { language in
+                        Text(language.name).tag(language.id)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .disabled(isTranscribing)
+
                 if isTranscribing {
                     ProgressView("Transcrevendo no dispositivo…")
                 }
@@ -83,7 +100,10 @@ struct TranscriptionView: View {
         defer { isTranscribing = false }
 
         do {
-            let cues = try await TranscriptionService.shared.transcribeVideo(at: project.sourceVideoFileURL)
+            let cues = try await TranscriptionService.shared.transcribeVideo(
+                at: project.sourceVideoFileURL,
+                localeIdentifier: localeIdentifier
+            )
             transcript = SubtitleFile.srt(from: cues)
         } catch {
             errorMessage = "Falha na transcrição: \(error.localizedDescription)"

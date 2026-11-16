@@ -13,61 +13,35 @@ actor TimelineEngine {
         additionalAssets: [UUID: URL],
         settings: ExportSettings? = nil
     ) async throws -> CompositionBuildResult {
-        let processor = VideoProcessor.shared
-        var segments: [CompositionSegment] = []
-        
-        if let intro = episode.effectiveIntro, intro.isEnabled {
-            segments.append(CompositionSegment(
-                sourceType: intro.sourceType,
-                assetID: intro.assetID,
-                timeRange: CMTimeRange(
-                    start: CMTime(seconds: intro.startTime, preferredTimescale: 600),
-                    duration: CMTime(seconds: intro.duration, preferredTimescale: 600)
-                ),
-                targetTrack: .intro,
-                timelineStartTime: intro.timelineStartTime
-            ))
+        let segments = episode.storyline().map { item in
+            CompositionSegment(
+                sourceType: item.segment.sourceType,
+                assetID: item.segment.assetID,
+                timeRange: item.segment.timeRange,
+                targetTrack: item.track,
+                timelineStartTime: item.start,
+                overlapIn: item.overlap,
+                transition: item.segment.transition,
+                clipVolume: item.segment.clipVolume,
+                narrationAssetID: item.segment.narrationAssetID,
+                narrationVolume: item.segment.narrationLevel
+            )
         }
-        
-        for recap in episode.effectiveRecaps where recap.isEnabled {
-            segments.append(CompositionSegment(
-                sourceType: recap.sourceType,
-                assetID: recap.assetID,
-                timeRange: CMTimeRange(
-                    start: CMTime(seconds: recap.startTime, preferredTimescale: 600),
-                    duration: CMTime(seconds: recap.duration, preferredTimescale: 600)
-                ),
-                targetTrack: .recap,
-                timelineStartTime: recap.timelineStartTime
-            ))
+        let audioClips = episode.audioClips.map { clip in
+            CompositionAudioClip(
+                assetID: clip.assetID,
+                timelineStart: clip.timelineStart,
+                sourceStart: clip.sourceStart,
+                sourceEnd: clip.sourceEnd,
+                volume: clip.volume,
+                fadeIn: clip.fadeIn,
+                fadeOut: clip.fadeOut
+            )
         }
-        
-        segments.append(CompositionSegment(
-            sourceType: .mainVideo,
-            assetID: nil,
-            timeRange: CMTimeRange(
-                start: CMTime(seconds: episode.mainStart, preferredTimescale: 600),
-                duration: CMTime(seconds: episode.mainDuration, preferredTimescale: 600)
-            ),
-            targetTrack: .main,
-            timelineStartTime: episode.mainTimelineStartTime
-        ))
-        
-        if let outro = episode.effectiveOutro, outro.isEnabled {
-            segments.append(CompositionSegment(
-                sourceType: outro.sourceType,
-                assetID: outro.assetID,
-                timeRange: CMTimeRange(
-                    start: CMTime(seconds: outro.startTime, preferredTimescale: 600),
-                    duration: CMTime(seconds: outro.duration, preferredTimescale: 600)
-                ),
-                targetTrack: .outro,
-                timelineStartTime: outro.timelineStartTime
-            ))
-        }
-        
-        return try await processor.createComposition(
+
+        return try await VideoProcessor.shared.createComposition(
             from: segments,
+            audioClips: audioClips,
             sourceURL: project.sourceVideoFileURL,
             additionalAssets: additionalAssets,
             aspect: settings?.aspectRatio ?? project.aspectRatio,
@@ -89,92 +63,29 @@ actor TimelineEngine {
     }
     
     nonisolated func computeTrackSegments(for episode: Episode, project: Project) -> [TrackSegments] {
+        let items = episode.storyline()
+        let timelineEnd = items.map(\.end).max() ?? 0
         var tracks: [TrackType: [TimelineSegment]] = [:]
-        
-        for trackType in TrackType.allCases {
-            tracks[trackType] = []
-        }
-        
-        var currentTime = 0.0
-        var timelineEnd = 0.0
-        var previousDuration = 0.0
-        var hasPreviousSegment = false
-
-        func nextStart(_ customStart: Double?, duration: Double) -> Double {
-            let overlap = hasPreviousSegment ? min(0.35, min(previousDuration / 3, duration / 3)) : 0
-            return customStart ?? max(0, currentTime - overlap)
-        }
-
-        func updateCursor(startTime: Double, duration: Double) {
-            let endTime = startTime + duration
-            currentTime = max(currentTime, endTime)
-            timelineEnd = max(timelineEnd, endTime)
-            previousDuration = duration
-            hasPreviousSegment = true
-        }
-        
-        if let intro = episode.effectiveIntro, intro.isEnabled {
-            let startTime = nextStart(intro.timelineStartTime, duration: intro.duration)
-            tracks[.intro]?.append(TimelineSegment(
-                id: intro.id,
-                trackType: .intro,
-                startTime: startTime,
-                duration: intro.duration,
-                sourceStartTime: intro.startTime,
-                sourceEndTime: intro.endTime,
-                sourceType: intro.sourceType,
-                assetID: intro.assetID,
-                isEnabled: intro.isEnabled
+        for item in items {
+            let segment = item.segment
+            tracks[item.track, default: []].append(TimelineSegment(
+                id: segment.id,
+                trackType: item.track,
+                startTime: item.start,
+                duration: segment.duration,
+                sourceStartTime: segment.startTime,
+                sourceEndTime: segment.endTime,
+                sourceType: segment.sourceType,
+                assetID: segment.assetID,
+                isEnabled: segment.isEnabled,
+                overlapIn: item.overlap,
+                transition: segment.transition,
+                transitionDuration: segment.transitionDuration,
+                clipVolume: segment.clipVolume,
+                narrationAssetID: segment.narrationAssetID,
+                narrationVolume: segment.narrationLevel
             ))
-            updateCursor(startTime: startTime, duration: intro.duration)
         }
-        
-        for recap in episode.effectiveRecaps where recap.isEnabled {
-            let startTime = nextStart(recap.timelineStartTime, duration: recap.duration)
-            tracks[.recap]?.append(TimelineSegment(
-                id: recap.id,
-                trackType: .recap,
-                startTime: startTime,
-                duration: recap.duration,
-                sourceStartTime: recap.startTime,
-                sourceEndTime: recap.endTime,
-                sourceType: recap.sourceType,
-                assetID: recap.assetID,
-                isEnabled: recap.isEnabled
-            ))
-            updateCursor(startTime: startTime, duration: recap.duration)
-        }
-        
-        let mainStartTime = nextStart(episode.mainTimelineStartTime, duration: episode.mainDuration)
-        tracks[.main]?.append(TimelineSegment(
-            id: episode.id,
-            trackType: .main,
-            startTime: mainStartTime,
-            duration: episode.mainDuration,
-            sourceStartTime: episode.mainStart,
-            sourceEndTime: episode.mainEnd,
-            sourceType: .mainVideo,
-            assetID: nil,
-            isEnabled: true
-        ))
-        updateCursor(startTime: mainStartTime, duration: episode.mainDuration)
-        
-        if let outro = episode.effectiveOutro, outro.isEnabled {
-            let startTime = nextStart(outro.timelineStartTime, duration: outro.duration)
-            tracks[.outro]?.append(TimelineSegment(
-                id: outro.id,
-                trackType: .outro,
-                startTime: startTime,
-                duration: outro.duration,
-                sourceStartTime: outro.startTime,
-                sourceEndTime: outro.endTime,
-                sourceType: outro.sourceType,
-                assetID: outro.assetID,
-                isEnabled: outro.isEnabled
-            ))
-            updateCursor(startTime: startTime, duration: outro.duration)
-        }
-        
         return TrackType.allCases.compactMap { type in
             guard let segments = tracks[type], !segments.isEmpty else { return nil }
             return TrackSegments(trackType: type, segments: segments, totalDuration: timelineEnd)
@@ -252,6 +163,12 @@ struct TimelineSegment: Identifiable {
     var sourceType: SourceType
     var assetID: UUID?
     var isEnabled: Bool
+    var overlapIn: Double = 0
+    var transition: TransitionStyle = .dissolve
+    var transitionDuration: Double = 0.5
+    var clipVolume: Float = 1
+    var narrationAssetID: UUID?
+    var narrationVolume: Float = 1
     
     var endTime: Double { startTime + duration }
     var sourceDuration: Double { sourceEndTime - sourceStartTime }

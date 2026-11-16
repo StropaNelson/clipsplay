@@ -149,6 +149,9 @@ struct Episode: Codable, Identifiable {
     var useGlobalOutro: Bool
     var useGlobalRecap: Bool
     var mainTimelineStartTime: Double?
+    var storedMainClips: [VideoSegment]?
+    var storedTextOverlays: [TextOverlay]?
+    var storedAudioClips: [AudioClip]?
     
     init(index: Int, mainStart: Double, mainEnd: Double, introTemplate: SegmentTemplate?, outroTemplate: SegmentTemplate?, recapSettings: RecapSettings) {
         self.id = UUID()
@@ -190,32 +193,7 @@ struct Episode: Codable, Identifiable {
         for index in customRecapSegments.indices { customRecapSegments[index].timelineStartTime = nil }
     }
     var totalDuration: Double {
-        var cursor = 0.0
-        var timelineEnd = 0.0
-        var previousDuration = 0.0
-        var hasPreviousSegment = false
-
-        func append(duration: Double, at customStart: Double?) {
-            let overlap = hasPreviousSegment ? min(0.35, min(previousDuration / 3, duration / 3)) : 0
-            let start = customStart ?? max(0, cursor - overlap)
-            let end = start + duration
-            cursor = max(cursor, end)
-            timelineEnd = max(timelineEnd, end)
-            previousDuration = duration
-            hasPreviousSegment = true
-        }
-
-        if let intro = effectiveIntro, intro.isEnabled {
-            append(duration: intro.duration, at: intro.timelineStartTime)
-        }
-        for recap in effectiveRecaps where recap.isEnabled {
-            append(duration: recap.duration, at: recap.timelineStartTime)
-        }
-        append(duration: mainDuration, at: mainTimelineStartTime)
-        if let outro = effectiveOutro, outro.isEnabled {
-            append(duration: outro.duration, at: outro.timelineStartTime)
-        }
-        return timelineEnd
+        storyline().last.map { $0.start + $0.segment.duration } ?? 0
     }
     
     var effectiveIntro: VideoSegment? {
@@ -257,6 +235,11 @@ struct VideoSegment: Codable, Identifiable, Hashable {
     var trackIndex: Int
     var isEnabled: Bool
     var timelineStartTime: Double?
+    var transitionStyle: TransitionStyle?
+    var transitionLength: Double?
+    var volume: Float?
+    var narrationAssetID: UUID?
+    var narrationVolume: Float?
     
     init(
         id: UUID = UUID(),
@@ -266,7 +249,10 @@ struct VideoSegment: Codable, Identifiable, Hashable {
         assetID: UUID? = nil,
         trackIndex: Int = 0,
         isEnabled: Bool = true,
-        timelineStartTime: Double? = nil
+        timelineStartTime: Double? = nil,
+        transitionStyle: TransitionStyle? = nil,
+        narrationAssetID: UUID? = nil,
+        volume: Float? = nil
     ) {
         self.id = id
         self.startTime = startTime
@@ -276,6 +262,9 @@ struct VideoSegment: Codable, Identifiable, Hashable {
         self.trackIndex = trackIndex
         self.isEnabled = isEnabled
         self.timelineStartTime = timelineStartTime
+        self.transitionStyle = transitionStyle
+        self.narrationAssetID = narrationAssetID
+        self.volume = volume
     }
     
     var duration: Double { max(0, endTime - startTime) }
@@ -303,6 +292,8 @@ struct SegmentTemplate: Codable, Identifiable {
     var startTime: Double
     var endTime: Double
     var targetTrack: TrackType
+    var narrationAssetID: UUID?
+    var clipVolume: Float?
     
     init(name: String, sourceType: SourceType, assetID: UUID?, startTime: Double, endTime: Double, targetTrack: TrackType) {
         self.id = UUID()
@@ -315,7 +306,14 @@ struct SegmentTemplate: Codable, Identifiable {
     }
     
     func toSegment() -> VideoSegment {
-        VideoSegment(startTime: startTime, endTime: endTime, sourceType: sourceType, assetID: assetID)
+        VideoSegment(
+            startTime: startTime,
+            endTime: endTime,
+            sourceType: sourceType,
+            assetID: assetID,
+            narrationAssetID: narrationAssetID,
+            volume: clipVolume
+        )
     }
 }
 

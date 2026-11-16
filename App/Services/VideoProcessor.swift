@@ -2,6 +2,8 @@ import Foundation
 import AVFoundation
 import CoreMedia
 import UIKit
+import QuartzCore
+import CoreText
 
 actor VideoProcessor {
     static let shared = VideoProcessor()
@@ -104,6 +106,7 @@ actor VideoProcessor {
     
     func createComposition(
         from segments: [CompositionSegment],
+        audioClips: [CompositionAudioClip] = [],
         sourceURL: URL,
         additionalAssets: [UUID: URL],
         aspect: AspectRatio,
@@ -123,6 +126,10 @@ actor VideoProcessor {
             retainedAssets[url] = asset
             return asset
         }
+        func audioTrack(ofAsset assetID: UUID) async throws -> AVAssetTrack? {
+            guard let url = additionalAssets[assetID] else { return nil }
+            return try await loadAsset(url).loadTracks(withMediaType: .audio).first
+        }
 
         let asset = try loadAsset(sourceURL)
         let sourceVideoTracks = try await asset.loadTracks(withMediaType: .video)
@@ -134,28 +141,58 @@ actor VideoProcessor {
 
         let composition = AVMutableComposition()
         var videoLanes: [(track: AVMutableCompositionTrack, end: CMTime)] = []
-        var audioLanes: [AVMutableCompositionTrack] = []
+        var audioLanes: [(track: AVMutableCompositionTrack, end: CMTime)] = []
+        var audioPlacements: [AudioPlacement] = []
 
-        func lane(startingAt start: CMTime) throws -> Int {
+        func videoLane(startingAt start: CMTime) throws -> Int {
             if let index = videoLanes.firstIndex(where: { CMTimeCompare($0.end, start) <= 0 }) {
                 return index
             }
-            guard let video = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
-                  let audio = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            guard let video = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
                 throw ProcessorError.cannotCreateTrack
             }
             videoLanes.append((video, .zero))
-            audioLanes.append(audio)
             return videoLanes.count - 1
         }
 
-        let transitionLimit = 0.35
-        var cursor = CMTime.zero
-        var previousDuration: CMTime?
-        var clipLayouts: [CompositionClipLayout] = []
-        var audioLayouts: [(start: CMTime, end: CMTime, track: AVMutableCompositionTrack, hasAudio: Bool)] = []
+        func placeAudio(
+            _ track: AVAssetTrack,
+            sourceRange: CMTimeRange,
+            at start: CMTime,
+            volume: Float,
+            fadeIn: Double,
+            fadeOut: Double
+        ) async throws {
+            let available = try await track.load(.timeRange)
+            guard let range = intersection(of: sourceRange, with: available) else { return }
+            let placedStart = CMTimeAdd(start, CMTimeSubtract(range.start, sourceRange.start))
+            let end = CMTimeAdd(placedStart, range.duration)
+            let index: Int
+            if let free = audioLanes.firstIndex(where: { CMTimeCompare($0.end, placedStart) <= 0 }) {
+                index = free
+            } else {
+                guard let lane = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+                    throw ProcessorError.cannotCreateTrack
+                }
+                audioLanes.append((lane, .zero))
+                index = audioLanes.count - 1
+            }
+            try audioLanes[index].track.insertTimeRange(range, of: track, at: placedStart)
+            audioLanes[index].end = end
+            audioPlacements.append(AudioPlacement(
+                track: audioLanes[index].track,
+                start: placedStart,
+                end: end,
+                volume: volume,
+                fadeIn: fadeIn,
+                fadeOut: fadeOut
+            ))
+        }
 
-        for segment in segments where segment.timeRange.duration.seconds > 0 {
+        var clipLayouts: [CompositionClipLayout] = []
+        let playable = segments.filter { $0.timeRange.duration.seconds > 0 }
+
+        for (index, segment) in playable.enumerated() {
             let source: (video: AVAssetTrack, audio: AVAssetTrack?)
             switch segment.sourceType {
             case .mainVideo:
@@ -175,61 +212,75 @@ actor VideoProcessor {
             }
 
             let availableVideoRange = try await source.video.load(.timeRange)
-            guard let sourceTimeRange = intersection(
-                of: segment.timeRange,
-                with: availableVideoRange
-            ), CMTimeCompare(sourceTimeRange.duration, .zero) > 0 else {
+            guard let sourceTimeRange = intersection(of: segment.timeRange, with: availableVideoRange) else {
                 throw ProcessorError.invalidTimeRange
             }
-            let duration = sourceTimeRange.duration
-            let overlapDuration: CMTime
-            if let previousDuration {
-                let overlap = min(transitionLimit, min(previousDuration.seconds / 3, duration.seconds / 3))
-                overlapDuration = CMTime(seconds: max(0, overlap), preferredTimescale: 600)
-            } else {
-                overlapDuration = .zero
-            }
-
-            var start = segment.timelineStartTime.map {
-                CMTime(seconds: $0, preferredTimescale: 600)
-            } ?? CMTimeSubtract(cursor, overlapDuration)
+            var start = CMTime(seconds: segment.timelineStartTime, preferredTimescale: 600)
             if !start.seconds.isFinite || start.seconds < 0 { start = .zero }
-            let end = CMTimeAdd(start, duration)
-            let laneIndex = try lane(startingAt: start)
+            let end = CMTimeAdd(start, sourceTimeRange.duration)
+            let laneIndex = try videoLane(startingAt: start)
             let compositionVideoTrack = videoLanes[laneIndex].track
             try compositionVideoTrack.insertTimeRange(sourceTimeRange, of: source.video, at: start)
             videoLanes[laneIndex].end = end
 
             let naturalSize = try await source.video.load(.naturalSize)
-            let transform = try await source.video.load(.preferredTransform)
+            let preferredTransform = try await source.video.load(.preferredTransform)
             clipLayouts.append(CompositionClipLayout(
                 track: compositionVideoTrack,
                 start: start,
                 end: end,
                 naturalSize: naturalSize,
-                preferredTransform: transform
+                preferredTransform: preferredTransform,
+                transition: segment.transition
             ))
 
-            let compositionAudioTrack = audioLanes[laneIndex]
+            let fadeOut = index + 1 < playable.count ? playable[index + 1].overlapIn : 0
             if let sourceAudio = source.audio {
-                let availableAudioRange = try await sourceAudio.load(.timeRange)
-                if let audioTimeRange = intersection(of: sourceTimeRange, with: availableAudioRange),
-                   CMTimeCompare(audioTimeRange.duration, .zero) > 0 {
-                    let audioStart = CMTimeAdd(start, CMTimeSubtract(audioTimeRange.start, sourceTimeRange.start))
-                    let audioEnd = CMTimeAdd(audioStart, audioTimeRange.duration)
-                    try compositionAudioTrack.insertTimeRange(audioTimeRange, of: sourceAudio, at: audioStart)
-                    audioLayouts.append((audioStart, audioEnd, compositionAudioTrack, true))
-                }
+                try await placeAudio(
+                    sourceAudio,
+                    sourceRange: sourceTimeRange,
+                    at: start,
+                    volume: segment.clipVolume,
+                    fadeIn: segment.overlapIn,
+                    fadeOut: fadeOut
+                )
             }
-
-            cursor = CMTimeCompare(cursor, end) > 0 ? cursor : end
-            previousDuration = duration
+            if let narrationID = segment.narrationAssetID,
+               let narration = try await audioTrack(ofAsset: narrationID) {
+                let narrationRange = CMTimeRange(start: .zero, duration: sourceTimeRange.duration)
+                try await placeAudio(
+                    narration,
+                    sourceRange: narrationRange,
+                    at: start,
+                    volume: segment.narrationVolume,
+                    fadeIn: 0,
+                    fadeOut: 0
+                )
+            }
         }
 
         guard !clipLayouts.isEmpty else { throw ProcessorError.invalidTimeRange }
+        let videoEnd = clipLayouts.map(\.end).max { CMTimeCompare($0, $1) < 0 } ?? .zero
 
-        for audioTrack in audioLanes where audioTrack.segments.isEmpty {
-            composition.removeTrack(audioTrack)
+        for clip in audioClips {
+            guard let track = try await audioTrack(ofAsset: clip.assetID) else {
+                throw ProcessorError.missingAsset
+            }
+            let start = CMTime(seconds: max(0, clip.timelineStart), preferredTimescale: 600)
+            let maxDuration = CMTimeSubtract(videoEnd, start).seconds
+            let duration = min(clip.sourceEnd - clip.sourceStart, maxDuration)
+            guard duration > 0.05 else { continue }
+            try await placeAudio(
+                track,
+                sourceRange: CMTimeRange(
+                    start: CMTime(seconds: clip.sourceStart, preferredTimescale: 600),
+                    duration: CMTime(seconds: duration, preferredTimescale: 600)
+                ),
+                at: start,
+                volume: clip.volume,
+                fadeIn: clip.fadeIn,
+                fadeOut: clip.fadeOut
+            )
         }
 
         let renderSize = calculateRenderSize(
@@ -238,19 +289,93 @@ actor VideoProcessor {
             naturalSize: sourceSize,
             transform: sourceTransform
         )
-        let videoComposition = makeCrossfadeVideoComposition(
+        let videoComposition = makeTransitionVideoComposition(
             clips: clipLayouts,
             renderSize: renderSize,
             fitMode: fitMode,
             duration: composition.duration
         )
-        let audioMix = makeCrossfadeAudioMix(layouts: audioLayouts)
         return CompositionBuildResult(
             composition: composition,
             videoComposition: videoComposition,
-            audioMix: audioMix,
+            audioMix: makeAudioMix(audioPlacements),
             sourceAssets: retainedAssets.values.map { $0 as AVAsset }
         )
+    }
+
+    /// Adds burned-in text for export. Core Animation layers can't be used with AVPlayerItem,
+    /// so the editor draws the same overlays with SwiftUI during preview.
+    func applyTextOverlays(_ overlays: [TextOverlay], to videoComposition: AVVideoComposition) -> AVVideoComposition {
+        let visible = overlays.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.duration > 0 }
+        guard !visible.isEmpty,
+              let mutable = videoComposition.mutableCopy() as? AVMutableVideoComposition else {
+            return videoComposition
+        }
+        let size = mutable.renderSize
+        let parent = CALayer()
+        parent.frame = CGRect(origin: .zero, size: size)
+        parent.isGeometryFlipped = true
+        let videoLayer = CALayer()
+        videoLayer.frame = parent.frame
+        parent.addSublayer(videoLayer)
+        for overlay in visible {
+            parent.addSublayer(Self.textLayer(for: overlay, renderSize: size))
+        }
+        mutable.animationTool = AVVideoCompositionCoreAnimationTool(
+            postProcessingAsVideoLayer: videoLayer,
+            in: parent
+        )
+        return mutable
+    }
+
+    private static func textLayer(for overlay: TextOverlay, renderSize size: CGSize) -> CALayer {
+        let fontSize = max(8, CGFloat(overlay.fontScale) * size.height)
+        let font = UIFont.systemFont(ofSize: fontSize, weight: overlay.isBold ? .bold : .regular)
+        let maxWidth = size.width * 0.9
+        let bounds = (overlay.text as NSString).boundingRect(
+            with: CGSize(width: maxWidth, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font],
+            context: nil
+        ).integral
+        let padding = overlay.style == .box ? fontSize * 0.35 : 0
+
+        let container = CALayer()
+        container.bounds = CGRect(x: 0, y: 0, width: bounds.width + padding * 2, height: bounds.height + padding * 2)
+        container.position = CGPoint(x: overlay.positionX * size.width, y: overlay.positionY * size.height)
+        if overlay.style == .box {
+            container.backgroundColor = UIColor.black.withAlphaComponent(0.6).cgColor
+            container.cornerRadius = fontSize * 0.25
+        }
+
+        let text = CATextLayer()
+        text.string = overlay.text
+        text.font = CTFontCreateWithName(font.fontName as CFString, fontSize, nil)
+        text.fontSize = fontSize
+        text.foregroundColor = overlay.color.uiColor.cgColor
+        text.alignmentMode = .center
+        text.isWrapped = true
+        text.contentsScale = 2
+        text.frame = CGRect(x: padding, y: padding, width: bounds.width, height: bounds.height)
+        if overlay.style == .shadow {
+            text.shadowColor = UIColor.black.cgColor
+            text.shadowOpacity = 0.85
+            text.shadowRadius = fontSize * 0.08
+            text.shadowOffset = .zero
+        }
+        container.addSublayer(text)
+
+        container.opacity = 0
+        let fade = min(0.2 / max(overlay.duration, 0.01), 0.25)
+        let animation = CAKeyframeAnimation(keyPath: "opacity")
+        animation.values = [0, 1, 1, 0]
+        animation.keyTimes = [0, NSNumber(value: fade), NSNumber(value: 1 - fade), 1]
+        animation.beginTime = overlay.startTime <= 0 ? AVCoreAnimationBeginTimeAtZero : overlay.startTime
+        animation.duration = overlay.duration
+        animation.fillMode = .both
+        animation.isRemovedOnCompletion = false
+        container.add(animation, forKey: "visibility")
+        return container
     }
     
     func exportComposition(
@@ -275,37 +400,7 @@ actor VideoProcessor {
         try await runExport(ExportSessionBox(exporter))
     }
     
-    func createVideoComposition(for track: AVCompositionTrack, renderSize: CGSize, transform: CGAffineTransform, sourceSize: CGSize, fitMode: FitMode) -> AVMutableVideoComposition {
-        let videoComp = AVMutableVideoComposition()
-        videoComp.renderSize = renderSize
-        videoComp.frameDuration = CMTime(value: 1, timescale: 30)
-        
-        let instruction = AVMutableVideoCompositionInstruction()
-        instruction.timeRange = CMTimeRange(start: .zero, duration: track.timeRange.duration)
-        
-        let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: track)
-        
-        let transformedRect = CGRect(origin: .zero, size: sourceSize).applying(transform)
-        var base = transform.concatenating(CGAffineTransform(translationX: -transformedRect.minX, y: -transformedRect.minY))
-        let orientedW = abs(transformedRect.width)
-        let orientedH = abs(transformedRect.height)
-        let sx = renderSize.width / max(orientedW, 1)
-        let sy = renderSize.height / max(orientedH, 1)
-        let scale = fitMode == .fill ? max(sx, sy) : min(sx, sy)
-        base = base.concatenating(CGAffineTransform(scaleX: scale, y: scale))
-        let scaledW = orientedW * scale
-        let scaledH = orientedH * scale
-        let tx = (renderSize.width - scaledW) / 2
-        let ty = (renderSize.height - scaledH) / 2
-        base = base.concatenating(CGAffineTransform(translationX: tx, y: ty))
-        layer.setTransform(base, at: .zero)
-        
-        instruction.layerInstructions = [layer]
-        videoComp.instructions = [instruction]
-        return videoComp
-    }
-
-    private func makeCrossfadeVideoComposition(
+    private func makeTransitionVideoComposition(
         clips: [CompositionClipLayout],
         renderSize: CGSize,
         fitMode: FitMode,
@@ -329,29 +424,37 @@ actor VideoProcessor {
                 .sorted { CMTimeCompare($0.start, $1.start) < 0 }
             let instruction = AVMutableVideoCompositionInstruction()
             instruction.timeRange = CMTimeRange(start: start, end: end)
+            instruction.backgroundColor = UIColor.black.cgColor
             guard !activeClips.isEmpty else {
-                instruction.backgroundColor = UIColor.black.cgColor
                 instructions.append(instruction)
                 continue
             }
-            let layers = activeClips.map { clip -> AVMutableVideoCompositionLayerInstruction in
+
+            func layer(for clip: CompositionClipLayout) -> (AVMutableVideoCompositionLayerInstruction, CGAffineTransform) {
                 let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: clip.track)
-                layer.setTransform(
-                    renderTransform(for: clip, renderSize: renderSize, fitMode: fitMode),
-                    at: start
-                )
+                let base = renderTransform(for: clip, renderSize: renderSize, fitMode: fitMode)
+                layer.setTransform(base, at: start)
                 layer.setOpacity(1, at: start)
-                return layer
+                return (layer, base)
             }
 
-            if activeClips.count == 2 {
-                let outgoing = layers[0]
-                let incoming = layers[1]
-                let transitionRange = CMTimeRange(start: start, end: end)
-                incoming.setOpacityRamp(fromStartOpacity: 0, toEndOpacity: 1, timeRange: transitionRange)
+            if activeClips.count >= 2 {
+                let outgoingClip = activeClips[activeClips.count - 2]
+                let incomingClip = activeClips[activeClips.count - 1]
+                let (outgoing, outgoingBase) = layer(for: outgoingClip)
+                let (incoming, incomingBase) = layer(for: incomingClip)
+                let range = CMTimeRange(start: start, end: end)
+                applyTransition(
+                    incomingClip.transition,
+                    range: range,
+                    renderSize: renderSize,
+                    incoming: (incoming, incomingBase),
+                    outgoing: (outgoing, outgoingBase),
+                    instruction: instruction
+                )
                 instruction.layerInstructions = [incoming, outgoing]
             } else {
-                instruction.layerInstructions = layers
+                instruction.layerInstructions = activeClips.map { layer(for: $0).0 }
             }
             instructions.append(instruction)
         }
@@ -361,6 +464,82 @@ actor VideoProcessor {
         videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
         videoComposition.instructions = instructions
         return videoComposition
+    }
+
+    private func applyTransition(
+        _ style: TransitionStyle,
+        range: CMTimeRange,
+        renderSize: CGSize,
+        incoming: (layer: AVMutableVideoCompositionLayerInstruction, base: CGAffineTransform),
+        outgoing: (layer: AVMutableVideoCompositionLayerInstruction, base: CGAffineTransform),
+        instruction: AVMutableVideoCompositionInstruction
+    ) {
+        let width = renderSize.width
+        let height = renderSize.height
+        func shifted(_ base: CGAffineTransform, x: CGFloat, y: CGFloat) -> CGAffineTransform {
+            base.concatenating(CGAffineTransform(translationX: x, y: y))
+        }
+
+        switch style {
+        case .none:
+            break
+        case .dissolve:
+            incoming.layer.setOpacityRamp(fromStartOpacity: 0, toEndOpacity: 1, timeRange: range)
+        case .fadeBlack, .fadeWhite:
+            if style == .fadeWhite {
+                instruction.backgroundColor = UIColor.white.cgColor
+            }
+            let half = CMTimeMultiplyByFloat64(range.duration, multiplier: 0.5)
+            let middle = CMTimeAdd(range.start, half)
+            outgoing.layer.setOpacityRamp(
+                fromStartOpacity: 1,
+                toEndOpacity: 0,
+                timeRange: CMTimeRange(start: range.start, end: middle)
+            )
+            incoming.layer.setOpacity(0, at: range.start)
+            incoming.layer.setOpacityRamp(
+                fromStartOpacity: 0,
+                toEndOpacity: 1,
+                timeRange: CMTimeRange(start: middle, end: CMTimeRangeGetEnd(range))
+            )
+        case .slideLeft:
+            incoming.layer.setTransformRamp(
+                fromStart: shifted(incoming.base, x: width, y: 0),
+                toEnd: incoming.base,
+                timeRange: range
+            )
+        case .slideRight:
+            incoming.layer.setTransformRamp(
+                fromStart: shifted(incoming.base, x: -width, y: 0),
+                toEnd: incoming.base,
+                timeRange: range
+            )
+        case .slideUp:
+            incoming.layer.setTransformRamp(
+                fromStart: shifted(incoming.base, x: 0, y: height),
+                toEnd: incoming.base,
+                timeRange: range
+            )
+        case .push:
+            incoming.layer.setTransformRamp(
+                fromStart: shifted(incoming.base, x: width, y: 0),
+                toEnd: incoming.base,
+                timeRange: range
+            )
+            outgoing.layer.setTransformRamp(
+                fromStart: outgoing.base,
+                toEnd: shifted(outgoing.base, x: -width, y: 0),
+                timeRange: range
+            )
+        case .zoom:
+            let center = CGPoint(x: width / 2, y: height / 2)
+            let zoomed = incoming.base
+                .concatenating(CGAffineTransform(translationX: -center.x, y: -center.y))
+                .concatenating(CGAffineTransform(scaleX: 1.3, y: 1.3))
+                .concatenating(CGAffineTransform(translationX: center.x, y: center.y))
+            incoming.layer.setTransformRamp(fromStart: zoomed, toEnd: incoming.base, timeRange: range)
+            incoming.layer.setOpacityRamp(fromStartOpacity: 0, toEndOpacity: 1, timeRange: range)
+        }
     }
 
     private func intersection(of requestedRange: CMTimeRange, with availableRange: CMTimeRange) -> CMTimeRange? {
@@ -399,38 +578,41 @@ actor VideoProcessor {
         return transform
     }
 
-    private func makeCrossfadeAudioMix(
-        layouts: [(start: CMTime, end: CMTime, track: AVMutableCompositionTrack, hasAudio: Bool)]
-    ) -> AVAudioMix? {
-        guard layouts.contains(where: \.hasAudio) else { return nil }
+    private func makeAudioMix(_ placements: [AudioPlacement]) -> AVAudioMix? {
+        guard !placements.isEmpty else { return nil }
         var parametersByTrack: [CMPersistentTrackID: AVMutableAudioMixInputParameters] = [:]
-        for layout in layouts where layout.hasAudio {
-            let parameters = parametersByTrack[layout.track.trackID]
-                ?? AVMutableAudioMixInputParameters(track: layout.track)
-            parameters.setVolume(1, at: layout.start)
-            parametersByTrack[layout.track.trackID] = parameters
-        }
-
-        if layouts.count > 1 {
-            for index in 1..<layouts.count {
-                let outgoing = layouts[index - 1]
-                let incoming = layouts[index]
-                let overlapStart = incoming.start
-                let overlapEnd = CMTimeCompare(outgoing.end, incoming.end) < 0 ? outgoing.end : incoming.end
-                guard CMTimeCompare(overlapEnd, overlapStart) > 0 else { continue }
-                let range = CMTimeRange(start: overlapStart, end: overlapEnd)
-
-                if outgoing.hasAudio,
-                   let parameters = parametersByTrack[outgoing.track.trackID] {
-                    parameters.setVolumeRamp(fromStartVolume: 1, toEndVolume: 0, timeRange: range)
-                }
-                if incoming.hasAudio,
-                   let parameters = parametersByTrack[incoming.track.trackID] {
-                    parameters.setVolumeRamp(fromStartVolume: 0, toEndVolume: 1, timeRange: range)
-                }
+        for placement in placements.sorted(by: { CMTimeCompare($0.start, $1.start) < 0 }) {
+            let parameters = parametersByTrack[placement.track.trackID]
+                ?? AVMutableAudioMixInputParameters(track: placement.track)
+            let duration = CMTimeSubtract(placement.end, placement.start).seconds
+            guard duration > 0 else { continue }
+            var fadeIn = max(0, placement.fadeIn)
+            var fadeOut = max(0, placement.fadeOut)
+            if fadeIn + fadeOut > duration {
+                let scale = duration / (fadeIn + fadeOut)
+                fadeIn *= scale
+                fadeOut *= scale
             }
+            let volume = max(0, placement.volume)
+            if fadeIn > 0.01 {
+                parameters.setVolumeRamp(
+                    fromStartVolume: 0,
+                    toEndVolume: volume,
+                    timeRange: CMTimeRange(start: placement.start, duration: CMTime(seconds: fadeIn, preferredTimescale: 600))
+                )
+            } else {
+                parameters.setVolume(volume, at: placement.start)
+            }
+            if fadeOut > 0.01 {
+                let fadeDuration = CMTime(seconds: fadeOut, preferredTimescale: 600)
+                parameters.setVolumeRamp(
+                    fromStartVolume: volume,
+                    toEndVolume: 0,
+                    timeRange: CMTimeRange(start: CMTimeSubtract(placement.end, fadeDuration), duration: fadeDuration)
+                )
+            }
+            parametersByTrack[placement.track.trackID] = parameters
         }
-
         let mix = AVMutableAudioMix()
         mix.inputParameters = Array(parametersByTrack.values)
         return mix
@@ -544,7 +726,22 @@ struct CompositionSegment {
     let assetID: UUID?
     let timeRange: CMTimeRange
     let targetTrack: TrackType
-    let timelineStartTime: Double?
+    let timelineStartTime: Double
+    let overlapIn: Double
+    let transition: TransitionStyle
+    let clipVolume: Float
+    let narrationAssetID: UUID?
+    let narrationVolume: Float
+}
+
+struct CompositionAudioClip {
+    let assetID: UUID
+    let timelineStart: Double
+    let sourceStart: Double
+    let sourceEnd: Double
+    let volume: Float
+    let fadeIn: Double
+    let fadeOut: Double
 }
 
 struct CompositionBuildResult {
@@ -560,6 +757,16 @@ private struct CompositionClipLayout {
     let end: CMTime
     let naturalSize: CGSize
     let preferredTransform: CGAffineTransform
+    let transition: TransitionStyle
+}
+
+private struct AudioPlacement {
+    let track: AVMutableCompositionTrack
+    let start: CMTime
+    let end: CMTime
+    let volume: Float
+    let fadeIn: Double
+    let fadeOut: Double
 }
 
 enum ProcessorError: LocalizedError {
@@ -586,23 +793,6 @@ enum ProcessorError: LocalizedError {
         case .unsupportedOperation: return "Operação não suportada para este tipo de segmento."
         case .invalidTimeRange: return "Intervalo de tempo inválido."
         case .missingAssetFile(let name): return "Arquivo de mídia não encontrado: \(name). Importe-o novamente."
-        }
-    }
-}
-
-extension VideoProcessor {
-    func validateComposition(_ composition: AVComposition) -> Bool {
-        guard let videoTrack = composition.tracks(withMediaType: .video).first else { return false }
-        return videoTrack.timeRange.duration.seconds > 0
-    }
-    
-    func estimateExportDuration(for composition: AVComposition, preset: String) -> TimeInterval {
-        let duration = composition.duration.seconds
-        switch preset {
-        case AVAssetExportPreset640x480: return duration * 0.3
-        case AVAssetExportPreset1280x720: return duration * 0.5
-        case AVAssetExportPreset1920x1080: return duration * 0.8
-        default: return duration * 1.2
         }
     }
 }
