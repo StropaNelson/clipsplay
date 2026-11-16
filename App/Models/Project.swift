@@ -26,6 +26,7 @@ struct Project: Codable, Identifiable {
     var transcriptSRT: String?
     /// Word timings of the transcript, against the source video.
     var transcriptWords: [TranscriptWord]?
+    var sceneCuts: [Double]?
     var storedGlobalOverlays: [TextOverlay]?
     var storedGlobalAudioClips: [AudioClip]?
     /// Reusable text style templates ("identidade") saved by the user.
@@ -208,6 +209,7 @@ struct Episode: Codable, Identifiable {
     var storedAudioClips: [AudioClip]?
     var storedMediaOverlays: [MediaOverlay]?
     var storedMarkers: [TimelineMarker]?
+    var displayTitle: String?
     
     init(index: Int, mainStart: Double, mainEnd: Double, introTemplate: SegmentTemplate?, outroTemplate: SegmentTemplate?, recapSettings: RecapSettings) {
         self.id = UUID()
@@ -238,7 +240,7 @@ struct Episode: Codable, Identifiable {
     
     var mainDuration: Double { mainEnd - mainStart }
 
-    var title: String { "Episódio \(index + 1)" }
+    var title: String { displayTitle ?? "Episódio \(index + 1)" }
 
     /// Drops fixed timeline positions so clips flow sequentially (intro → recap → main → outro).
     mutating func clearTimelinePins() {

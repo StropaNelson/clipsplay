@@ -43,11 +43,13 @@ struct NarrationRequest: Identifiable {
 @MainActor
 struct EditorView: View {
     let project: Project
+    private let initialOperation: ProjectOperation?
     @StateObject private var viewModel: EditorViewModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var showingTranscription = false
     @State private var showingTranscriptEditor = false
+    @State private var showingClipSuggestions = false
     @State private var sidePanel: EditorPanel? = .media
     @State private var sheetPanel: EditorPanel?
     @State private var clipPickRequest: ClipPickRequest?
@@ -60,9 +62,11 @@ struct EditorView: View {
     @State private var narrationRequest: NarrationRequest?
     @State private var showingAddOverlay = false
     @State private var editingMediaOverlay: MediaOverlay?
+    @State private var didOpenInitialOperation = false
 
-    init(project: Project) {
+    init(project: Project, initialOperation: ProjectOperation? = nil) {
         self.project = project
+        self.initialOperation = initialOperation
         self._viewModel = StateObject(wrappedValue: EditorViewModel(project: project))
     }
 
@@ -148,6 +152,17 @@ struct EditorView: View {
                 onWords: { viewModel.saveTranscriptWords($0) }
             )
         }
+        .sheet(isPresented: $showingClipSuggestions) {
+            ClipSuggestionsView(
+                words: viewModel.editableTranscriptWords,
+                sourceDuration: viewModel.currentProject.sourceVideoDuration,
+                sourceURL: viewModel.currentProject.sourceVideoFileURL,
+                storedSceneCuts: viewModel.currentProject.sceneCuts ?? [],
+                onSceneCuts: { viewModel.saveSceneCuts($0) },
+                onSeek: { viewModel.seekToSourceTime($0) },
+                onCreate: { viewModel.createSuggestedEpisodes($0, autoFraming: $1) }
+            )
+        }
         .sheet(item: $sheetPanel) { panel in
             panelContent(panel)
         }
@@ -186,6 +201,7 @@ struct EditorView: View {
         }
         .task {
             await viewModel.loadProjectData()
+            openInitialOperationIfNeeded()
         }
     }
 
@@ -419,6 +435,25 @@ struct EditorView: View {
             }
         } else {
             sheetPanel = panel
+        }
+    }
+
+    private func openInitialOperationIfNeeded() {
+        guard !didOpenInitialOperation else { return }
+        didOpenInitialOperation = true
+        switch initialOperation {
+        case .multiply:
+            open(.export)
+        case .podcast:
+            if viewModel.editableTranscriptWords.isEmpty {
+                showingTranscription = true
+            } else {
+                showingTranscriptEditor = true
+            }
+        case .episodes:
+            open(.episodes)
+        case .none:
+            break
         }
     }
 
@@ -661,6 +696,7 @@ struct EditorView: View {
                     toolButton("Encerramento", icon: "flag.checkered") { clipPickRequest = ClipPickRequest(track: .outro) }
                     Divider().frame(height: 30).overlay(EditorTheme.divider)
                     toolButton("Legendas", icon: "captions.bubble") { showingTranscription = true }
+                    toolButton("Sugerir", icon: "wand.and.stars") { showingClipSuggestions = true }
                     toolButton("Editar fala", icon: "text.badge.minus") {
                         if viewModel.editableTranscriptWords.isEmpty {
                             viewModel.errorMessage = "Gere a transcrição primeiro em Legendas."
@@ -943,6 +979,7 @@ class EditorViewModel: ObservableObject {
     @Published var showDuplicateSheet = false
     @Published var errorMessage: String?
     @Published var exportProgress: BatchExportProgress?
+    @Published var lastExportZIPURL: URL?
 
     private var project: Project
     private let storage = ProjectStorage.shared
@@ -2292,6 +2329,65 @@ class EditorViewModel: ObservableObject {
         Task { await persistProjectChanges() }
     }
 
+    func saveSceneCuts(_ cuts: [Double]) {
+        project.sceneCuts = cuts.isEmpty ? nil : cuts
+        Task { await persistProjectChanges(reloadPreview: false) }
+    }
+
+    func createSuggestedEpisodes(_ suggestions: [ClipSuggestion], autoFraming: Bool) {
+        guard !suggestions.isEmpty else { return }
+        checkpoint()
+        let hadCaptions = episodes.contains { $0.textOverlays.contains { $0.isCaption == true } }
+        var selected: Episode?
+        var nextIndex = (episodes.map(\.index).max() ?? -1) + 1
+        var outputCounts: [ClipSuggestionKind: Int] = [:]
+        for episode in episodes {
+            for kind in ClipSuggestionKind.allCases where episode.displayTitle?.hasPrefix(kind.outputName) == true {
+                outputCounts[kind, default: 0] += 1
+            }
+        }
+        for suggestion in suggestions.sorted(by: { $0.start < $1.start }) {
+            let start = max(0, min(suggestion.start, project.sourceVideoDuration))
+            let end = max(start, min(suggestion.end, project.sourceVideoDuration))
+            guard end - start > 0.2 else { continue }
+            var episode = Episode(
+                index: nextIndex,
+                mainStart: start,
+                mainEnd: end,
+                introTemplate: nil,
+                outroTemplate: nil,
+                recapSettings: RecapSettings(enabled: false)
+            )
+            var clip = VideoSegment(
+                startTime: start,
+                endTime: end,
+                sourceType: .mainVideo,
+                transitionStyle: .none
+            )
+            if autoFraming {
+                var adjustments = clip.clipAdjustments
+                adjustments.autoFraming = true
+                clip.clipAdjustments = adjustments
+            }
+            episode.mainClips = [clip]
+            let outputNumber = (outputCounts[suggestion.kind] ?? 0) + 1
+            outputCounts[suggestion.kind] = outputNumber
+            episode.displayTitle = "\(suggestion.kind.outputName) \(outputNumber)"
+            episode.useGlobalIntro = false
+            episode.useGlobalOutro = false
+            episode.useGlobalRecap = false
+            episodes.append(episode)
+            selected = episode
+            nextIndex += 1
+        }
+        guard let selected else { return }
+        selectedEpisode = selected
+        if hadCaptions, let srt = project.transcriptSRT, let cues = try? SubtitleFile.parse(srt) {
+            applyCaptions(cues, dynamic: captionsAreDynamic, recordUndo: false)
+        }
+        Task { await persistProjectChanges() }
+    }
+
     func saveTextTemplate(_ template: TextStyleTemplate) {
         project.textTemplates = (project.textTemplates ?? []) + [template]
         Task { @MainActor in await persistProjectChanges() }
@@ -2459,6 +2555,7 @@ class EditorViewModel: ObservableObject {
         }
         showExportProgress = true
         exportProgress = nil
+        lastExportZIPURL = nil
 
         do {
             let result = try await exportManager.exportAllEpisodes(
@@ -2472,7 +2569,7 @@ class EditorViewModel: ObservableObject {
             }
 
             if exportSettings.includeCovers, !result.results.isEmpty {
-                _ = try await exportManager.createZIP(from: result.results, projectName: project.name)
+                lastExportZIPURL = try await exportManager.createZIP(from: result.results, projectName: project.name)
             }
 
             showExportProgress = false
@@ -2498,6 +2595,7 @@ class EditorViewModel: ObservableObject {
         guard !variants.isEmpty else { return }
         showExportProgress = true
         exportProgress = nil
+        lastExportZIPURL = nil
         var allResults: [ExportResult] = []
         do {
             for (index, variant) in variants.enumerated() {
@@ -2520,7 +2618,7 @@ class EditorViewModel: ObservableObject {
             }
             if allResults.count > 1 {
                 do {
-                    _ = try await exportManager.createZIP(from: allResults, projectName: "\(project.name)_multiplicar")
+                    lastExportZIPURL = try await exportManager.createZIP(from: allResults, projectName: "\(project.name)_multiplicar")
                 } catch {
                     errorMessage = "Vídeos exportados, mas o ZIP falhou: \(Self.describe(error))"
                 }

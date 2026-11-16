@@ -115,7 +115,7 @@ struct EpisodeRowView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Episódio \(episode.index + 1)")
+                Text(episode.title)
                     .font(.headline)
                 Spacer()
                 Text(formatDuration(episode.totalDuration))

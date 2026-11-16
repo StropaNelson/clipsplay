@@ -41,8 +41,10 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
 
     private let ciContext = CIContext()
     private let contextQueue = DispatchQueue(label: "clipstudio.filtercompositor.rendercontext")
+    private let framingQueue = DispatchQueue(label: "clipstudio.filtercompositor.framing")
     private var renderContext: AVVideoCompositionRenderContext?
     private var shouldCancel = false
+    private var framingTrackers: [CMPersistentTrackID: AutoFramingTracker] = [:]
 
     var sourcePixelBufferAttributes: [String: any Sendable]? {
         [String(kCVPixelBufferPixelFormatTypeKey): [
@@ -122,6 +124,7 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
         for (trackID, info) in clips + overlays {
             guard let sourceBuffer = request.sourceFrame(byTrackID: trackID) else { continue }
             var image = CIImage(cvImageBuffer: sourceBuffer)
+            let framingSource = image
             if let adjustments = info.adjustments, !adjustments.isIdentity {
                 image = applyAdjustments(adjustments, to: image)
             }
@@ -135,7 +138,14 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
             var opacity: Double
             switch info.kind {
             case .clip:
-                transform = clipTransform(info, renderSize: renderSize, fitMode: composition.fitMode)
+                transform = clipTransform(
+                    info,
+                    renderSize: renderSize,
+                    fitMode: composition.fitMode,
+                    image: framingSource,
+                    trackID: trackID,
+                    time: time
+                )
                 opacity = 1
                 if let incoming, let outgoing, incoming.0 == trackID || outgoing.0 == trackID {
                     let isIncoming = incoming.0 == trackID
@@ -227,14 +237,22 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
     """)
 
     /// Same placement math as the instruction pipeline: fit/fill + user transform.
-    private func clipTransform(_ info: TrackRenderInfo, renderSize: CGSize, fitMode: FitMode) -> CGAffineTransform {
+    private func clipTransform(
+        _ info: TrackRenderInfo,
+        renderSize: CGSize,
+        fitMode: FitMode,
+        image: CIImage,
+        trackID: CMPersistentTrackID,
+        time: Double
+    ) -> CGAffineTransform {
         let transformedRect = CGRect(origin: .zero, size: info.naturalSize)
             .applying(info.preferredTransform)
         let orientedWidth = abs(transformedRect.width)
         let orientedHeight = abs(transformedRect.height)
         let scaleX = renderSize.width / max(orientedWidth, 1)
         let scaleY = renderSize.height / max(orientedHeight, 1)
-        let scale = fitMode == .fill ? max(scaleX, scaleY) : min(scaleX, scaleY)
+        let effectiveFitMode: FitMode = info.adjustments?.autoFraming == true ? .fill : fitMode
+        let scale = effectiveFitMode == .fill ? max(scaleX, scaleY) : min(scaleX, scaleY)
         var transform = info.preferredTransform.concatenating(
             CGAffineTransform(translationX: -transformedRect.minX, y: -transformedRect.minY)
         )
@@ -255,7 +273,31 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
                     y: center.y + CGFloat(user.offsetY) * renderSize.height
                 ))
         }
+        if info.adjustments?.autoFraming == true,
+           let target = autoFramingTarget(trackID: trackID, clipStart: info.start, image: image, time: time) {
+            let mappedTarget = target.applying(transform)
+            let mappedSource = CGRect(origin: .zero, size: info.naturalSize).applying(transform)
+            let desired = CGPoint(x: renderSize.width * 0.5, y: renderSize.height * 0.42)
+            var dx = desired.x - mappedTarget.x
+            var dy = desired.y - mappedTarget.y
+            let minDX = renderSize.width - mappedSource.maxX
+            let maxDX = -mappedSource.minX
+            let minDY = renderSize.height - mappedSource.maxY
+            let maxDY = -mappedSource.minY
+            if minDX <= maxDX { dx = min(max(dx, minDX), maxDX) } else { dx = 0 }
+            if minDY <= maxDY { dy = min(max(dy, minDY), maxDY) } else { dy = 0 }
+            transform = transform.concatenating(CGAffineTransform(translationX: dx, y: dy))
+        }
         return transform
+    }
+
+    private func autoFramingTarget(trackID: CMPersistentTrackID, clipStart: Double, image: CIImage, time: Double) -> CGPoint? {
+        framingQueue.sync {
+            let tracker = framingTrackers[trackID] ?? AutoFramingTracker()
+            tracker.resetIfClipChanged(clipStart)
+            framingTrackers[trackID] = tracker
+            return tracker.target(for: image, at: time)
+        }
     }
 
     private func overlayTransform(_ info: TrackRenderInfo, renderSize: CGSize) -> CGAffineTransform {
@@ -344,5 +386,61 @@ extension ClipFilterCompositor {
             "inputBackgroundImage": CIImage.empty(),
             "inputMaskImage": scaled
         ])
+    }
+}
+
+private final class AutoFramingTracker {
+    private var lastTarget: CGPoint?
+    private var lastDetectionTime = -Double.greatestFiniteMagnitude
+    private var clipStart = -Double.greatestFiniteMagnitude
+
+    func resetIfClipChanged(_ start: Double) {
+        guard abs(start - clipStart) > 0.001 else { return }
+        clipStart = start
+        lastTarget = nil
+        lastDetectionTime = -Double.greatestFiniteMagnitude
+    }
+
+    func target(for image: CIImage, at time: Double) -> CGPoint? {
+        if let lastTarget, abs(time - lastDetectionTime) < 0.2 { return lastTarget }
+        if lastTarget == nil, abs(time - lastDetectionTime) < 0.2 { return nil }
+        lastDetectionTime = time
+        guard let detected = detectSubject(in: image) else { return lastTarget }
+        if let lastTarget {
+            self.lastTarget = CGPoint(
+                x: lastTarget.x * 0.76 + detected.x * 0.24,
+                y: lastTarget.y * 0.76 + detected.y * 0.24
+            )
+        } else {
+            lastTarget = detected
+        }
+        return lastTarget
+    }
+
+    private func detectSubject(in image: CIImage) -> CGPoint? {
+        let extent = image.extent
+        guard extent.width > 1, extent.height > 1 else { return nil }
+        let handler = VNImageRequestHandler(ciImage: image, options: [:])
+
+        let faces = VNDetectFaceRectanglesRequest()
+        if (try? handler.perform([faces])) != nil,
+           let face = faces.results?.max(by: { $0.boundingBox.width * $0.boundingBox.height < $1.boundingBox.width * $1.boundingBox.height }) {
+            return point(for: face.boundingBox, in: extent, verticalAnchor: 0.5)
+        }
+
+        let people = VNDetectHumanRectanglesRequest()
+        people.upperBodyOnly = false
+        if (try? handler.perform([people])) != nil,
+           let person = people.results?.max(by: { $0.boundingBox.width * $0.boundingBox.height < $1.boundingBox.width * $1.boundingBox.height }) {
+            return point(for: person.boundingBox, in: extent, verticalAnchor: 0.72)
+        }
+        return nil
+    }
+
+    private func point(for box: CGRect, in extent: CGRect, verticalAnchor: CGFloat) -> CGPoint {
+        CGPoint(
+            x: extent.minX + box.midX * extent.width,
+            y: extent.minY + (1 - (box.minY + box.height * verticalAnchor)) * extent.height
+        )
     }
 }

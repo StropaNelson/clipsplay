@@ -1025,12 +1025,16 @@ struct ClipTransformSheet: View {
                     row("Vinheta", value: $adjustments.vignette, range: 0...1, label: "\(Int(adjustments.vignette * 100))%")
                 }
                 Section {
+                    Toggle("Seguir pessoa", isOn: Binding(
+                        get: { adjustments.autoFraming == true },
+                        set: { adjustments.autoFraming = $0 ? true : nil }
+                    ))
                     Toggle("Remover fundo", isOn: Binding(
                         get: { adjustments.removeBackground == true },
                         set: { adjustments.removeBackground = $0 ? true : nil }
                     ))
                 } footer: {
-                    Text("Recorta a pessoa do clipe e remove o fundo (experimental; deixa a renderização mais lenta).")
+                    Text("“Seguir pessoa” usa Vision para manter rosto/corpo no enquadramento, útil ao exportar vertical. “Remover fundo” recorta a pessoa (experimental; ambos deixam a renderização mais lenta).")
                 }
                 Section {
                     HStack {

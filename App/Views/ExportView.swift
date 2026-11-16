@@ -305,6 +305,7 @@ struct ExportProgressView: View {
     @ObservedObject var viewModel: EditorViewModel
     
     @Environment(\.dismiss) private var dismiss
+    @State private var shareItem: ExportShareItem?
     
     var body: some View {
         NavigationStack {
@@ -330,6 +331,15 @@ struct ExportProgressView: View {
                             .multilineTextAlignment(.center)
                         
                         if progress.currentStage == .completed || progress.currentStage == .failed {
+                            if let zipURL = viewModel.lastExportZIPURL {
+                                Button {
+                                    shareItem = ExportShareItem(url: zipURL)
+                                } label: {
+                                    Label("Compartilhar ZIP", systemImage: "square.and.arrow.up")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.large)
+                            }
                             Button("Fechar") { dismiss() }
                                 .buttonStyle(.borderedProminent)
                                 .controlSize(.large)
@@ -353,8 +363,17 @@ struct ExportProgressView: View {
             }
         }
         .presentationDetents([.height(300)])
+        .sheet(item: $shareItem) { item in
+            ShareSheet(items: [item.url])
+        }
     }
 }
+
+private struct ExportShareItem: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
 /// Generates several versions of the same episodes: formats × captions on/off, exported in batch.
 struct MultiplySheet: View {
     let base: ExportSettings

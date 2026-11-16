@@ -9,6 +9,7 @@ struct HomeView: View {
     @State private var projectToEdit: ProjectSummary?
     @State private var newProjectName = ""
     @State private var pendingProjectName: String?
+    @State private var pendingOperation: ProjectOperation?
     
     var body: some View {
         NavigationStack {
@@ -44,8 +45,9 @@ struct HomeView: View {
                     showingVideoImport = true
                 }
             }) {
-                NewProjectSheet(onCreate: { name in
+                NewProjectSheet(onCreate: { name, operation in
                     pendingProjectName = name
+                    pendingOperation = operation
                     showingNewProject = false
                 })
             }
@@ -56,11 +58,18 @@ struct HomeView: View {
             ) { result in
                 switch result {
                 case .success(let urls):
-                    guard let url = urls.first, let name = pendingProjectName else { return }
+                    guard let url = urls.first, let name = pendingProjectName else {
+                        pendingProjectName = nil
+                        pendingOperation = nil
+                        return
+                    }
                     pendingProjectName = nil
-                    Task { await viewModel.createProject(name: name, from: url) }
+                    let operation = pendingOperation ?? .multiply
+                    pendingOperation = nil
+                    Task { await viewModel.createProject(name: name, from: url, operation: operation) }
                 case .failure(let error):
                     pendingProjectName = nil
+                    pendingOperation = nil
                     if (error as NSError).code != NSUserCancelledError {
                         viewModel.errorMessage = "Erro ao selecionar vídeo: \(error.localizedDescription)"
                     }
@@ -83,7 +92,7 @@ struct HomeView: View {
                 Text(viewModel.errorMessage ?? "")
             }
             .fullScreenCover(item: $viewModel.selectedProject) { project in
-                EditorView(project: project)
+                EditorView(project: project, initialOperation: viewModel.selectedProjectOperation)
             }
             .refreshable {
                 await viewModel.loadProjects()
@@ -250,8 +259,9 @@ extension ProjectSummary {
 }
 
 struct NewProjectSheet: View {
-    let onCreate: (String) -> Void
+    let onCreate: (String, ProjectOperation) -> Void
     @State private var name = ""
+    @State private var operation: ProjectOperation = .multiply
     @Environment(\.dismiss) private var dismiss
     
     var body: some View {
@@ -260,9 +270,33 @@ struct NewProjectSheet: View {
                 Section("Novo Projeto") {
                     TextField("Nome do projeto", text: $name)
                 }
+
+                Section("O que você quer criar?") {
+                    ForEach(ProjectOperation.allCases) { item in
+                        Button {
+                            operation = item
+                        } label: {
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: item == operation ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(item == operation ? Color.accentColor : Color.secondary)
+                                Image(systemName: item.icon)
+                                    .frame(width: 22)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.rawValue)
+                                        .foregroundStyle(.primary)
+                                    Text(item.subtitle)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(.vertical, 3)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
                 
                 Section {
-                    Text("Após criar, você poderá importar um vídeo para começar a dividir em episódios.")
+                    Text("Depois da importação, o ClipStudio abre diretamente a automação escolhida. Tudo continua editável na timeline.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -274,12 +308,12 @@ struct NewProjectSheet: View {
                     Button("Cancelar") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Criar") { onCreate(name) }
+                    Button("Continuar") { onCreate(name, operation) }
                         .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
         }
-        .presentationDetents([.height(250)])
+        .presentationDetents([.medium, .large])
     }
 }
 
@@ -318,6 +352,7 @@ class HomeViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var errorMessage: String?
     @Published var selectedProject: Project?
+    @Published var selectedProjectOperation: ProjectOperation?
     
     private let storage = ProjectStorage.shared
     private let importer = VideoImporter.shared
@@ -333,7 +368,7 @@ class HomeViewModel: ObservableObject {
         }
     }
     
-    func createProject(name: String, from videoURL: URL) async {
+    func createProject(name: String, from videoURL: URL, operation: ProjectOperation) async {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
         
@@ -343,6 +378,7 @@ class HomeViewModel: ObservableObject {
             project.regenerateEpisodes()
             try await storage.saveProject(project)
             await loadProjects()
+            selectedProjectOperation = operation
             selectedProject = project
         } catch {
             errorMessage = "Erro ao criar projeto: \(error.localizedDescription)"
@@ -350,6 +386,7 @@ class HomeViewModel: ObservableObject {
     }
     
     func selectProject(_ summary: ProjectSummary) {
+        selectedProjectOperation = nil
         Task {
             do {
                 selectedProject = try await storage.loadProject(id: summary.id)
