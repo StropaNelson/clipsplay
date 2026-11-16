@@ -2065,6 +2065,7 @@ class EditorViewModel: ObservableObject {
         let items = episode.storyline().filter { $0.track == .main }
         let removed = range.upperBound - range.lowerBound
         var touched = false
+        var emptied = false
         mutateSelectedEpisode { episode in
             var result: [VideoSegment] = []
             for clip in episode.mainClips {
@@ -2095,7 +2096,34 @@ class EditorViewModel: ObservableObject {
                 }
             }
             guard touched else { return }
+            guard !result.isEmpty else {
+                emptied = true
+                return
+            }
             episode.mainClips = result
+            func shifted(_ start: Double, _ duration: Double) -> Double? {
+                if start + duration <= range.lowerBound + 0.001 { return start }
+                if start >= range.upperBound - 0.001 { return start - removed }
+                return nil
+            }
+            episode.textOverlays = episode.textOverlays.compactMap { item in
+                guard let start = shifted(item.startTime, item.duration) else { return nil }
+                var moved = item
+                moved.startTime = start
+                return moved
+            }
+            episode.audioClips = episode.audioClips.compactMap { item in
+                guard let start = shifted(item.timelineStart, item.duration) else { return nil }
+                var moved = item
+                moved.timelineStart = start
+                return moved
+            }
+            episode.mediaOverlays = episode.mediaOverlays.compactMap { item in
+                guard let start = shifted(item.startTime, item.duration) else { return nil }
+                var moved = item
+                moved.startTime = start
+                return moved
+            }
             episode.markers = episode.markers.compactMap { marker in
                 if marker.time <= range.lowerBound + 0.001 { return marker }
                 if marker.time < range.upperBound - 0.001 { return nil }
@@ -2104,10 +2132,12 @@ class EditorViewModel: ObservableObject {
                 return moved
             }
         }
-        if touched {
-            seek(to: range.lowerBound)
-        } else {
+        if !touched {
             errorMessage = "Não há conteúdo principal entre os marcadores."
+        } else if emptied {
+            errorMessage = "Não é possível remover todo o conteúdo principal do episódio."
+        } else {
+            seek(to: range.lowerBound)
         }
     }
 
