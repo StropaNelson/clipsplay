@@ -498,6 +498,16 @@ struct EditorView: View {
                 if let previewError = viewModel.previewError {
                     previewErrorView(previewError)
                 }
+                if viewModel.previewPlayer != nil && !viewModel.isPreviewLoading && viewModel.previewError == nil {
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Spacer()
+                            previewAudioControls
+                        }
+                    }
+                    .padding(10)
+                }
             }
             .aspectRatio(viewModel.canvasAspectRatio, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: 4))
@@ -506,6 +516,33 @@ struct EditorView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
         .onTapGesture { viewModel.togglePlayback() }
+    }
+
+    private var previewAudioControls: some View {
+        HStack(spacing: 8) {
+            Button {
+                viewModel.togglePreviewMute()
+            } label: {
+                Image(systemName: viewModel.previewMuted || viewModel.previewVolume <= 0.001 ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.plain)
+            Slider(
+                value: Binding(
+                    get: { Double(viewModel.previewVolume) },
+                    set: { viewModel.setPreviewVolume(Float($0)) }
+                ),
+                in: 0...1
+            )
+            .frame(width: isRegular ? 120 : 88)
+            .tint(EditorTheme.accent)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.black.opacity(0.65), in: Capsule())
+        .contentShape(Capsule())
     }
 
     private func previewErrorView(_ message: String) -> some View {
@@ -965,6 +1002,8 @@ class EditorViewModel: ObservableObject {
     @Published var isPreviewLoading = false
     @Published var previewError: String?
     @Published var isPlaying = false
+    @Published var previewMuted = false
+    @Published var previewVolume: Float = 1
     @Published var currentTime: Double = 0
     @Published var currentTimeString = "00:00"
     @Published var durationString = "00:00"
@@ -1974,7 +2013,7 @@ class EditorViewModel: ObservableObject {
             isPlaying = true
         } else {
             player.pause()
-            player.isMuted = false
+            player.isMuted = previewMuted
             isPlaying = false
             if let narrationStartTime { seek(to: narrationStartTime) }
         }
@@ -2119,6 +2158,8 @@ class EditorViewModel: ObservableObject {
                 playerItem.videoComposition = output.videoComposition
                 playerItem.audioMix = output.audioMix
                 let player = AVPlayer(playerItem: playerItem)
+                self.configurePreviewAudioSession()
+                self.applyPreviewAudioSettings(to: player)
                 self.previewSourceAssets = output.sourceAssets
                 self.setupTimeObserver(for: player)
                 self.previewPlayer = player
@@ -2136,6 +2177,31 @@ class EditorViewModel: ObservableObject {
                 self.previewError = Self.describe(error)
             }
         }
+    }
+
+    private func configurePreviewAudioSession() {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .moviePlayback)
+        try? session.setActive(true)
+    }
+
+    private func applyPreviewAudioSettings(to player: AVPlayer) {
+        player.volume = max(0, min(1, previewVolume))
+        player.isMuted = previewMuted
+    }
+
+    func togglePreviewMute() {
+        previewMuted.toggle()
+        previewPlayer?.isMuted = previewMuted
+    }
+
+    func setPreviewVolume(_ value: Float) {
+        previewVolume = max(0, min(1, value))
+        if previewVolume > 0.001 {
+            previewMuted = false
+            previewPlayer?.isMuted = false
+        }
+        previewPlayer?.volume = previewVolume
     }
 
     private func setupTimeObserver(for player: AVPlayer) {
