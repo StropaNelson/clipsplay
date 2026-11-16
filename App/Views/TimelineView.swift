@@ -132,9 +132,10 @@ struct TimelineView: View {
             header(icon: "textformat", title: "Texto", height: laneHeight, action: onAddText)
             ForEach(audioRows.indices, id: \.self) { row in
                 let kind = audioRows[row].kind
+                let isSingleEmpty = audioRows.count == 1 && audioRows[row].clips.isEmpty
                 header(
                     icon: kind.icon,
-                    title: audioRows[row].index == 0 ? kind.rawValue : "",
+                    title: audioRows[row].index == 0 ? (isSingleEmpty ? "Áudio" : kind.rawValue) : "",
                     height: laneHeight,
                     action: audioRows[row].index == 0 ? onAddAudio : nil
                 )
@@ -509,7 +510,8 @@ struct TimelineView: View {
                 rows.append((clip.kind, kindRows, [clip]))
             }
         }
-        // Renumber rows per kind in order so headers know which row is first.
+        // Always keep one empty music row so the header's add button stays reachable.
+        if rows.isEmpty { return [(.music, 0, [])] }
         return rows.map { ($0.0, $0.1, $0.2) }
     }
 
