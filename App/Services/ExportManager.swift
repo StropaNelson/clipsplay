@@ -38,7 +38,7 @@ actor ExportManager {
         
         progressHandler(ExportProgress(stage: .exporting, episode: episodeNumber, progress: 0.2, message: "Exportando vídeo..."))
         
-        let videoComposition = await processor.applyTextOverlays(episode.textOverlays, to: output.videoComposition)
+        let videoComposition = await processor.applyTextOverlays(episode.resolvedOverlays(global: project.globalOverlays), to: output.videoComposition)
         try await processor.exportComposition(
             composition,
             to: videoURL,

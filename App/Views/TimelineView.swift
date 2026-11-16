@@ -57,10 +57,24 @@ struct TimelineView: View {
     let onAddText: () -> Void
     let onAddAudio: () -> Void
     let onTransitionTap: (TimelineSegment) -> Void
+    let maxSourceTime: (TimelineSegment) -> Double
+    let audioURL: (AudioClip) -> URL?
+    let audioDuration: (AudioClip) -> Double
+    let onTrimSegment: (TimelineSegment, Double, Double) -> Void
+    let onMoveOverlay: (UUID, Double, Double) -> Void
+    let onMoveAudio: (AudioClip) -> Void
+
+    private struct LaneDrag {
+        let id: UUID
+        let move: Double
+        let left: Double
+        let right: Double
+    }
 
     @State private var pixelsPerSecond: CGFloat = 20
     @State private var pinchBase: CGFloat?
     @State private var didFit = false
+    @State private var laneDrag: LaneDrag?
 
     private let headerWidth: CGFloat = 64
     private let leadingInset: CGFloat = 76
@@ -211,14 +225,33 @@ struct TimelineView: View {
             }
 
             ForEach(ordered) { segment in
-                let width = max(8, CGFloat(segment.duration) * pixelsPerSecond)
+                let drag = laneDrag?.id == segment.id ? laneDrag : nil
+                let display = trimmed(segment, left: drag?.left ?? 0, right: drag?.right ?? 0)
+                let width = max(8, CGFloat(display.duration) * pixelsPerSecond)
+                let isSelected = segment.id == selectedID
                 TimelineClipView(
-                    segment: segment,
+                    segment: display,
                     width: width,
                     height: clipHeight,
-                    isSelected: segment.id == selectedID,
+                    isSelected: isSelected,
                     sourceURL: sourceURL(segment)
                 )
+                .overlay(alignment: .leading) {
+                    if isSelected {
+                        edgeHandle(height: clipHeight)
+                            .gesture(laneGesture(id: segment.id, part: .left) { _, left, right in
+                                commitTrim(segment, left: left, right: right)
+                            })
+                    }
+                }
+                .overlay(alignment: .trailing) {
+                    if isSelected {
+                        edgeHandle(height: clipHeight)
+                            .gesture(laneGesture(id: segment.id, part: .right) { _, left, right in
+                                commitTrim(segment, left: left, right: right)
+                            })
+                    }
+                }
                 .offset(x: xPosition(for: segment.startTime))
                 .onTapGesture { onSelect(segment.id) }
             }
@@ -237,6 +270,20 @@ struct TimelineView: View {
             }
         }
         .frame(width: contentWidth, height: clipHeight, alignment: .topLeading)
+    }
+
+    private func trimmed(_ segment: TimelineSegment, left: Double, right: Double) -> TimelineSegment {
+        var result = segment
+        let maxSource = max(maxSourceTime(segment), segment.sourceEndTime)
+        result.sourceStartTime = min(max(0, segment.sourceStartTime + left), segment.sourceEndTime - 0.1)
+        result.sourceEndTime = min(maxSource, max(result.sourceStartTime + 0.1, segment.sourceEndTime + right))
+        result.duration = result.sourceEndTime - result.sourceStartTime
+        return result
+    }
+
+    private func commitTrim(_ segment: TimelineSegment, left: Double, right: Double) {
+        let result = trimmed(segment, left: left, right: right)
+        onTrimSegment(segment, result.sourceStartTime, result.sourceEndTime)
     }
 
     private func transitionBadge(for segment: TimelineSegment) -> some View {
@@ -263,15 +310,22 @@ struct TimelineView: View {
                 .contentShape(Rectangle())
                 .onTapGesture { onSelect(nil) }
             ForEach(overlays.sorted { $0.duration > $1.duration }) { overlay in
+                let drag = laneDrag?.id == overlay.id ? laneDrag : nil
+                let start = max(0, overlay.startTime + (drag?.move ?? 0) + (drag?.left ?? 0))
+                let duration = max(0.3, overlay.duration - (drag?.left ?? 0) + (drag?.right ?? 0))
                 laneItem(
+                    id: overlay.id,
                     title: overlay.text,
-                    icon: "textformat",
+                    icon: overlay.anchor != nil ? "repeat" : (overlay.isCaption == true ? "captions.bubble" : "textformat"),
                     color: TrackType.overlay.color,
-                    start: overlay.startTime,
-                    duration: overlay.duration,
+                    start: start,
+                    duration: duration,
                     isSelected: overlay.id == selectedID
-                )
-                .onTapGesture { onSelect(overlay.id) }
+                ) { move, left, right in
+                    let newStart = max(0, overlay.startTime + move + left)
+                    let newDuration = max(0.3, overlay.duration - left + right)
+                    onMoveOverlay(overlay.id, newStart, newDuration)
+                }
             }
         }
         .frame(width: contentWidth, height: laneHeight, alignment: .topLeading)
@@ -284,41 +338,111 @@ struct TimelineView: View {
                 .contentShape(Rectangle())
                 .onTapGesture { onSelect(nil) }
             ForEach(audioClips.sorted { $0.duration > $1.duration }) { clip in
+                let drag = laneDrag?.id == clip.id ? laneDrag : nil
+                let edited = Self.adjusted(clip, move: drag?.move ?? 0, left: drag?.left ?? 0, right: drag?.right ?? 0, assetDuration: audioDuration(clip))
                 laneItem(
+                    id: clip.id,
                     title: clip.name,
-                    icon: clip.kind.icon,
+                    icon: clip.anchor != nil ? "repeat" : clip.kind.icon,
                     color: clip.kind == .narration ? .orange : .green,
-                    start: clip.timelineStart,
-                    duration: min(clip.duration, max(0.1, safeDuration - clip.timelineStart)),
-                    isSelected: clip.id == selectedID
-                )
-                .onTapGesture { onSelect(clip.id) }
+                    start: edited.timelineStart,
+                    duration: min(edited.duration, max(0.1, safeDuration - edited.timelineStart)),
+                    isSelected: clip.id == selectedID,
+                    waveform: (audioURL(clip), edited.sourceStart, edited.duration)
+                ) { move, left, right in
+                    onMoveAudio(Self.adjusted(clip, move: move, left: left, right: right, assetDuration: audioDuration(clip)))
+                }
             }
         }
         .frame(width: contentWidth, height: laneHeight, alignment: .topLeading)
     }
 
-    private func laneItem(title: String, icon: String, color: Color, start: Double, duration: Double, isSelected: Bool) -> some View {
+    static func adjusted(_ clip: AudioClip, move: Double, left: Double, right: Double, assetDuration: Double) -> AudioClip {
+        var result = clip
+        let maxSource = max(assetDuration, clip.sourceEnd)
+        let trimStart = min(max(-clip.sourceStart, left), clip.duration - 0.2)
+        result.sourceStart = clip.sourceStart + trimStart
+        result.timelineStart = max(0, clip.timelineStart + move + trimStart)
+        result.sourceEnd = min(maxSource, max(result.sourceStart + 0.2, clip.sourceEnd + right))
+        return result
+    }
+
+    private func laneItem(
+        id: UUID,
+        title: String,
+        icon: String,
+        color: Color,
+        start: Double,
+        duration: Double,
+        isSelected: Bool,
+        waveform: (URL?, Double, Double)? = nil,
+        onCommit: @escaping (Double, Double, Double) -> Void
+    ) -> some View {
         let width = max(10, CGFloat(duration) * pixelsPerSecond)
-        return HStack(spacing: 4) {
-            Image(systemName: icon)
-                .font(.system(size: 9, weight: .bold))
-            if width > 40 {
-                Text(title)
-                    .font(.system(size: 10, weight: .semibold))
-                    .lineLimit(1)
+        return ZStack(alignment: .leading) {
+            color.opacity(0.55)
+            if let waveform {
+                WaveformView(url: waveform.0, sourceStart: waveform.1, sourceDuration: waveform.2, color: .white.opacity(0.55))
+                    .padding(.vertical, 3)
             }
-            Spacer(minLength: 0)
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.system(size: 9, weight: .bold))
+                if width > 40 {
+                    Text(title)
+                        .font(.system(size: 10, weight: .semibold))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, isSelected ? 12 : 5)
+            .foregroundStyle(.white)
         }
-        .padding(.horizontal, 5)
-        .foregroundStyle(.white)
         .frame(width: width, height: laneHeight - 4, alignment: .leading)
-        .background(color.opacity(0.75), in: RoundedRectangle(cornerRadius: 5))
+        .clipShape(RoundedRectangle(cornerRadius: 5))
         .overlay(
             RoundedRectangle(cornerRadius: 5)
                 .stroke(isSelected ? Color.white : color, lineWidth: isSelected ? 2.5 : 1)
         )
+        .overlay(alignment: .leading) {
+            if isSelected { edgeHandle(height: laneHeight - 4).gesture(laneGesture(id: id, part: .left, onCommit: onCommit)) }
+        }
+        .overlay(alignment: .trailing) {
+            if isSelected { edgeHandle(height: laneHeight - 4).gesture(laneGesture(id: id, part: .right, onCommit: onCommit)) }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { onSelect(id) }
+        .highPriorityGesture(isSelected ? laneGesture(id: id, part: .move, onCommit: onCommit) : nil)
         .offset(x: xPosition(for: start), y: 2)
+    }
+
+    private enum DragPart { case move, left, right }
+
+    private func laneGesture(id: UUID, part: DragPart, onCommit: @escaping (Double, Double, Double) -> Void) -> some Gesture {
+        DragGesture(minimumDistance: 2)
+            .onChanged { value in
+                let seconds = Double(value.translation.width / pixelsPerSecond)
+                switch part {
+                case .move: laneDrag = LaneDrag(id: id, move: seconds, left: 0, right: 0)
+                case .left: laneDrag = LaneDrag(id: id, move: 0, left: seconds, right: 0)
+                case .right: laneDrag = LaneDrag(id: id, move: 0, left: 0, right: seconds)
+                }
+            }
+            .onEnded { _ in
+                guard let drag = laneDrag, drag.id == id else { return }
+                laneDrag = nil
+                onCommit(drag.move, drag.left, drag.right)
+            }
+    }
+
+    private func edgeHandle(height: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 3)
+            .fill(Color.white)
+            .frame(width: 10, height: height)
+            .overlay(
+                Capsule().fill(Color.black.opacity(0.6)).frame(width: 2, height: height * 0.4)
+            )
+            .contentShape(Rectangle().inset(by: -8))
     }
 
     private func addButton(title: String, systemImage: String, action: @escaping () -> Void) -> some View {
@@ -562,7 +686,7 @@ struct SegmentEditorView: View {
     let segment: TimelineSegment
     let trackType: TrackType
     let project: Project
-    let onSave: (TimelineSegment) -> Void
+    let onSave: (TimelineSegment, Bool) -> Void
     let onDelete: (() -> Void)?
 
     @Environment(\.dismiss) private var dismiss
@@ -576,8 +700,10 @@ struct SegmentEditorView: View {
     @State private var narrationVolume: Float
     @State private var keepNarration: Bool
     @State private var previewPlayer = AVPlayer()
+    @State private var applyToAllEpisodes: Bool
 
-    init(segment: TimelineSegment, trackType: TrackType, project: Project, onSave: @escaping (TimelineSegment) -> Void, onDelete: (() -> Void)?) {
+    init(segment: TimelineSegment, trackType: TrackType, project: Project, onSave: @escaping (TimelineSegment, Bool) -> Void, onDelete: (() -> Void)?) {
+        _applyToAllEpisodes = State(initialValue: trackType != .main)
         self.segment = segment
         self.trackType = trackType
         self.project = project
@@ -696,6 +822,14 @@ struct SegmentEditorView: View {
                     }
                 }
 
+                if trackType != .main {
+                    Section {
+                        Toggle("Aplicar em todos os episódios", isOn: $applyToAllEpisodes)
+                    } footer: {
+                        Text("Repete o corte, a transição, o volume e a narração deste clipe em todos os episódios.")
+                    }
+                }
+
                 if let onDelete {
                     Section {
                         Button("Excluir clipe", role: .destructive) {
@@ -724,7 +858,7 @@ struct SegmentEditorView: View {
                         updated.clipVolume = clipVolume
                         updated.narrationVolume = narrationVolume
                         updated.narrationAssetID = keepNarration ? segment.narrationAssetID : nil
-                        onSave(updated)
+                        onSave(updated, applyToAllEpisodes)
                         dismiss()
                     }
                     .disabled(

@@ -28,7 +28,7 @@ actor TimelineEngine {
                 narrationOffset: item.segment.narrationOffset ?? 0
             )
         }
-        let audioClips = episode.audioClips.map { clip in
+        let audioClips = episode.resolvedAudioClips(global: project.globalAudioClips).map { clip in
             CompositionAudioClip(
                 assetID: clip.assetID,
                 timelineStart: clip.timelineStart,

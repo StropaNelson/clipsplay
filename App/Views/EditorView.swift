@@ -75,8 +75,8 @@ struct EditorView: View {
                 Divider().overlay(EditorTheme.divider)
                 TimelineView(
                     segments: viewModel.orderedSegments,
-                    overlays: viewModel.selectedEpisode?.textOverlays ?? [],
-                    audioClips: viewModel.selectedEpisode?.audioClips ?? [],
+                    overlays: viewModel.resolvedOverlays,
+                    audioClips: viewModel.resolvedAudioClips,
                     totalDuration: viewModel.timelineDuration,
                     currentTime: viewModel.currentTime,
                     selectedID: viewModel.selectedSegmentID,
@@ -89,7 +89,13 @@ struct EditorView: View {
                     onAddOutro: { clipPickRequest = ClipPickRequest(track: .outro) },
                     onAddText: { textEditRequest = viewModel.newTextRequest() },
                     onAddAudio: { showingAddAudio = true },
-                    onTransitionTap: { transitionSegment = $0 }
+                    onTransitionTap: { transitionSegment = $0 },
+                    maxSourceTime: { viewModel.maxSourceTime(for: $0) },
+                    audioURL: { viewModel.audioAsset(for: $0)?.url },
+                    audioDuration: { viewModel.audioAsset(for: $0)?.duration ?? $0.sourceEnd },
+                    onTrimSegment: { viewModel.trimSegment($0, start: $1, end: $2) },
+                    onMoveOverlay: { viewModel.retimeOverlay($0, start: $1, duration: $2) },
+                    onMoveAudio: { viewModel.updateAudioClip($0) }
                 )
                 .frame(maxHeight: .infinity)
                 Divider().overlay(EditorTheme.divider)
@@ -143,7 +149,7 @@ struct EditorView: View {
                 segment: segment,
                 trackType: segment.trackType,
                 project: viewModel.currentProject,
-                onSave: { viewModel.updateSegment($0) },
+                onSave: { viewModel.updateSegment($0, applyToAllEpisodes: $1) },
                 onDelete: viewModel.canDelete(segment) ? { viewModel.removeSegment(segment) } : nil
             )
         }
@@ -502,6 +508,12 @@ struct EditorView: View {
                     toolButton("Transição", icon: "square.on.square") { transitionSegment = segment }
                     toolButton("Narração", icon: "mic.badge.plus") { narrationRequest = NarrationRequest(segment: segment) }
                     if segment.trackType == .main {
+                        if viewModel.canMoveMainClip(segment.id, by: -1) {
+                            toolButton("Mover ◀︎", icon: "arrow.left.square") { viewModel.moveMainClip(segment.id, by: -1) }
+                        }
+                        if viewModel.canMoveMainClip(segment.id, by: 1) {
+                            toolButton("Mover ▶︎", icon: "arrow.right.square") { viewModel.moveMainClip(segment.id, by: 1) }
+                        }
                         toolButton("Duplicar", icon: "plus.square.on.square") { viewModel.duplicateSelected() }
                     } else {
                         toolButton("Trocar", icon: "arrow.triangle.2.circlepath") {
@@ -577,8 +589,8 @@ struct EditorView: View {
                 AddAudioSheet(
                     assets: viewModel.mediaAssets.filter { $0.type == .audio },
                     onImportAsset: { asset in Task { await viewModel.addMediaAsset(asset) } },
-                    onAdd: { asset, allEpisodes, atPlayhead in
-                        viewModel.addAudio(asset, kind: .music, allEpisodes: allEpisodes, atPlayhead: atPlayhead)
+                    onAdd: { asset, anchor, atPlayhead in
+                        viewModel.addAudio(asset, kind: .music, anchor: anchor, atPlayhead: atPlayhead)
                     }
                 )
             }
@@ -1021,6 +1033,8 @@ class EditorViewModel: ObservableObject {
         let introTemplate: SegmentTemplate?
         let outroTemplate: SegmentTemplate?
         let recapSettings: RecapSettings
+        let globalOverlays: [TextOverlay]
+        let globalAudioClips: [AudioClip]
     }
 
     func checkpoint() {
@@ -1029,7 +1043,9 @@ class EditorViewModel: ObservableObject {
             mediaAssets: mediaAssets,
             introTemplate: project.introTemplate,
             outroTemplate: project.outroTemplate,
-            recapSettings: project.recapSettings
+            recapSettings: project.recapSettings,
+            globalOverlays: project.globalOverlays,
+            globalAudioClips: project.globalAudioClips
         ))
         if undoStack.count > 40 { undoStack.removeFirst() }
         canUndo = true
@@ -1043,6 +1059,8 @@ class EditorViewModel: ObservableObject {
         project.introTemplate = state.introTemplate
         project.outroTemplate = state.outroTemplate
         project.recapSettings = state.recapSettings
+        project.globalOverlays = state.globalOverlays
+        project.globalAudioClips = state.globalAudioClips
         Task { await persistProjectChanges() }
     }
 
@@ -1063,21 +1081,94 @@ class EditorViewModel: ObservableObject {
         segment.trackType != .main || (timelineTracks[.main]?.count ?? 0) > 1
     }
 
-    func updateSegment(_ segment: TimelineSegment) {
-        mutateSelectedEpisode { episode in
-            episode.modifySegment(id: segment.id) { video in
-                video.startTime = segment.sourceStartTime
-                video.endTime = segment.sourceEndTime
-                video.sourceType = segment.sourceType
-                video.assetID = segment.assetID
-                video.isEnabled = true
-                video.transition = segment.transition
-                video.transitionDuration = segment.transitionDuration
-                video.clipVolume = segment.clipVolume
-                video.narrationAssetID = segment.narrationAssetID
-                video.narrationLevel = segment.narrationVolume
-            }
+    func maxSourceTime(for segment: TimelineSegment) -> Double {
+        if segment.sourceType == .mainVideo { return project.sourceVideoDuration }
+        return mediaAssets.first { $0.id == segment.assetID }?.duration ?? segment.sourceEndTime
+    }
+
+    func trimSegment(_ segment: TimelineSegment, start: Double, end: Double) {
+        var updated = segment
+        updated.sourceStartTime = start
+        updated.sourceEndTime = end
+        updated.duration = end - start
+        updateSegment(updated)
+    }
+
+    /// Intro/outro/recap edits repeat in every episode by default, like their global templates.
+    func updateSegment(_ segment: TimelineSegment, applyToAllEpisodes: Bool? = nil) {
+        let apply: (inout VideoSegment) -> Void = { video in
+            video.startTime = segment.sourceStartTime
+            video.endTime = segment.sourceEndTime
+            video.sourceType = segment.sourceType
+            video.assetID = segment.assetID
+            video.isEnabled = true
+            video.transition = segment.transition
+            video.transitionDuration = segment.transitionDuration
+            video.clipVolume = segment.clipVolume
+            video.narrationAssetID = segment.narrationAssetID
+            video.narrationLevel = segment.narrationVolume
         }
+        let global = applyToAllEpisodes ?? (segment.trackType != .main)
+        guard global, segment.trackType != .main else {
+            mutateSelectedEpisode { $0.modifySegment(id: segment.id, apply) }
+            return
+        }
+
+        checkpoint()
+        func updateTemplate(_ template: inout SegmentTemplate?) {
+            guard var value = template else { return }
+            value.startTime = segment.sourceStartTime
+            value.endTime = segment.sourceEndTime
+            value.sourceType = segment.sourceType
+            value.assetID = segment.assetID
+            value.narrationAssetID = segment.narrationAssetID
+            value.clipVolume = segment.clipVolume < 0.999 ? segment.clipVolume : nil
+            template = value
+        }
+        switch segment.trackType {
+        case .intro: updateTemplate(&project.introTemplate)
+        case .outro: updateTemplate(&project.outroTemplate)
+        default: break
+        }
+        if let index = project.recapSettings.manualSegments.firstIndex(where: { $0.id == segment.id }) {
+            apply(&project.recapSettings.manualSegments[index])
+        }
+        for index in episodes.indices {
+            episodes[index].normalizeCustomTemplates()
+            switch segment.trackType {
+            case .intro:
+                if var video = episodes[index].introSegment {
+                    apply(&video)
+                    episodes[index].introSegment = video
+                }
+            case .outro:
+                if var video = episodes[index].outroSegment {
+                    apply(&video)
+                    episodes[index].outroSegment = video
+                }
+            default:
+                episodes[index].modifySegment(id: segment.id, apply)
+            }
+            episodes[index].clearTimelinePins()
+        }
+        Task { await persistProjectChanges() }
+    }
+
+    func moveMainClip(_ id: UUID, by offset: Int) {
+        mutateSelectedEpisode { episode in
+            var clips = episode.mainClips
+            guard let index = clips.firstIndex(where: { $0.id == id }) else { return }
+            let target = index + offset
+            guard clips.indices.contains(target) else { return }
+            clips.swapAt(index, target)
+            episode.mainClips = clips
+        }
+    }
+
+    func canMoveMainClip(_ id: UUID, by offset: Int) -> Bool {
+        guard let clips = selectedEpisode?.mainClips,
+              let index = clips.firstIndex(where: { $0.id == id }) else { return false }
+        return clips.indices.contains(index + offset)
     }
 
     func removeSegment(_ segment: TimelineSegment) {
@@ -1147,8 +1238,7 @@ class EditorViewModel: ObservableObject {
             var copy = overlay
             copy.id = UUID()
             copy.startTime = min(overlay.endTime, max(0, timelineDuration - copy.duration))
-            mutateSelectedEpisode(reloadPreview: false) { $0.textOverlays.append(copy) }
-            selectedSegmentID = copy.id
+            saveOverlay(copy)
         }
     }
 
@@ -1166,13 +1256,22 @@ class EditorViewModel: ObservableObject {
 
     // MARK: Text overlays
 
+    /// Episode overlays plus project-wide (repeated) ones, in this episode's timeline time.
+    var resolvedOverlays: [TextOverlay] {
+        selectedEpisode?.resolvedOverlays(global: project.globalOverlays) ?? []
+    }
+
+    var resolvedAudioClips: [AudioClip] {
+        selectedEpisode?.resolvedAudioClips(global: project.globalAudioClips) ?? []
+    }
+
     var selectedOverlay: TextOverlay? {
         guard let selectedSegmentID else { return nil }
-        return selectedEpisode?.textOverlays.first { $0.id == selectedSegmentID }
+        return resolvedOverlays.first { $0.id == selectedSegmentID }
     }
 
     var visibleOverlays: [TextOverlay] {
-        (selectedEpisode?.textOverlays ?? []).filter {
+        resolvedOverlays.filter {
             $0.isVisible(at: currentTime) || (!isPlaying && $0.id == selectedSegmentID)
         }
     }
@@ -1183,39 +1282,63 @@ class EditorViewModel: ObservableObject {
         return TextEditRequest(overlay: TextOverlay(text: "", startTime: start, duration: duration), isNew: true)
     }
 
-    func saveOverlay(_ overlay: TextOverlay) {
-        mutateSelectedEpisode(reloadPreview: false) { episode in
-            if let index = episode.textOverlays.firstIndex(where: { $0.id == overlay.id }) {
-                episode.textOverlays[index] = overlay
-            } else {
-                episode.textOverlays.append(overlay)
+    /// Stores an overlay given in timeline time, either in the episode or (when anchored) project-wide.
+    private func store(_ overlay: TextOverlay, persist: Bool) {
+        guard let episodeIndex = selectedEpisodeIndex else { return }
+        episodes[episodeIndex].textOverlays.removeAll { $0.id == overlay.id }
+        project.globalOverlays.removeAll { $0.id == overlay.id }
+        var item = overlay
+        if let anchor = overlay.anchor, let base = episodes[episodeIndex].anchorStart(anchor) {
+            item.startTime = max(0, overlay.startTime - base)
+            project.globalOverlays.append(item)
+        } else {
+            if overlay.anchor != nil {
+                errorMessage = "Este episódio não tem esse clipe; o texto ficou só neste episódio."
             }
+            item.anchor = nil
+            episodes[episodeIndex].textOverlays.append(item)
         }
+        selectedEpisode = episodes[episodeIndex]
+        if persist {
+            Task { await persistProjectChanges(reloadPreview: false) }
+        }
+    }
+
+    func saveOverlay(_ overlay: TextOverlay) {
+        checkpoint()
+        store(overlay, persist: true)
         selectedSegmentID = overlay.id
     }
 
     func removeOverlay(_ id: UUID) {
+        guard let episodeIndex = selectedEpisodeIndex else { return }
+        checkpoint()
         if selectedSegmentID == id { selectedSegmentID = nil }
-        mutateSelectedEpisode(reloadPreview: false) { episode in
-            episode.textOverlays.removeAll { $0.id == id }
-        }
+        episodes[episodeIndex].textOverlays.removeAll { $0.id == id }
+        project.globalOverlays.removeAll { $0.id == id }
+        selectedEpisode = episodes[episodeIndex]
+        Task { await persistProjectChanges(reloadPreview: false) }
     }
 
     func moveOverlay(_ id: UUID, x: Double, y: Double, finished: Bool) {
-        guard let episodeIndex = selectedEpisodeIndex,
-              let index = episodes[episodeIndex].textOverlays.firstIndex(where: { $0.id == id }) else { return }
+        guard var overlay = resolvedOverlays.first(where: { $0.id == id }) else { return }
         if !isDraggingOverlay {
             isDraggingOverlay = true
             checkpoint()
         }
         selectedSegmentID = id
-        episodes[episodeIndex].textOverlays[index].positionX = x
-        episodes[episodeIndex].textOverlays[index].positionY = y
-        selectedEpisode = episodes[episodeIndex]
-        if finished {
-            isDraggingOverlay = false
-            Task { await persistProjectChanges(reloadPreview: false) }
-        }
+        overlay.positionX = x
+        overlay.positionY = y
+        store(overlay, persist: finished)
+        if finished { isDraggingOverlay = false }
+    }
+
+    func retimeOverlay(_ id: UUID, start: Double, duration: Double) {
+        guard var overlay = resolvedOverlays.first(where: { $0.id == id }) else { return }
+        checkpoint()
+        overlay.startTime = min(start, max(0, timelineDuration - 0.3))
+        overlay.duration = max(0.3, duration)
+        store(overlay, persist: true)
     }
 
     // MARK: Captions
@@ -1270,61 +1393,78 @@ class EditorViewModel: ObservableObject {
 
     var selectedAudioClip: AudioClip? {
         guard let selectedSegmentID else { return nil }
-        return selectedEpisode?.audioClips.first { $0.id == selectedSegmentID }
+        return resolvedAudioClips.first { $0.id == selectedSegmentID }
     }
 
-    func addAudio(_ asset: MediaAsset, kind: AudioClipKind, allEpisodes: Bool, atPlayhead: Bool) {
+    func audioAsset(for clip: AudioClip) -> MediaAsset? {
+        mediaAssets.first { $0.id == clip.assetID }
+    }
+
+    /// Stores a clip given in timeline time, either in the episode or (when anchored) project-wide.
+    private func store(_ clip: AudioClip) {
+        guard let episodeIndex = selectedEpisodeIndex else { return }
+        episodes[episodeIndex].audioClips.removeAll { $0.id == clip.id }
+        project.globalAudioClips.removeAll { $0.id == clip.id }
+        var item = clip
+        if let anchor = clip.anchor, let base = episodes[episodeIndex].anchorStart(anchor) {
+            item.timelineStart = max(0, clip.timelineStart - base)
+            project.globalAudioClips.append(item)
+        } else {
+            if clip.anchor != nil {
+                errorMessage = "Este episódio não tem esse clipe; o áudio ficou só neste episódio."
+            }
+            item.anchor = nil
+            episodes[episodeIndex].audioClips.append(item)
+        }
+        selectedEpisode = episodes[episodeIndex]
+        Task { await persistProjectChanges() }
+    }
+
+    func addAudio(_ asset: MediaAsset, kind: AudioClipKind, anchor: ClipAnchor?, atPlayhead: Bool) {
         guard asset.duration > 0 else {
             errorMessage = "Esse arquivo de áudio não tem duração válida."
             return
         }
-        let start = atPlayhead ? currentTime : 0
-        func makeClip() -> AudioClip {
-            AudioClip(
-                assetID: asset.id,
-                name: asset.name,
-                kind: kind,
-                timelineStart: start,
-                sourceStart: 0,
-                sourceEnd: asset.duration,
-                volume: kind == .music ? 0.5 : 1,
-                fadeIn: 0,
-                fadeOut: kind == .music && asset.duration > 6 ? 2 : 0
-            )
+        var start = atPlayhead ? currentTime : 0
+        if !atPlayhead, let anchor, let base = selectedEpisode?.anchorStart(anchor) {
+            start = base
         }
-        if allEpisodes {
-            checkpoint()
-            for index in episodes.indices {
-                episodes[index].audioClips.append(makeClip())
-            }
-            Task { await persistProjectChanges() }
-        } else {
-            let clip = makeClip()
-            mutateSelectedEpisode { $0.audioClips.append(clip) }
-            selectedSegmentID = clip.id
-        }
+        let clip = AudioClip(
+            assetID: asset.id,
+            name: asset.name,
+            kind: kind,
+            timelineStart: start,
+            sourceStart: 0,
+            sourceEnd: asset.duration,
+            volume: kind == .music ? 0.5 : 1,
+            fadeIn: 0,
+            fadeOut: kind == .music && asset.duration > 6 ? 2 : 0,
+            anchor: anchor
+        )
+        checkpoint()
+        store(clip)
+        selectedSegmentID = clip.id
     }
 
     func updateAudioClip(_ clip: AudioClip) {
-        mutateSelectedEpisode { episode in
-            if let index = episode.audioClips.firstIndex(where: { $0.id == clip.id }) {
-                episode.audioClips[index] = clip
-            }
-        }
+        checkpoint()
+        store(clip)
     }
 
     func removeAudioClip(_ id: UUID) {
+        guard let episodeIndex = selectedEpisodeIndex else { return }
+        checkpoint()
         if selectedSegmentID == id { selectedSegmentID = nil }
-        mutateSelectedEpisode { $0.audioClips.removeAll { $0.id == id } }
+        episodes[episodeIndex].audioClips.removeAll { $0.id == id }
+        project.globalAudioClips.removeAll { $0.id == id }
+        selectedEpisode = episodes[episodeIndex]
+        Task { await persistProjectChanges() }
     }
 
     func moveAudioClipToPlayhead(_ id: UUID) {
-        let time = currentTime
-        mutateSelectedEpisode { episode in
-            if let index = episode.audioClips.firstIndex(where: { $0.id == id }) {
-                episode.audioClips[index].timelineStart = time
-            }
-        }
+        guard var clip = resolvedAudioClips.first(where: { $0.id == id }) else { return }
+        clip.timelineStart = currentTime
+        updateAudioClip(clip)
     }
 
     // MARK: Narration
@@ -1444,8 +1584,8 @@ class EditorViewModel: ObservableObject {
         timelineTracks = tracks
         if let selectedSegmentID,
            !orderedSegments.contains(where: { $0.id == selectedSegmentID }),
-           !episode.textOverlays.contains(where: { $0.id == selectedSegmentID }),
-           !episode.audioClips.contains(where: { $0.id == selectedSegmentID }) {
+           !episode.resolvedOverlays(global: project.globalOverlays).contains(where: { $0.id == selectedSegmentID }),
+           !episode.resolvedAudioClips(global: project.globalAudioClips).contains(where: { $0.id == selectedSegmentID }) {
             self.selectedSegmentID = nil
         }
         durationString = timeString(timelineDuration)

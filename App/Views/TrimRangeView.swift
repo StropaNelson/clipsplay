@@ -101,7 +101,7 @@ struct TrimRangeView: View {
     private func edgeGesture(isStart: Bool, width: CGFloat, safeDuration: Double) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
-                let origin = dragOrigin ?? (start, end)
+                let origin = dragOrigin ?? (start: start, end: end)
                 dragOrigin = origin
                 let delta = Double(value.translation.width / width) * safeDuration
                 if isStart {
@@ -118,7 +118,7 @@ struct TrimRangeView: View {
     private func moveGesture(width: CGFloat, safeDuration: Double) -> some Gesture {
         DragGesture(minimumDistance: 4)
             .onChanged { value in
-                let origin = dragOrigin ?? (start, end)
+                let origin = dragOrigin ?? (start: start, end: end)
                 dragOrigin = origin
                 let length = origin.end - origin.start
                 let delta = Double(value.translation.width / width) * safeDuration

@@ -55,6 +55,15 @@ struct RGBAColor: Codable, Hashable {
     var uiColor: UIColor { UIColor(red: red, green: green, blue: blue, alpha: alpha) }
 }
 
+/// Where a text/audio item repeats. `nil` means it belongs to a single episode.
+enum ClipAnchor: String, Codable, CaseIterable, Identifiable {
+    case allEpisodes = "Todos os episódios"
+    case intro = "Todas as aberturas"
+    case outro = "Todos os encerramentos"
+
+    var id: String { rawValue }
+}
+
 enum TextOverlayStyle: String, Codable, CaseIterable, Identifiable {
     case plain = "Simples"
     case shadow = "Sombra"
@@ -77,6 +86,7 @@ struct TextOverlay: Codable, Identifiable, Hashable {
     var style: TextOverlayStyle = .shadow
     var isBold: Bool = true
     var isCaption: Bool?
+    var anchor: ClipAnchor?
 
     var endTime: Double { startTime + duration }
 
@@ -110,6 +120,7 @@ struct AudioClip: Codable, Identifiable, Hashable {
     var volume: Float
     var fadeIn: Double = 0
     var fadeOut: Double = 0
+    var anchor: ClipAnchor?
 
     var duration: Double { max(0, sourceEnd - sourceStart) }
     var endTime: Double { timelineStart + duration }
@@ -199,6 +210,34 @@ extension Episode {
             previousDuration = segment.duration
         }
         return items
+    }
+
+    /// Timeline time where items anchored to `anchor` start in this episode.
+    func anchorStart(_ anchor: ClipAnchor) -> Double? {
+        switch anchor {
+        case .allEpisodes: return 0
+        case .intro: return storyline().first { $0.track == .intro }?.start
+        case .outro: return storyline().first { $0.track == .outro }?.start
+        }
+    }
+
+    /// Episode overlays plus project-wide ones placed on this episode's timeline.
+    func resolvedOverlays(global: [TextOverlay]) -> [TextOverlay] {
+        textOverlays + global.compactMap { overlay in
+            guard let anchor = overlay.anchor, let base = anchorStart(anchor) else { return nil }
+            var placed = overlay
+            placed.startTime += base
+            return placed
+        }
+    }
+
+    func resolvedAudioClips(global: [AudioClip]) -> [AudioClip] {
+        audioClips + global.compactMap { clip in
+            guard let anchor = clip.anchor, let base = anchorStart(anchor) else { return nil }
+            var placed = clip
+            placed.timelineStart += base
+            return placed
+        }
     }
 
     /// Turns per-episode custom templates into concrete segments with stable IDs.

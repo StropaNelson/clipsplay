@@ -205,6 +205,15 @@ struct TextOverlayEditorSheet: View {
                     Text("Você também pode arrastar o texto direto na prévia.")
                 }
 
+                Section {
+                    Picker("Repetir em", selection: $overlay.anchor) {
+                        Text("Só este episódio").tag(ClipAnchor?.none)
+                        ForEach(ClipAnchor.allCases) { Text($0.rawValue).tag(ClipAnchor?.some($0)) }
+                    }
+                } footer: {
+                    Text("Títulos repetidos aparecem na mesma posição relativa em todos os episódios (ou em todas as aberturas/encerramentos).")
+                }
+
                 Section("Tempo") {
                     HStack {
                         Text("Início")
@@ -412,11 +421,11 @@ struct TransitionPickerSheet: View {
 struct AddAudioSheet: View {
     let assets: [MediaAsset]
     let onImportAsset: (MediaAsset) -> Void
-    let onAdd: (MediaAsset, Bool, Bool) -> Void
+    let onAdd: (MediaAsset, ClipAnchor?, Bool) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var showingImport = false
-    @State private var allEpisodes = false
+    @State private var anchor: ClipAnchor?
     @State private var atPlayhead = false
 
     var body: some View {
@@ -424,7 +433,10 @@ struct AddAudioSheet: View {
             List {
                 Section {
                     Toggle("Começar na posição do cursor", isOn: $atPlayhead)
-                    Toggle("Adicionar em todos os episódios", isOn: $allEpisodes)
+                    Picker("Repetir em", selection: $anchor) {
+                        Text("Só este episódio").tag(ClipAnchor?.none)
+                        ForEach(ClipAnchor.allCases) { Text($0.rawValue).tag(ClipAnchor?.some($0)) }
+                    }
                 }
                 Section("Biblioteca de áudio") {
                     if assets.isEmpty {
@@ -433,7 +445,7 @@ struct AddAudioSheet: View {
                     }
                     ForEach(assets) { asset in
                         Button {
-                            onAdd(asset, allEpisodes, atPlayhead)
+                            onAdd(asset, anchor, atPlayhead)
                             dismiss()
                         } label: {
                             HStack {
@@ -505,6 +517,12 @@ struct AudioClipEditorSheet: View {
                         Image(systemName: "speaker.fill")
                         Slider(value: $clip.volume, in: 0...1)
                         Text("\(Int(clip.volume * 100))%").monospacedDigit().frame(width: 48)
+                    }
+                }
+                Section {
+                    Picker("Repetir em", selection: $clip.anchor) {
+                        Text("Só este episódio").tag(ClipAnchor?.none)
+                        ForEach(ClipAnchor.allCases) { Text($0.rawValue).tag(ClipAnchor?.some($0)) }
                     }
                 }
                 Section("Posição na linha do tempo") {

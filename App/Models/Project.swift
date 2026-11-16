@@ -24,6 +24,18 @@ struct Project: Codable, Identifiable {
     var recapSettings: RecapSettings
     var coverSettings: CoverSettings
     var transcriptSRT: String?
+    var storedGlobalOverlays: [TextOverlay]?
+    var storedGlobalAudioClips: [AudioClip]?
+
+    var globalOverlays: [TextOverlay] {
+        get { storedGlobalOverlays ?? [] }
+        set { storedGlobalOverlays = newValue }
+    }
+
+    var globalAudioClips: [AudioClip] {
+        get { storedGlobalAudioClips ?? [] }
+        set { storedGlobalAudioClips = newValue }
+    }
     
     init(name: String, sourceVideoURL: URL, sourceVideoDuration: Double, naturalSize: CGSize, transform: CGAffineTransform) {
         self.id = UUID()
