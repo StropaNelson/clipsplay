@@ -652,7 +652,14 @@ class EditorViewModel: ObservableObject {
     @Published var currentTime: Double = 0
     @Published var currentTimeString = "00:00"
     @Published var durationString = "00:00"
-    @Published var exportSettings = ExportSettings()
+    @Published var exportSettings = ExportSettings() {
+        didSet {
+            guard oldValue.aspectRatio != exportSettings.aspectRatio
+                    || oldValue.fitMode != exportSettings.fitMode
+                    || oldValue.resolution != exportSettings.resolution else { return }
+            reloadPreview()
+        }
+    }
     @Published var showImportAsset = false
     @Published var showExportProgress = false
     @Published var showDuplicateSheet = false
