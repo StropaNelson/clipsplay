@@ -253,6 +253,7 @@ struct AssetTrimSheet: View {
                     onRecordingChanged: { recording in
                         guard recording else {
                             player.pause()
+                            player.isMuted = false
                             return
                         }
                         player.isMuted = true
