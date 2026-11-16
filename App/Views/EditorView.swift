@@ -1098,14 +1098,18 @@ class EditorViewModel: ObservableObject {
             guard let index = clips.firstIndex(where: { $0.id == item.segment.id }) else { return }
             var first = clips[index]
             first.endTime = cut
-            let second = VideoSegment(
+            var second = VideoSegment(
                 startTime: cut,
                 endTime: clips[index].endTime,
                 sourceType: first.sourceType,
                 assetID: first.assetID,
                 transitionStyle: TransitionStyle.none,
+                narrationAssetID: first.narrationAssetID,
                 volume: first.volume
             )
+            // The second half keeps playing the narration from where the first half stops.
+            second.narrationVolume = first.narrationVolume
+            second.narrationOffset = (first.narrationOffset ?? 0) + first.duration
             newID = second.id
             clips.replaceSubrange(index...index, with: [first, second])
             episode.mainClips = clips

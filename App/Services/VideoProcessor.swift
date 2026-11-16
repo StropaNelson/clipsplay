@@ -247,7 +247,10 @@ actor VideoProcessor {
             }
             if let narrationID = segment.narrationAssetID,
                let narration = try await audioTrack(ofAsset: narrationID) {
-                let narrationRange = CMTimeRange(start: .zero, duration: sourceTimeRange.duration)
+                let narrationRange = CMTimeRange(
+                    start: CMTime(seconds: max(0, segment.narrationOffset), preferredTimescale: 600),
+                    duration: sourceTimeRange.duration
+                )
                 try await placeAudio(
                     narration,
                     sourceRange: narrationRange,
@@ -732,6 +735,7 @@ struct CompositionSegment {
     let clipVolume: Float
     let narrationAssetID: UUID?
     let narrationVolume: Float
+    let narrationOffset: Double
 }
 
 struct CompositionAudioClip {

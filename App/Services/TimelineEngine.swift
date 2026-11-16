@@ -24,7 +24,8 @@ actor TimelineEngine {
                 transition: item.segment.transition,
                 clipVolume: item.segment.clipVolume,
                 narrationAssetID: item.segment.narrationAssetID,
-                narrationVolume: item.segment.narrationLevel
+                narrationVolume: item.segment.narrationLevel,
+                narrationOffset: item.segment.narrationOffset ?? 0
             )
         }
         let audioClips = episode.audioClips.map { clip in
