@@ -95,6 +95,7 @@ struct MediaLibraryView: View {
                         onTap: { assetForAction = asset; showingActionSheet = true },
                         onDelete: { onRemove(asset) }
                     )
+                    .onDrag { NSItemProvider(object: asset.id.uuidString as NSString) }
                 }
             }
             .padding()

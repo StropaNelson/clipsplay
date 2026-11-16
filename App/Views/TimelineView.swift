@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import AVKit
 import AVFoundation
 import CoreMedia
@@ -66,6 +67,7 @@ struct TimelineView: View {
     let onMoveAudio: (AudioClip) -> Void
     let onAddOverlay: () -> Void
     let onMoveMediaOverlay: (UUID, Double, Double, Double) -> Void
+    let onDropAsset: (UUID, TrackType, Double) -> Void
 
     private struct LaneDrag {
         let id: UUID
@@ -181,6 +183,32 @@ struct TimelineView: View {
             playhead
         }
         .frame(width: contentWidth, height: contentHeight, alignment: .topLeading)
+        .onDrop(of: [UTType.plainText], isTargeted: nil) { providers, location in
+            handleDrop(providers, at: location)
+        }
+    }
+
+    /// Media dragged from the library: the lane under the finger picks the track.
+    private func handleDrop(_ providers: [NSItemProvider], at location: CGPoint) -> Bool {
+        guard let provider = providers.first else { return false }
+        let time = self.time(at: location.x)
+        let videoTop = rulerHeight + 4 + laneSpacing
+        let pipTop = videoTop + clipHeight + laneSpacing + laneHeight + laneSpacing
+        let textTop = pipTop + laneHeight + laneSpacing
+        let audioTop = textTop + laneHeight + laneSpacing
+        let track: TrackType
+        if location.y >= audioTop {
+            track = .audio
+        } else if location.y >= pipTop && location.y < textTop {
+            track = .overlay
+        } else {
+            track = .main
+        }
+        _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+            guard let text = object as? NSString, let id = UUID(uuidString: text as String) else { return }
+            DispatchQueue.main.async { onDropAsset(id, track, time) }
+        }
+        return true
     }
 
     private var ruler: some View {

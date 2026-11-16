@@ -100,7 +100,8 @@ struct EditorView: View {
                     onMoveOverlay: { viewModel.retimeOverlay($0, start: $1, duration: $2) },
                     onMoveAudio: { viewModel.updateAudioClip($0) },
                     onAddOverlay: { showingAddOverlay = true },
-                    onMoveMediaOverlay: { viewModel.retimeMediaOverlay($0, move: $1, left: $2, right: $3) }
+                    onMoveMediaOverlay: { viewModel.retimeMediaOverlay($0, move: $1, left: $2, right: $3) },
+                    onDropAsset: { viewModel.dropAsset($0, on: $1, at: $2) }
                 )
                 .frame(maxHeight: .infinity)
                 Divider().overlay(EditorTheme.divider)
@@ -1585,6 +1586,25 @@ class EditorViewModel: ObservableObject {
         if overlay.isVideo { duration = min(duration, max(0.3, assetDuration - overlay.sourceStart)) }
         overlay.duration = duration
         updateMediaOverlay(overlay)
+    }
+
+    func dropAsset(_ id: UUID, on track: TrackType, at time: Double) {
+        guard let asset = mediaAssets.first(where: { $0.id == id }) else { return }
+        seek(to: time)
+        switch asset.type {
+        case .audio:
+            addAudio(asset, kind: .music, anchor: nil, atPlayhead: true)
+        case .image:
+            addMediaOverlay(asset)
+        case .video:
+            if track == .overlay {
+                addMediaOverlay(asset)
+            } else if track == .main {
+                insertClip(asset, selection: ClipSelection(startTime: 0, endTime: asset.duration))
+            } else {
+                errorMessage = "Solte vídeos na faixa de vídeo ou na faixa PiP."
+            }
+        }
     }
 
     /// Inserts a library video into the main sequence, after the clip under the playhead.
