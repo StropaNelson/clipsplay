@@ -211,6 +211,17 @@ struct EditorView: View {
             .disabled(!viewModel.canUndo)
             .opacity(viewModel.canUndo ? 1 : 0.4)
 
+            Button {
+                viewModel.redo()
+            } label: {
+                Image(systemName: "arrow.uturn.forward")
+                    .font(.system(size: 16, weight: .semibold))
+                    .frame(width: 36, height: 36)
+                    .background(EditorTheme.panelRaised, in: Circle())
+            }
+            .disabled(!viewModel.canRedo)
+            .opacity(viewModel.canRedo ? 1 : 0.4)
+
             Menu {
                 Button { Task { await viewModel.saveProject() } } label: {
                     Label("Salvar", systemImage: "square.and.arrow.down")
@@ -855,10 +866,12 @@ class EditorViewModel: ObservableObject {
     private var previewGeneration = 0
     private var previewSourceAssets: [AVAsset] = []
     private var undoStack: [UndoState] = []
+    private var redoStack: [UndoState] = []
     private var isDraggingOverlay = false
     private var narrationStartTime: Double?
     private var transcriptSaveTask: Task<Void, Never>?
     @Published var canUndo = false
+    @Published var canRedo = false
 
     init(project: Project) {
         self.project = project
@@ -1078,8 +1091,8 @@ class EditorViewModel: ObservableObject {
         let globalAudioClips: [AudioClip]
     }
 
-    func checkpoint() {
-        undoStack.append(UndoState(
+    private func currentUndoState() -> UndoState {
+        UndoState(
             episodes: episodes,
             mediaAssets: mediaAssets,
             introTemplate: project.introTemplate,
@@ -1087,14 +1100,32 @@ class EditorViewModel: ObservableObject {
             recapSettings: project.recapSettings,
             globalOverlays: project.globalOverlays,
             globalAudioClips: project.globalAudioClips
-        ))
+        )
+    }
+
+    func checkpoint() {
+        undoStack.append(currentUndoState())
         if undoStack.count > 40 { undoStack.removeFirst() }
+        redoStack.removeAll()
         canUndo = true
+        canRedo = false
     }
 
     func undo() {
         guard let state = undoStack.popLast() else { return }
+        redoStack.append(currentUndoState())
+        restore(state)
+    }
+
+    func redo() {
+        guard let state = redoStack.popLast() else { return }
+        undoStack.append(currentUndoState())
+        restore(state)
+    }
+
+    private func restore(_ state: UndoState) {
         canUndo = !undoStack.isEmpty
+        canRedo = !redoStack.isEmpty
         episodes = state.episodes
         mediaAssets = state.mediaAssets
         project.introTemplate = state.introTemplate
