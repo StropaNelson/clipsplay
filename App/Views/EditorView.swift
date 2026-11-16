@@ -484,7 +484,7 @@ class EditorViewModel: ObservableObject {
         }
         episodes[episodeIndex] = updatedEpisode
         project.episodes = episodes
-        selectedEpisode = updatedEpisode
+        self.selectedEpisode = updatedEpisode
         Task {
             await persistProjectChanges()
         }
