@@ -141,7 +141,13 @@ actor VideoProcessor {
                 sourceAudio: sourceAudio,
                 additionalAssets: additionalAssets
             )
-            let duration = segment.timeRange.duration
+            guard let sourceTimeRange = intersection(
+                of: segment.timeRange,
+                with: source.video.timeRange
+            ), CMTimeCompare(sourceTimeRange.duration, .zero) > 0 else {
+                throw ProcessorError.invalidTimeRange
+            }
+            let duration = sourceTimeRange.duration
             let overlapDuration: CMTime
             if let previousDuration {
                 let overlap = min(transitionLimit, min(previousDuration.seconds / 3, duration.seconds / 3))
@@ -159,7 +165,7 @@ actor VideoProcessor {
             let end = CMTimeAdd(start, duration)
             let lane = clipLayouts.count % 2
             let compositionVideoTrack = videoTracks[lane]
-            try compositionVideoTrack.insertTimeRange(segment.timeRange, of: source.video, at: start)
+            try compositionVideoTrack.insertTimeRange(sourceTimeRange, of: source.video, at: start)
 
             let naturalSize = try await source.video.load(.naturalSize)
             let transform = try await source.video.load(.preferredTransform)
@@ -172,11 +178,13 @@ actor VideoProcessor {
             ))
 
             let compositionAudioTrack = audioTracks[lane]
-            if let sourceAudio = source.audio {
-                try compositionAudioTrack.insertTimeRange(segment.timeRange, of: sourceAudio, at: start)
-                audioLayouts.append((start, end, compositionAudioTrack, true))
-            } else {
-                audioLayouts.append((start, end, compositionAudioTrack, false))
+            if let sourceAudio = source.audio,
+               let audioTimeRange = intersection(of: sourceTimeRange, with: sourceAudio.timeRange),
+               CMTimeCompare(audioTimeRange.duration, .zero) > 0 {
+                let audioStart = CMTimeAdd(start, CMTimeSubtract(audioTimeRange.start, sourceTimeRange.start))
+                let audioEnd = CMTimeAdd(audioStart, audioTimeRange.duration)
+                try compositionAudioTrack.insertTimeRange(audioTimeRange, of: sourceAudio, at: audioStart)
+                audioLayouts.append((audioStart, audioEnd, compositionAudioTrack, true))
             }
 
             cursor = CMTimeCompare(cursor, end) > 0 ? cursor : end
@@ -314,6 +322,17 @@ actor VideoProcessor {
         videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
         videoComposition.instructions = instructions
         return videoComposition
+    }
+
+    private func intersection(of requestedRange: CMTimeRange, with availableRange: CMTimeRange) -> CMTimeRange? {
+        let start = CMTimeCompare(requestedRange.start, availableRange.start) < 0
+            ? availableRange.start
+            : requestedRange.start
+        let requestedEnd = CMTimeAdd(requestedRange.start, requestedRange.duration)
+        let availableEnd = CMTimeAdd(availableRange.start, availableRange.duration)
+        let end = CMTimeCompare(requestedEnd, availableEnd) > 0 ? availableEnd : requestedEnd
+        guard start.isNumeric, end.isNumeric, CMTimeCompare(end, start) > 0 else { return nil }
+        return CMTimeRange(start: start, end: end)
     }
 
     private func renderTransform(
