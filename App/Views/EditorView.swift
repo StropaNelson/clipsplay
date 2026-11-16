@@ -1123,7 +1123,7 @@ class EditorViewModel: ObservableObject {
                 var clips = episode.mainClips
                 guard let index = clips.firstIndex(where: { $0.id == segment.id }) else { return }
                 let original = clips[index]
-                let copy = VideoSegment(
+                var copy = VideoSegment(
                     startTime: original.startTime,
                     endTime: original.endTime,
                     sourceType: original.sourceType,
@@ -1132,6 +1132,8 @@ class EditorViewModel: ObservableObject {
                     narrationAssetID: original.narrationAssetID,
                     volume: original.volume
                 )
+                copy.narrationVolume = original.narrationVolume
+                copy.narrationOffset = original.narrationOffset
                 clips.insert(copy, at: index + 1)
                 episode.mainClips = clips
             }
