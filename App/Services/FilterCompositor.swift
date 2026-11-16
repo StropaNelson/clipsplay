@@ -436,10 +436,20 @@ private final class AutoFramingTracker {
     }
 
     func target(for image: CIImage, at time: Double) -> CGPoint? {
-        if let lastTarget, abs(time - lastDetectionTime) < 0.2 { return lastTarget }
-        if lastTarget == nil, abs(time - lastDetectionTime) < 0.2 { return nil }
+        if let lastTarget, abs(time - lastDetectionTime) < 0.35 { return lastTarget }
+        if lastTarget == nil, abs(time - lastDetectionTime) < 0.35 { return nil }
         lastDetectionTime = time
-        guard let detected = detectSubject(in: image) else { return lastTarget }
+        let extent = image.extent
+        let detectionScale = min(1, 320 / max(extent.width, extent.height))
+        guard detectionScale > 0 else { return lastTarget }
+        let detectionImage = detectionScale < 0.999
+            ? image.transformed(by: CGAffineTransform(scaleX: detectionScale, y: detectionScale))
+            : image
+        guard var detected = detectSubject(in: detectionImage) else { return lastTarget }
+        detected = CGPoint(
+            x: extent.minX + (detected.x - detectionImage.extent.minX) / detectionScale,
+            y: extent.minY + (detected.y - detectionImage.extent.minY) / detectionScale
+        )
         if let lastTarget {
             self.lastTarget = CGPoint(
                 x: lastTarget.x * 0.76 + detected.x * 0.24,

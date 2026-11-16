@@ -14,7 +14,7 @@ struct ClipSuggestionsView: View {
     @State private var selected: Set<UUID> = []
     @State private var sceneCuts: [Double]
     @State private var useSceneCuts = true
-    @State private var autoFraming = true
+    @State private var autoFraming = false
     @State private var maxResults = 8
     @State private var isAnalyzingScenes = false
     @State private var errorMessage: String?

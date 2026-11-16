@@ -17,6 +17,7 @@ struct Project: Codable, Identifiable {
     var aspectRatio: AspectRatio
     var resolution: ExportResolution
     var fitMode: FitMode
+    var operation: ProjectOperation?
     var episodes: [Episode]
     var mediaAssets: [MediaAsset]
     var introTemplate: SegmentTemplate?
@@ -57,6 +58,7 @@ struct Project: Codable, Identifiable {
         self.aspectRatio = .original
         self.resolution = .original
         self.fitMode = .fit
+        self.operation = nil
         self.episodes = []
         self.mediaAssets = []
         self.introTemplate = nil

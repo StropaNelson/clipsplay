@@ -15,7 +15,7 @@ enum EditorTheme {
 
 enum EditorPanel: String, CaseIterable, Identifiable {
     case media = "Mídia"
-    case episodes = "Episódios"
+    case episodes = "Saídas"
     case export = "Exportar"
 
     var id: String { rawValue }
@@ -71,6 +71,7 @@ struct EditorView: View {
     }
 
     private var isRegular: Bool { horizontalSizeClass == .regular }
+    private var projectOperation: ProjectOperation? { initialOperation ?? viewModel.currentProject.operation }
 
     var body: some View {
         GeometryReader { geometry in
@@ -385,6 +386,7 @@ struct EditorView: View {
                 EpisodeListView(
                     episodes: $viewModel.episodes,
                     project: viewModel.currentProject,
+                    operation: projectOperation,
                     onSelect: { episode in
                         viewModel.selectEpisode(episode)
                         sheetPanel = nil
@@ -392,7 +394,7 @@ struct EditorView: View {
                     onEdit: { episode in viewModel.selectEpisode(episode) },
                     onRegenerate: { length in Task { await viewModel.regenerateEpisodes(length: length) } }
                 )
-                .navigationTitle("Episódios")
+                .navigationTitle("Saídas")
                 .navigationBarTitleDisplayMode(.inline)
             }
         case .export:
@@ -443,7 +445,7 @@ struct EditorView: View {
         didOpenInitialOperation = true
         switch initialOperation {
         case .multiply:
-            open(.export)
+            showingClipSuggestions = true
         case .podcast:
             if viewModel.editableTranscriptWords.isEmpty {
                 showingTranscription = true
@@ -2362,7 +2364,7 @@ class EditorViewModel: ObservableObject {
                 startTime: start,
                 endTime: end,
                 sourceType: .mainVideo,
-                transitionStyle: .none
+                transitionStyle: TransitionStyle.none
             )
             if autoFraming {
                 var adjustments = clip.clipAdjustments

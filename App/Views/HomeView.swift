@@ -375,6 +375,7 @@ class HomeViewModel: ObservableObject {
         errorMessage = nil
         do {
             var project = try await importer.importVideo(from: videoURL, projectName: trimmed)
+            project.operation = operation
             project.regenerateEpisodes()
             try await storage.saveProject(project)
             await loadProjects()

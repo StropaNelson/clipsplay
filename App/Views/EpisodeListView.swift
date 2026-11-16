@@ -3,44 +3,59 @@ import SwiftUI
 struct EpisodeListView: View {
     @Binding var episodes: [Episode]
     let project: Project
+    let operation: ProjectOperation?
     let onSelect: (Episode) -> Void
     let onEdit: (Episode) -> Void
     let onRegenerate: (Double) -> Void
     
     @State private var showingRegenerateAlert = false
     @State private var newEpisodeLength: Double = 60
+
+    private var allowsAutomaticSplit: Bool {
+        operation != .multiply && operation != .podcast
+    }
+
+    private var outputsTitle: String {
+        operation == .episodes ? "Episódios" : "Saídas"
+    }
+
+    private var outputsCountLabel: String {
+        operation == .episodes ? "episódios" : "saídas"
+    }
     
     var body: some View {
         List {
-            Section {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Label("Divisão Automática", systemImage: "scissors")
-                            .font(.headline)
-                        Spacer()
-                        Button("Regenerar") { showingRegenerateAlert = true }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
+            if allowsAutomaticSplit {
+                Section {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Label("Divisão Automática", systemImage: "scissors")
+                                .font(.headline)
+                            Spacer()
+                            Button("Regenerar") { showingRegenerateAlert = true }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                        }
+
+                        HStack {
+                            Text("Duração por episódio")
+                            Spacer()
+                            TextField("", value: $newEpisodeLength, format: .number)
+                                .keyboardType(.numberPad)
+                                .frame(width: 80)
+                                .textFieldStyle(.roundedBorder)
+                            Text("segundos").foregroundStyle(.secondary)
+                        }
+
+                        Text("\(episodes.count) \(outputsCountLabel) • \(formatDuration(project.sourceVideoDuration)) total")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                    
-                    HStack {
-                        Text("Duração por episódio")
-                        Spacer()
-                        TextField("", value: $newEpisodeLength, format: .number)
-                            .keyboardType(.numberPad)
-                            .frame(width: 80)
-                            .textFieldStyle(.roundedBorder)
-                        Text("segundos").foregroundStyle(.secondary)
-                    }
-                    
-                    Text("\(episodes.count) episódios • \(formatDuration(project.sourceVideoDuration)) total")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    .padding(.vertical, 4)
                 }
-                .padding(.vertical, 4)
             }
             
-            Section("Episódios") {
+            Section(outputsTitle) {
                 ForEach(episodes) { episode in
                     EpisodeRowView(episode: episode, project: project)
                         .contentShape(Rectangle())
@@ -355,7 +370,7 @@ struct EpisodeDetailView: View {
                     }
                 }
             }
-            .navigationTitle("Editar Episódio \(episode.index + 1)")
+            .navigationTitle("Editar \(episode.title)")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
