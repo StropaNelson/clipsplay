@@ -132,9 +132,11 @@ struct EditorView: View {
             ExportProgressView(viewModel: viewModel)
         }
         .sheet(isPresented: $showingTranscriptEditor) {
-            TranscriptEditorView(words: viewModel.editableTranscriptWords) { ranges in
-                viewModel.removeSourceRanges(ranges)
-            }
+            TranscriptEditorView(
+                words: viewModel.editableTranscriptWords,
+                onRemove: { viewModel.removeSourceRanges($0) },
+                onSeekWord: { viewModel.seekToSourceTime($0) }
+            )
         }
         .sheet(isPresented: $showingTranscription) {
             TranscriptionView(
@@ -2220,6 +2222,17 @@ class EditorViewModel: ObservableObject {
                 moved.time = time
                 return moved
             }
+        }
+    }
+
+    /// Positions the playhead where a source-video time lands in the selected episode.
+    func seekToSourceTime(_ source: Double) {
+        guard let episode = selectedEpisode else { return }
+        for item in episode.storyline() where item.track == .main {
+            let clip = item.segment
+            guard clip.startTime <= source, source < clip.endTime else { continue }
+            seek(to: item.start + (source - clip.startTime) / clip.playbackSpeed)
+            return
         }
     }
 

@@ -4,6 +4,7 @@ import SwiftUI
 struct TranscriptEditorView: View {
     let words: [TranscriptWord]
     let onRemove: ([ClosedRange<Double>]) -> Void
+    var onSeekWord: (Double) -> Void = { _ in }
 
     @Environment(\.dismiss) private var dismiss
     @State private var mode = Mode.text
@@ -13,6 +14,7 @@ struct TranscriptEditorView: View {
     @State private var includeRepetitions = true
     @State private var margin = 0.15
     @State private var level = CutLevel.equilibrado
+    @State private var search = ""
     @State private var rejected: Set<String> = []
 
     enum CutLevel: String, CaseIterable, Identifiable {
@@ -76,21 +78,41 @@ struct TranscriptEditorView: View {
             Text("Toque nas palavras que quer cortar do vídeo. Vale para todos os episódios.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+            HStack {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Procurar palavra no vídeo", text: $search)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                if !search.isEmpty {
+                    Button { search = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.footnote)
+            .padding(8)
+            .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
             ScrollView {
                 WordFlowLayout(spacing: 4) {
                     ForEach(words.indices, id: \.self) { index in
                         let isStruck = struck.contains(index)
+                        let matches = !search.isEmpty && words[index].text.lowercased().trimmingCharacters(in: .punctuationCharacters).contains(search.lowercased())
                         Text(words[index].text)
                             .strikethrough(isStruck, color: .red)
                             .foregroundStyle(isStruck ? Color.red : Color.primary)
                             .padding(.horizontal, 4)
                             .padding(.vertical, 2)
                             .background(
-                                isStruck ? Color.red.opacity(0.15) : Color.clear,
+                                isStruck ? Color.red.opacity(0.15) : matches ? Color.yellow.opacity(0.35) : Color.clear,
                                 in: RoundedRectangle(cornerRadius: 4)
                             )
                             .onTapGesture {
-                                if isStruck { struck.remove(index) } else { struck.insert(index) }
+                                if !search.isEmpty && matches {
+                                    onSeekWord(words[index].start)
+                                } else if isStruck {
+                                    struck.remove(index)
+                                } else {
+                                    struck.insert(index)
+                                }
                             }
                     }
                 }
