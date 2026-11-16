@@ -26,8 +26,7 @@ let package = Package(
                 .portraitUpsideDown(.when(deviceFamilies: [.pad]))
             ],
             capabilities: [
-                .photoLibraryAddOnly,
-                .fileAccess([.userSelectedFiles, .userSelectedFilesReadWrite])
+                .fileAccess(.userSelectedFiles, mode: .readWrite)
             ]
         )
     ],
