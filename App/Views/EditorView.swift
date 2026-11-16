@@ -36,7 +36,7 @@ struct EditorView: View {
                         Button("Salvar", systemImage: "square.and.arrow.down") { Task { await viewModel.saveProject() } }
                         Button("Duplicar", systemImage: "doc.on.doc") { viewModel.showDuplicateSheet = true }
                         Divider()
-                        Button("Exportar Episódios", systemImage: "square.and.arrow.up") { viewModel.selectedTab = 3 }
+                        Button("Exportar Episódios", systemImage: "square.and.arrow.up") { viewModel.selectedTab = .export }
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
@@ -52,7 +52,7 @@ struct EditorView: View {
                 )
             }
             .sheet(isPresented: $viewModel.showImportAsset) {
-                AssetImportSheet(project: project) { asset in
+                AssetImportSheet { asset in
                     Task { await viewModel.addMediaAsset(asset) }
                 }
             }
@@ -176,7 +176,7 @@ struct EditorView: View {
         .background(.thinMaterial)
         .overlay(alignment: .bottom) {
             Rectangle()
-                .fill(Color.separator)
+                .fill(Color(.separator))
                 .frame(height: 0.5)
         }
     }
@@ -191,7 +191,7 @@ struct EditorView: View {
                     project: project,
                     onSelect: { episode in viewModel.selectEpisode(episode) },
                     onEdit: { episode in viewModel.editEpisode(episode) },
-                    onRegenerate: { Task { await viewModel.regenerateEpisodes() } }
+                    onRegenerate: { length in Task { await viewModel.regenerateEpisodes(length: length) } }
                 )
             case .assets:
                 MediaLibraryView(
@@ -246,35 +246,6 @@ enum EditorTab: String, CaseIterable, Identifiable {
     }
 }
 
-struct DuplicateProjectSheet: View {
-    @State var projectName: String
-    let onConfirm: (String) -> Void
-    let onCancel: () -> Void
-    @Environment(\.dismiss) private var dismiss
-    
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Duplicar Projeto") {
-                    TextField("Nome da cópia", text: $projectName)
-                }
-            }
-            .navigationTitle("Duplicar")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancelar") { onCancel(); dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Duplicar") { onConfirm(projectName); dismiss() }
-                        .disabled(projectName.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
-            }
-        }
-        .presentationDetents([.height(200)])
-    }
-}
-
 @MainActor
 class EditorViewModel: ObservableObject {
     @Published var selectedTab: EditorTab = .episodes
@@ -301,6 +272,7 @@ class EditorViewModel: ObservableObject {
     private let timelineEngine = TimelineEngine.shared
     private let exportManager = ExportManager.shared
     private var timeObserver: Any?
+    private var timeObserverPlayer: AVPlayer?
     
     init(project: Project) {
         self.project = project
@@ -369,9 +341,9 @@ class EditorViewModel: ObservableObject {
         // Open episode detail editor
     }
     
-    func regenerateEpisodes() async {
+    func regenerateEpisodes(length: Double) async {
         var updated = project
-        updated.episodeLength = project.episodeLength
+        updated.episodeLength = length
         updated.regenerateEpisodes()
         episodes = updated.episodes
         try? await storage.saveProject(updated)
@@ -472,14 +444,19 @@ class EditorViewModel: ObservableObject {
     }
     
     private func setupTimeObserver(for player: AVPlayer) {
-        timeObserver?.remove()
+        if let timeObserver, let timeObserverPlayer {
+            timeObserverPlayer.removeTimeObserver(timeObserver)
+        }
         timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) { [weak self] time in
-            guard let self = self else { return }
-            self.currentTimeString = self.timeString(time.seconds)
-            if let duration = player.currentItem?.duration.seconds, duration > 0 {
-                self.playbackProgress = time.seconds / duration
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.currentTimeString = self.timeString(time.seconds)
+                if let duration = player.currentItem?.duration.seconds, duration > 0 {
+                    self.playbackProgress = time.seconds / duration
+                }
             }
         }
+        timeObserverPlayer = player
     }
     
     func togglePlayback() {
@@ -524,7 +501,7 @@ class EditorViewModel: ObservableObject {
                 settings: exportSettings,
                 selectedEpisodes: selection
             ) { progress in
-                await MainActor.run {
+                Task { @MainActor in
                     self.exportProgress = progress
                 }
             }

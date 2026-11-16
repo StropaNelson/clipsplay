@@ -38,7 +38,7 @@ actor VideoImporter {
         
         let thumbnailURL = try await generateThumbnail(for: asset, at: min(1, duration), saveTo: mediaDir)
         
-        let project = Project(
+        var project = Project(
             name: projectName ?? sourceURL.deletingPathExtension().lastPathComponent,
             sourceVideoURL: destURL,
             sourceVideoDuration: duration,
@@ -61,7 +61,7 @@ actor VideoImporter {
         return project
     }
     
-    func importMediaAsset(from sourceURL: URL, type: AssetType, project: inout Project) async throws -> MediaAsset {
+    func importMediaAsset(from sourceURL: URL, type: AssetType) async throws -> MediaAsset {
         let access = sourceURL.startAccessingSecurityScopedResource()
         defer { if access { sourceURL.stopAccessingSecurityScopedResource() } }
         
@@ -109,7 +109,6 @@ actor VideoImporter {
             thumbnailURL: thumbnailURL
         )
         
-        project.mediaAssets.append(assetItem)
         return assetItem
     }
     

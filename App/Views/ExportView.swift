@@ -139,7 +139,7 @@ struct EpisodeExportRow: View {
             HStack {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .font(.title2)
-                    .foregroundStyle(isSelected ? .accentColor : .secondary)
+                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
                 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Episódio \(episode.index + 1)")
@@ -223,8 +223,9 @@ struct ExportEstimateView: View {
     }
     
     private func calculateRenderSize() -> CGSize {
-        let naturalSize = project.sourceVideoNaturalSize.cgSize
-        let transform = project.sourceVideoTransform.cgAffineTransform
+        let sourceRect = CGRect(origin: .zero, size: project.sourceVideoNaturalSize.cgSize)
+            .applying(project.sourceVideoTransform.cgAffineTransform)
+        let naturalSize = CGSize(width: abs(sourceRect.width), height: abs(sourceRect.height))
         
         guard let ratio = settings.aspectRatio.ratio else { return naturalSize }
         guard let longSide = settings.resolution.longSide else { return naturalSize }

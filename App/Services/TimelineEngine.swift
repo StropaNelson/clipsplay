@@ -1,5 +1,6 @@
 import Foundation
 import CoreMedia
+import AVFoundation
 
 actor TimelineEngine {
     static let shared = TimelineEngine()
@@ -94,7 +95,7 @@ actor TimelineEngine {
         return trimmed
     }
     
-    func computeTrackSegments(for episode: Episode, project: Project) -> [TrackSegments] {
+    nonisolated func computeTrackSegments(for episode: Episode, project: Project) -> [TrackSegments] {
         var tracks: [TrackType: [TimelineSegment]] = [:]
         
         for trackType in TrackType.allCases {
@@ -177,7 +178,7 @@ actor TimelineEngine {
             }
         }
         
-        for (i, recap) in episode.effectiveRecaps.enumerated() {
+        for recap in episode.effectiveRecaps {
             if recap.duration <= 0 { issues.append(.zeroDuration(track: .recap)) }
             if recap.endTime > project.sourceVideoDuration && recap.sourceType == .mainVideo {
                 issues.append(.outOfBounds(track: .recap, max: project.sourceVideoDuration))
@@ -235,7 +236,7 @@ struct TimelineSegment: Identifiable {
     var duration: Double
     var sourceStartTime: Double
     var sourceEndTime: Double
-    let sourceType: SourceType
+    var sourceType: SourceType
     let assetID: UUID?
     var isEnabled: Bool
     

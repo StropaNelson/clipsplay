@@ -25,14 +25,14 @@ actor ExportManager {
         
         progressHandler(ExportProgress(stage: .composing, episode: episodeNumber, progress: 0.1, message: "Montando segmentos..."))
         
-        let renderSize = processor.calculateRenderSize(
+        let renderSize = await processor.calculateRenderSize(
             aspect: settings.aspectRatio,
             resolution: settings.resolution,
             naturalSize: project.sourceVideoNaturalSize.cgSize,
             transform: project.sourceVideoTransform.cgAffineTransform
         )
         
-        let videoComposition = processor.createVideoComposition(
+        let videoComposition = await processor.createVideoComposition(
             for: composition.tracks(withMediaType: .video).first!,
             renderSize: renderSize,
             transform: project.sourceVideoTransform.cgAffineTransform,
@@ -193,8 +193,8 @@ enum ExportQuality: String, CaseIterable, Identifiable {
     
     var presetName: String {
         switch self {
-        case .low: return AVAssetExportPresetMediumQuality
-        case .medium: return AVAssetExportPresetHighQuality
+        case .low: return AVAssetExportPresetLowQuality
+        case .medium: return AVAssetExportPresetMediumQuality
         case .high: return AVAssetExportPreset1920x1080
         case .maximum: return AVAssetExportPresetHighestQuality
         }

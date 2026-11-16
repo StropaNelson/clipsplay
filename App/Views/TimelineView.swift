@@ -115,25 +115,30 @@ struct TimelineView: View {
             let majorInterval = majorTickInterval()
             let startTime = horizontalOffset / pixelsPerSecond
             let endTime = startTime + visibleDuration
+            let tickCount = max(0, Int((endTime - startTime) / majorInterval) + 1)
             
-            ForEach(0..<Int((endTime - startTime) / majorInterval) + 1, id: \.self) { i in
-                let time = startTime + Double(i) * majorInterval
-                if time >= 0 && time <= totalDuration {
-                    let x = (time - horizontalOffset / pixelsPerSecond) * pixelsPerSecond
-                    
-                    VStack(alignment: .leading, spacing: 0) {
-                        Rectangle()
-                            .fill(Color.separator)
-                            .frame(width: 1, height: rulerHeight)
-                        
-                        Text(formatTime(time))
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                            .offset(x: 2, y: 2)
-                    }
-                    .position(x: x, y: rulerHeight / 2)
-                }
+            ForEach(0..<tickCount, id: \.self) { index in
+                timeRulerTick(index: index, startTime: startTime, majorInterval: majorInterval)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func timeRulerTick(index: Int, startTime: Double, majorInterval: Double) -> some View {
+        let time = startTime + Double(index) * majorInterval
+        if time >= 0 && time <= totalDuration {
+            let x = (time - horizontalOffset / pixelsPerSecond) * pixelsPerSecond
+            VStack(alignment: .leading, spacing: 0) {
+                Rectangle()
+                    .fill(Color(.separator))
+                    .frame(width: 1, height: rulerHeight)
+
+                Text(formatTime(time))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .offset(x: 2, y: 2)
+            }
+            .position(x: x, y: rulerHeight / 2)
         }
     }
     
@@ -379,7 +384,7 @@ struct TrackView: View {
         }
         .overlay(alignment: .bottom) {
             Rectangle()
-                .fill(Color.separator)
+                .fill(Color(.separator))
                 .frame(height: 0.5)
         }
     }
@@ -510,7 +515,9 @@ struct SegmentEditorView: View {
         _sourceEndTime = State(initialValue: segment.sourceEndTime)
         _isEnabled = State(initialValue: segment.isEnabled)
         _sourceType = State(initialValue: segment.sourceType)
-        _selectedAsset = State(initialValue: segment.assetID.flatMap { project.mediaAssets.first { $0.id == $0 } })
+        _selectedAsset = State(initialValue: segment.assetID.flatMap { assetID in
+            project.mediaAssets.first { $0.id == assetID }
+        })
     }
     
     var body: some View {

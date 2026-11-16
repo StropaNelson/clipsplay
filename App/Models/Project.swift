@@ -1,8 +1,9 @@
 import Foundation
 import CoreMedia
+import AVFoundation
 
 struct Project: Codable, Identifiable {
-    let id: UUID
+    var id: UUID
     var name: String
     var createdAt: Date
     var updatedAt: Date
@@ -169,7 +170,7 @@ struct Episode: Codable, Identifiable {
                 let recapStart = max(0, recapEnd - recapSettings.duration)
                 self.recapSegments = [VideoSegment(startTime: recapStart, endTime: recapEnd, sourceType: .mainVideo)]
             } else if recapSettings.mode == .manual {
-                self.recapSegments = recapSettings.manualSegments.map { VideoSegment(startTime: $0.start, endTime: $0.end, sourceType: .mainVideo) }
+                self.recapSegments = recapSettings.manualSegments.map { VideoSegment(startTime: $0.startTime, endTime: $0.endTime, sourceType: .mainVideo) }
             }
         }
     }
@@ -209,7 +210,7 @@ struct Episode: Codable, Identifiable {
             let start = max(0, end - settings.duration)
             recapSegments = [VideoSegment(startTime: start, endTime: end, sourceType: .mainVideo)]
         } else if settings.mode == .manual {
-            recapSegments = settings.manualSegments.map { VideoSegment(startTime: $0.start, endTime: $0.end, sourceType: .mainVideo) }
+            recapSegments = settings.manualSegments.map { VideoSegment(startTime: $0.startTime, endTime: $0.endTime, sourceType: .mainVideo) }
         }
     }
 }
@@ -324,7 +325,7 @@ struct CoverSettings: Codable {
     }
 }
 
-struct MediaAsset: Codable, Identifiable {
+struct MediaAsset: Codable, Identifiable, Hashable {
     let id: UUID
     var name: String
     var fileURL: String
@@ -349,6 +350,14 @@ struct MediaAsset: Codable, Identifiable {
     
     var url: URL { URL(fileURLWithPath: fileURL) }
     var thumbnailFileURL: URL? { thumbnailURL.map { URL(fileURLWithPath: $0) } }
+
+    static func == (lhs: MediaAsset, rhs: MediaAsset) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
 }
 
 enum AssetType: String, Codable, CaseIterable, Identifiable {

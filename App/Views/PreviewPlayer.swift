@@ -14,6 +14,7 @@ struct PreviewPlayerView: View {
     @State private var isPlaying = false
     @State private var showControls = true
     @State private var controlsTimer: Timer?
+    @State private var timeObserver: Any?
     
     var body: some View {
         GeometryReader { geometry in
@@ -95,31 +96,33 @@ struct PreviewPlayerView: View {
             setupTimeObserver()
         }
         .onDisappear {
-            removeTimeObserver()
+            if let timeObserver {
+                player.removeTimeObserver(timeObserver)
+            }
             controlsTimer?.invalidate()
         }
     }
     
     private func setupTimeObserver() {
         let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
-        player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
-            currentTime = time
-            if let item = player.currentItem {
-                duration = item.duration
+        timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
+            Task { @MainActor in
+                currentTime = time
+                if let item = player.currentItem {
+                    duration = item.duration
+                }
+                isPlaying = player.timeControlStatus == .playing
             }
-            isPlaying = player.timeControlStatus == .playing
         }
-    }
-    
-    private func removeTimeObserver() {
-        // Time observer removal would need to be stored
     }
     
     private func resetControlsTimer() {
         controlsTimer?.invalidate()
         controlsTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { _ in
-            withAnimation(.easeInOut(duration: 0.2)) {
-                showControls = false
+            Task { @MainActor in
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    showControls = false
+                }
             }
         }
     }

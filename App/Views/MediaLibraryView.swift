@@ -215,7 +215,6 @@ extension AssetType {
 }
 
 struct AssetImportSheet: View {
-    let project: Project
     let onComplete: (MediaAsset) -> Void
     
     @Environment(\.dismiss) private var dismiss
@@ -313,8 +312,7 @@ struct AssetImportSheet: View {
                 switch result {
                 case .success(let urls):
                     guard let url = urls.first else { return }
-                    var projectCopy = project
-                    let asset = try await importer.importMediaAsset(from: url, type: type, project: &projectCopy)
+                    let asset = try await importer.importMediaAsset(from: url, type: type)
                     await MainActor.run {
                         onComplete(asset)
                         dismiss()

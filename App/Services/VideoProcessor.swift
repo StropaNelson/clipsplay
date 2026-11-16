@@ -76,10 +76,10 @@ actor VideoProcessor {
         
         var cursor = CMTime.zero
         for segment in segments {
-            let (track, assetToUse) = try await getTrackForSegment(segment, sourceVideo: sourceVideo, sourceAudio: sourceAudio, additionalAssets: additionalAssets)
+            let tracks = try await getTrackForSegment(segment, sourceVideo: sourceVideo, sourceAudio: sourceAudio, additionalAssets: additionalAssets)
             let range = segment.timeRange
-            try vTrack.insertTimeRange(range, of: track.video, at: cursor)
-            if let sourceAudio = track.audio, let aTrack = aTrack {
+            try vTrack.insertTimeRange(range, of: tracks.video, at: cursor)
+            if let sourceAudio = tracks.audio, let aTrack = aTrack {
                 try aTrack.insertTimeRange(range, of: sourceAudio, at: cursor)
             }
             cursor = CMTimeAdd(cursor, range.duration)

@@ -5,7 +5,7 @@ struct EpisodeListView: View {
     let project: Project
     let onSelect: (Episode) -> Void
     let onEdit: (Episode) -> Void
-    let onRegenerate: () -> Void
+    let onRegenerate: (Double) -> Void
     
     @State private var showingRegenerateAlert = false
     @State private var newEpisodeLength: Double = 60
@@ -74,8 +74,7 @@ struct EpisodeListView: View {
                 .keyboardType(.numberPad)
             Button("Cancelar", role: .cancel) {}
             Button("Regenerar") {
-                project.episodeLength = newEpisodeLength
-                onRegenerate()
+                onRegenerate(newEpisodeLength)
             }
         } message: {
             Text("Isso recriará todos os episódios com a nova duração. Edições manuais serão perdidas.")
@@ -83,7 +82,7 @@ struct EpisodeListView: View {
     }
     
     private func reindexEpisodes() {
-        for (index, episode) in episodes.enumerated() {
+        for index in episodes.indices {
             episodes[index].index = index
         }
     }
@@ -206,7 +205,7 @@ struct SegmentBadge: View {
 }
 
 struct EpisodeDetailView: View {
-    let episode: Episode
+    @Binding var episode: Episode
     let project: Project
     let mediaAssets: [MediaAsset]
     let onSave: () -> Void
@@ -225,21 +224,22 @@ struct EpisodeDetailView: View {
     @State private var recapMode: RecapSettings.RecapMode = .manual
     @State private var recapSegments: [VideoSegment] = []
     
-    init(episode: Episode, project: Project, mediaAssets: [MediaAsset], onSave: @escaping () -> Void) {
-        self.episode = episode
+    init(episode: Binding<Episode>, project: Project, mediaAssets: [MediaAsset], onSave: @escaping () -> Void) {
+        let currentEpisode = episode.wrappedValue
+        self._episode = episode
         self.project = project
         self.mediaAssets = mediaAssets
         self.onSave = onSave
-        self._mainStart = State(initialValue: episode.mainStart)
-        self._mainEnd = State(initialValue: episode.mainEnd)
-        self._useCustomIntro = State(initialValue: episode.customIntroTemplate != nil)
-        self._customIntroStart = State(initialValue: episode.customIntroTemplate?.startTime ?? 0)
-        self._customIntroEnd = State(initialValue: episode.customIntroTemplate?.endTime ?? 5)
-        self._useCustomOutro = State(initialValue: episode.customOutroTemplate != nil)
-        self._customOutroStart = State(initialValue: episode.customOutroTemplate?.startTime ?? 0)
-        self._customOutroEnd = State(initialValue: episode.customOutroTemplate?.endTime ?? 5)
+        self._mainStart = State(initialValue: currentEpisode.mainStart)
+        self._mainEnd = State(initialValue: currentEpisode.mainEnd)
+        self._useCustomIntro = State(initialValue: currentEpisode.customIntroTemplate != nil)
+        self._customIntroStart = State(initialValue: currentEpisode.customIntroTemplate?.startTime ?? 0)
+        self._customIntroEnd = State(initialValue: currentEpisode.customIntroTemplate?.endTime ?? 5)
+        self._useCustomOutro = State(initialValue: currentEpisode.customOutroTemplate != nil)
+        self._customOutroStart = State(initialValue: currentEpisode.customOutroTemplate?.startTime ?? 0)
+        self._customOutroEnd = State(initialValue: currentEpisode.customOutroTemplate?.endTime ?? 5)
         self._recapMode = State(initialValue: project.recapSettings.mode)
-        self._recapSegments = State(initialValue: episode.customRecapSegments)
+        self._recapSegments = State(initialValue: currentEpisode.customRecapSegments)
     }
     
     var body: some View {
