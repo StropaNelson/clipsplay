@@ -214,7 +214,7 @@ private final class RecognitionState: @unchecked Sendable {
     var continuation: CheckedContinuation<[SFTranscriptionSegment], Error>?
     var task: SFSpeechRecognitionTask?
     private var committed: [SFTranscriptionSegment] = []
-    private var lastCommittedText = ""
+    private var lastCommittedKey = ""
     private var latest: [SFTranscriptionSegment] = []
 
     private static func text(_ segments: [SFTranscriptionSegment]) -> String {
@@ -224,10 +224,12 @@ private final class RecognitionState: @unchecked Sendable {
     func commit(_ segments: [SFTranscriptionSegment]) {
         lock.lock()
         defer { lock.unlock() }
-        let text = Self.text(segments)
-        if !segments.isEmpty, text != lastCommittedText {
+        // The same utterance can arrive twice (metadata result, then final); repeated words
+        // spoken later have a different start time and are kept.
+        let key = "\(segments.first?.timestamp ?? -1)|\(Self.text(segments))"
+        if !segments.isEmpty, key != lastCommittedKey {
             committed.append(contentsOf: segments)
-            lastCommittedText = text
+            lastCommittedKey = key
         }
         latest = []
     }
