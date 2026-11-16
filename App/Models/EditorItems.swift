@@ -126,6 +126,29 @@ struct AudioClip: Codable, Identifiable, Hashable {
     var endTime: Double { timelineStart + duration }
 }
 
+/// Picture-in-picture image or video placed above the main video.
+struct MediaOverlay: Codable, Identifiable, Hashable {
+    var id = UUID()
+    var assetID: UUID
+    var name: String
+    var isVideo: Bool
+    var startTime: Double
+    var duration: Double
+    var sourceStart: Double = 0
+    /// Center normalized to the video frame (0...1, origin top-left).
+    var centerX: Double = 0.72
+    var centerY: Double = 0.28
+    /// Width as a fraction of the video width.
+    var widthFraction: Double = 0.4
+    var volume: Float = 0
+
+    var endTime: Double { startTime + duration }
+
+    func isVisible(at time: Double) -> Bool {
+        time >= startTime && time < endTime
+    }
+}
+
 /// Result of the trim sheet used when choosing an intro/outro/recap clip.
 struct ClipSelection {
     var startTime: Double
@@ -184,6 +207,11 @@ extension Episode {
     var audioClips: [AudioClip] {
         get { storedAudioClips ?? [] }
         set { storedAudioClips = newValue }
+    }
+
+    var mediaOverlays: [MediaOverlay] {
+        get { storedMediaOverlays ?? [] }
+        set { storedMediaOverlays = newValue }
     }
 
     /// Sequential layout of every video clip: intro → recaps → main pieces → outro.

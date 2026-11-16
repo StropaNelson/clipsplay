@@ -38,7 +38,16 @@ actor ExportManager {
         
         progressHandler(ExportProgress(stage: .exporting, episode: episodeNumber, progress: 0.2, message: "Exportando vídeo..."))
         
-        let videoComposition = await processor.applyTextOverlays(episode.resolvedOverlays(global: project.globalOverlays), to: output.videoComposition)
+        let images: [ImageOverlayRender] = episode.mediaOverlays.filter { !$0.isVideo }.compactMap { overlay in
+            guard let asset = project.mediaAssets.first(where: { $0.id == overlay.assetID }),
+                  let image = UIImage(contentsOfFile: asset.url.path)?.cgImage else { return nil }
+            return ImageOverlayRender(image: image, overlay: overlay)
+        }
+        let videoComposition = await processor.applyTextOverlays(
+            episode.resolvedOverlays(global: project.globalOverlays),
+            images: images,
+            to: output.videoComposition
+        )
         try await processor.exportComposition(
             composition,
             to: videoURL,

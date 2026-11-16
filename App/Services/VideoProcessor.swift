@@ -107,6 +107,7 @@ actor VideoProcessor {
     func createComposition(
         from segments: [CompositionSegment],
         audioClips: [CompositionAudioClip] = [],
+        overlayVideos: [CompositionOverlayVideo] = [],
         sourceURL: URL,
         additionalAssets: [UUID: URL],
         aspect: AspectRatio,
@@ -197,7 +198,7 @@ actor VideoProcessor {
             switch segment.sourceType {
             case .mainVideo:
                 source = (sourceVideo, sourceAudio)
-            case .introAsset, .outroAsset, .recapAsset, .audioAsset:
+            case .introAsset, .outroAsset, .recapAsset, .audioAsset, .clipAsset:
                 guard let assetID = segment.assetID, let url = additionalAssets[assetID] else {
                     throw ProcessorError.missingAsset
                 }
@@ -286,6 +287,40 @@ actor VideoProcessor {
             )
         }
 
+        var overlayLayouts: [OverlayLayout] = []
+        for overlay in overlayVideos {
+            guard let url = additionalAssets[overlay.assetID] else { throw ProcessorError.missingAsset }
+            let overlayAsset = try loadAsset(url)
+            guard let video = try await overlayAsset.loadTracks(withMediaType: .video).first else { continue }
+            let start = CMTime(seconds: max(0, overlay.timelineStart), preferredTimescale: 600)
+            let duration = min(overlay.duration, CMTimeSubtract(videoEnd, start).seconds)
+            guard duration > 0.05 else { continue }
+            let requested = CMTimeRange(
+                start: CMTime(seconds: max(0, overlay.sourceStart), preferredTimescale: 600),
+                duration: CMTime(seconds: duration, preferredTimescale: 600)
+            )
+            guard let range = intersection(of: requested, with: try await video.load(.timeRange)),
+                  let track = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+                continue
+            }
+            try track.insertTimeRange(range, of: video, at: start)
+            let overlaySize = try await video.load(.naturalSize)
+            let overlayTransform = try await video.load(.preferredTransform)
+            overlayLayouts.append(OverlayLayout(
+                track: track,
+                start: start,
+                end: CMTimeAdd(start, range.duration),
+                naturalSize: overlaySize,
+                preferredTransform: overlayTransform,
+                centerX: overlay.centerX,
+                centerY: overlay.centerY,
+                widthFraction: overlay.widthFraction
+            ))
+            if overlay.volume > 0, let audio = try await overlayAsset.loadTracks(withMediaType: .audio).first {
+                try await placeAudio(audio, sourceRange: range, at: start, volume: overlay.volume, fadeIn: 0, fadeOut: 0)
+            }
+        }
+
         let renderSize = calculateRenderSize(
             aspect: aspect,
             resolution: resolution,
@@ -294,6 +329,7 @@ actor VideoProcessor {
         )
         let videoComposition = makeTransitionVideoComposition(
             clips: clipLayouts,
+            overlays: overlayLayouts,
             renderSize: renderSize,
             fitMode: fitMode,
             duration: composition.duration
@@ -308,9 +344,13 @@ actor VideoProcessor {
 
     /// Adds burned-in text for export. Core Animation layers can't be used with AVPlayerItem,
     /// so the editor draws the same overlays with SwiftUI during preview.
-    func applyTextOverlays(_ overlays: [TextOverlay], to videoComposition: AVVideoComposition) -> AVVideoComposition {
+    func applyTextOverlays(
+        _ overlays: [TextOverlay],
+        images: [ImageOverlayRender] = [],
+        to videoComposition: AVVideoComposition
+    ) -> AVVideoComposition {
         let visible = overlays.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.duration > 0 }
-        guard !visible.isEmpty,
+        guard !visible.isEmpty || !images.isEmpty,
               let mutable = videoComposition.mutableCopy() as? AVMutableVideoComposition else {
             return videoComposition
         }
@@ -321,6 +361,18 @@ actor VideoProcessor {
         let videoLayer = CALayer()
         videoLayer.frame = parent.frame
         parent.addSublayer(videoLayer)
+        for render in images {
+            let overlay = render.overlay
+            let layer = CALayer()
+            let width = CGFloat(overlay.widthFraction) * size.width
+            let aspect = CGFloat(render.image.height) / CGFloat(max(render.image.width, 1))
+            layer.bounds = CGRect(x: 0, y: 0, width: width, height: width * aspect)
+            layer.position = CGPoint(x: overlay.centerX * size.width, y: overlay.centerY * size.height)
+            layer.contents = render.image
+            layer.contentsGravity = .resizeAspect
+            Self.addVisibility(to: layer, start: overlay.startTime, duration: overlay.duration)
+            parent.addSublayer(layer)
+        }
         for overlay in visible {
             parent.addSublayer(Self.textLayer(for: overlay, renderSize: size))
         }
@@ -368,17 +420,21 @@ actor VideoProcessor {
         }
         container.addSublayer(text)
 
-        container.opacity = 0
-        let fade = min(0.2 / max(overlay.duration, 0.01), 0.25)
+        addVisibility(to: container, start: overlay.startTime, duration: overlay.duration)
+        return container
+    }
+
+    private static func addVisibility(to layer: CALayer, start: Double, duration: Double) {
+        layer.opacity = 0
+        let fade = min(0.2 / max(duration, 0.01), 0.25)
         let animation = CAKeyframeAnimation(keyPath: "opacity")
         animation.values = [0, 1, 1, 0]
         animation.keyTimes = [0, NSNumber(value: fade), NSNumber(value: 1 - fade), 1]
-        animation.beginTime = overlay.startTime <= 0 ? AVCoreAnimationBeginTimeAtZero : overlay.startTime
-        animation.duration = overlay.duration
+        animation.beginTime = start <= 0 ? AVCoreAnimationBeginTimeAtZero : start
+        animation.duration = duration
         animation.fillMode = .both
         animation.isRemovedOnCompletion = false
-        container.add(animation, forKey: "visibility")
-        return container
+        layer.add(animation, forKey: "visibility")
     }
     
     func exportComposition(
@@ -405,11 +461,13 @@ actor VideoProcessor {
     
     private func makeTransitionVideoComposition(
         clips: [CompositionClipLayout],
+        overlays: [OverlayLayout],
         renderSize: CGSize,
         fitMode: FitMode,
         duration: CMTime
     ) -> AVMutableVideoComposition {
-        let boundaries = ([CMTime.zero, duration] + clips.flatMap { [$0.start, $0.end] })
+        let edges = clips.flatMap { [$0.start, $0.end] } + overlays.flatMap { [$0.start, $0.end] }
+        let boundaries = ([CMTime.zero, duration] + edges.filter { CMTimeCompare($0, duration) <= 0 })
             .sorted { CMTimeCompare($0, $1) < 0 }
             .reduce(into: [CMTime]()) { result, time in
                 if result.last.map({ CMTimeCompare($0, time) != 0 }) ?? true {
@@ -428,7 +486,15 @@ actor VideoProcessor {
             let instruction = AVMutableVideoCompositionInstruction()
             instruction.timeRange = CMTimeRange(start: start, end: end)
             instruction.backgroundColor = UIColor.black.cgColor
+            let overlayLayers = overlays
+                .filter { CMTimeCompare($0.start, start) <= 0 && CMTimeCompare($0.end, end) >= 0 }
+                .map { overlay -> AVMutableVideoCompositionLayerInstruction in
+                    let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: overlay.track)
+                    layer.setTransform(overlayTransform(for: overlay, renderSize: renderSize), at: start)
+                    return layer
+                }
             guard !activeClips.isEmpty else {
+                instruction.layerInstructions = overlayLayers.reversed()
                 instructions.append(instruction)
                 continue
             }
@@ -455,9 +521,9 @@ actor VideoProcessor {
                     outgoing: (outgoing, outgoingBase),
                     instruction: instruction
                 )
-                instruction.layerInstructions = [incoming, outgoing]
+                instruction.layerInstructions = overlayLayers.reversed() + [incoming, outgoing]
             } else {
-                instruction.layerInstructions = activeClips.map { layer(for: $0).0 }
+                instruction.layerInstructions = overlayLayers.reversed() + activeClips.map { layer(for: $0).0 }
             }
             instructions.append(instruction)
         }
@@ -467,6 +533,20 @@ actor VideoProcessor {
         videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
         videoComposition.instructions = instructions
         return videoComposition
+    }
+
+    private func overlayTransform(for overlay: OverlayLayout, renderSize: CGSize) -> CGAffineTransform {
+        let rect = CGRect(origin: .zero, size: overlay.naturalSize).applying(overlay.preferredTransform)
+        let orientedWidth = max(abs(rect.width), 1)
+        let orientedHeight = abs(rect.height)
+        let scale = CGFloat(overlay.widthFraction) * renderSize.width / orientedWidth
+        return overlay.preferredTransform
+            .concatenating(CGAffineTransform(translationX: -rect.minX, y: -rect.minY))
+            .concatenating(CGAffineTransform(scaleX: scale, y: scale))
+            .concatenating(CGAffineTransform(
+                translationX: CGFloat(overlay.centerX) * renderSize.width - orientedWidth * scale / 2,
+                y: CGFloat(overlay.centerY) * renderSize.height - orientedHeight * scale / 2
+            ))
     }
 
     private func applyTransition(
@@ -746,6 +826,33 @@ struct CompositionAudioClip {
     let volume: Float
     let fadeIn: Double
     let fadeOut: Double
+}
+
+struct CompositionOverlayVideo {
+    let assetID: UUID
+    let timelineStart: Double
+    let sourceStart: Double
+    let duration: Double
+    let centerX: Double
+    let centerY: Double
+    let widthFraction: Double
+    let volume: Float
+}
+
+struct ImageOverlayRender {
+    let image: CGImage
+    let overlay: MediaOverlay
+}
+
+private struct OverlayLayout {
+    let track: AVMutableCompositionTrack
+    let start: CMTime
+    let end: CMTime
+    let naturalSize: CGSize
+    let preferredTransform: CGAffineTransform
+    let centerX: Double
+    let centerY: Double
+    let widthFraction: Double
 }
 
 struct CompositionBuildResult {

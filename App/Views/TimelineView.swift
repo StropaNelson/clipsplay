@@ -44,6 +44,7 @@ struct TimelineView: View {
     let segments: [TimelineSegment]
     let overlays: [TextOverlay]
     let audioClips: [AudioClip]
+    let mediaOverlays: [MediaOverlay]
     let totalDuration: Double
     let currentTime: Double
     let selectedID: UUID?
@@ -63,6 +64,8 @@ struct TimelineView: View {
     let onTrimSegment: (TimelineSegment, Double, Double) -> Void
     let onMoveOverlay: (UUID, Double, Double) -> Void
     let onMoveAudio: (AudioClip) -> Void
+    let onAddOverlay: () -> Void
+    let onMoveMediaOverlay: (UUID, Double, Double, Double) -> Void
 
     private struct LaneDrag {
         let id: UUID
@@ -119,6 +122,7 @@ struct TimelineView: View {
             Color.clear.frame(height: rulerHeight + 4)
             header(icon: "film", title: "Vídeo", height: clipHeight)
             header(icon: "waveform", title: "Som", height: laneHeight)
+            header(icon: "rectangle.on.rectangle", title: "PiP", height: laneHeight, action: onAddOverlay)
             header(icon: "textformat", title: "Texto", height: laneHeight, action: onAddText)
             header(icon: "music.note", title: "Áudio", height: laneHeight, action: onAddAudio)
         }
@@ -153,7 +157,7 @@ struct TimelineView: View {
     }
 
     private var contentHeight: CGFloat {
-        rulerHeight + 4 + clipHeight + laneHeight * 3 + laneSpacing * 4
+        rulerHeight + 4 + clipHeight + laneHeight * 4 + laneSpacing * 5
     }
 
     private func xPosition(for time: Double) -> CGFloat {
@@ -170,6 +174,7 @@ struct TimelineView: View {
                 ruler
                 videoLane
                 videoAudioLane
+                overlayLane
                 textLane
                 audioLane
             }
@@ -332,6 +337,32 @@ struct TimelineView: View {
                 }
                 .offset(x: xPosition(for: segment.startTime), y: 2)
                 .allowsHitTesting(false)
+            }
+        }
+        .frame(width: contentWidth, height: laneHeight, alignment: .topLeading)
+    }
+
+    private var overlayLane: some View {
+        ZStack(alignment: .topLeading) {
+            Color.white.opacity(0.03)
+                .frame(width: contentWidth, height: laneHeight)
+                .contentShape(Rectangle())
+                .onTapGesture { onSelect(nil) }
+            ForEach(mediaOverlays.sorted { $0.duration > $1.duration }) { overlay in
+                let drag = laneDrag?.id == overlay.id ? laneDrag : nil
+                let start = max(0, overlay.startTime + (drag?.move ?? 0) + (drag?.left ?? 0))
+                let duration = max(0.3, overlay.duration - (drag?.left ?? 0) + (drag?.right ?? 0))
+                laneItem(
+                    id: overlay.id,
+                    title: overlay.name,
+                    icon: overlay.isVideo ? "video.fill" : "photo.fill",
+                    color: .indigo,
+                    start: start,
+                    duration: duration,
+                    isSelected: overlay.id == selectedID
+                ) { move, left, right in
+                    onMoveMediaOverlay(overlay.id, move, left, right)
+                }
             }
         }
         .frame(width: contentWidth, height: laneHeight, alignment: .topLeading)
@@ -910,7 +941,7 @@ struct SegmentEditorView: View {
         switch trackType {
         case .intro: return [.introAsset, .mainVideo]
         case .recap: return [.recapAsset, .mainVideo]
-        case .main: return [.mainVideo]
+        case .main: return [.mainVideo, .clipAsset]
         case .outro: return [.outroAsset, .mainVideo]
         case .audio: return [.audioAsset]
         case .overlay: return [.imageAsset]
@@ -919,7 +950,7 @@ struct SegmentEditorView: View {
 
     private var filteredAssets: [MediaAsset] {
         switch sourceType {
-        case .introAsset, .outroAsset, .recapAsset: return project.mediaAssets.filter { $0.type == .video }
+        case .introAsset, .outroAsset, .recapAsset, .clipAsset: return project.mediaAssets.filter { $0.type == .video }
         default: return []
         }
     }

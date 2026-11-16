@@ -165,6 +165,7 @@ struct Episode: Codable, Identifiable {
     var storedMainClips: [VideoSegment]?
     var storedTextOverlays: [TextOverlay]?
     var storedAudioClips: [AudioClip]?
+    var storedMediaOverlays: [MediaOverlay]?
     
     init(index: Int, mainStart: Double, mainEnd: Double, introTemplate: SegmentTemplate?, outroTemplate: SegmentTemplate?, recapSettings: RecapSettings) {
         self.id = UUID()
@@ -294,6 +295,7 @@ enum SourceType: String, Codable, CaseIterable, Identifiable {
     case recapAsset = "Asset de Recapitulação"
     case audioAsset = "Asset de Áudio"
     case imageAsset = "Asset de Imagem"
+    case clipAsset = "Clipe da Biblioteca"
     
     var id: String { rawValue }
 }

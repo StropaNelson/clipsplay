@@ -56,6 +56,8 @@ struct EditorView: View {
     @State private var editingAudio: AudioClip?
     @State private var showingAddAudio = false
     @State private var narrationRequest: NarrationRequest?
+    @State private var showingAddOverlay = false
+    @State private var editingMediaOverlay: MediaOverlay?
 
     init(project: Project) {
         self.project = project
@@ -77,6 +79,7 @@ struct EditorView: View {
                     segments: viewModel.orderedSegments,
                     overlays: viewModel.resolvedOverlays,
                     audioClips: viewModel.resolvedAudioClips,
+                    mediaOverlays: viewModel.selectedEpisode?.mediaOverlays ?? [],
                     totalDuration: viewModel.timelineDuration,
                     currentTime: viewModel.currentTime,
                     selectedID: viewModel.selectedSegmentID,
@@ -95,7 +98,9 @@ struct EditorView: View {
                     audioDuration: { viewModel.audioAsset(for: $0)?.duration ?? $0.sourceEnd },
                     onTrimSegment: { viewModel.trimSegment($0, start: $1, end: $2) },
                     onMoveOverlay: { viewModel.retimeOverlay($0, start: $1, duration: $2) },
-                    onMoveAudio: { viewModel.updateAudioClip($0) }
+                    onMoveAudio: { viewModel.updateAudioClip($0) },
+                    onAddOverlay: { showingAddOverlay = true },
+                    onMoveMediaOverlay: { viewModel.retimeMediaOverlay($0, move: $1, left: $2, right: $3) }
                 )
                 .frame(maxHeight: .infinity)
                 Divider().overlay(EditorTheme.divider)
@@ -140,7 +145,11 @@ struct EditorView: View {
                     Task { await viewModel.addMediaAsset(asset) }
                 },
                 onAssign: { asset, selection in
-                    Task { await viewModel.assign(asset, to: request.track, selection: selection) }
+                    if request.track == .main {
+                        viewModel.insertClip(asset, selection: selection)
+                    } else {
+                        Task { await viewModel.assign(asset, to: request.track, selection: selection) }
+                    }
                 }
             )
         }
@@ -387,6 +396,14 @@ struct EditorView: View {
                 EditorTheme.stage
                 if let player = viewModel.previewPlayer {
                     PlayerCanvasView(player: player)
+                    MediaOverlayLayer(
+                        overlays: viewModel.visibleMediaOverlays,
+                        selectedID: viewModel.selectedSegmentID,
+                        imageURL: { overlay in viewModel.mediaAssets.first { $0.id == overlay.assetID }?.url },
+                        aspect: { viewModel.mediaAspect(for: $0) },
+                        onSelect: { viewModel.selectedSegmentID = $0 },
+                        onMove: { id, x, y, finished in viewModel.moveMediaOverlay(id, x: x, y: y, finished: finished) }
+                    )
                     TextOverlayLayer(
                         overlays: viewModel.visibleOverlays,
                         selectedID: viewModel.selectedSegmentID,
@@ -533,6 +550,11 @@ struct EditorView: View {
                     }
                     toolButton("Duplicar", icon: "plus.square.on.square") { viewModel.duplicateSelected() }
                     toolButton("Excluir", icon: "trash", role: .destructive) { viewModel.removeOverlay(overlay.id) }
+                } else if let media = viewModel.selectedMediaOverlay {
+                    toolButton("Fechar", icon: "xmark") { viewModel.selectedSegmentID = nil }
+                    Divider().frame(height: 30).overlay(EditorTheme.divider)
+                    toolButton("Editar", icon: "slider.horizontal.3") { editingMediaOverlay = media }
+                    toolButton("Excluir", icon: "trash", role: .destructive) { viewModel.removeMediaOverlay(media.id) }
                 } else if let clip = viewModel.selectedAudioClip {
                     toolButton("Fechar", icon: "xmark") { viewModel.selectedSegmentID = nil }
                     Divider().frame(height: 30).overlay(EditorTheme.divider)
@@ -544,6 +566,8 @@ struct EditorView: View {
                     toolButton("Episódios", icon: "film.stack") { open(.episodes) }
                     Divider().frame(height: 30).overlay(EditorTheme.divider)
                     toolButton("Dividir", icon: "scissors") { viewModel.splitAtPlayhead() }
+                    toolButton("Clipe", icon: "plus.rectangle.on.rectangle") { clipPickRequest = ClipPickRequest(track: .main) }
+                    toolButton("Sobrepor", icon: "rectangle.on.rectangle") { showingAddOverlay = true }
                     toolButton("Texto", icon: "textformat") { textEditRequest = viewModel.newTextRequest() }
                     toolButton("Áudio", icon: "music.note") { showingAddAudio = true }
                     toolButton("Narrar", icon: "mic.fill") { narrationRequest = NarrationRequest(segment: nil) }
@@ -602,6 +626,22 @@ struct EditorView: View {
                     episodeDuration: viewModel.timelineDuration,
                     onSave: { viewModel.updateAudioClip($0) },
                     onDelete: { viewModel.removeAudioClip(clip.id) }
+                )
+            }
+            .sheet(isPresented: $showingAddOverlay) {
+                AddOverlaySheet(
+                    assets: viewModel.mediaAssets.filter { $0.type == .image || $0.type == .video },
+                    onImportAsset: { asset in Task { await viewModel.addMediaAsset(asset) } },
+                    onAdd: { viewModel.addMediaOverlay($0) }
+                )
+            }
+            .sheet(item: $editingMediaOverlay) { overlay in
+                MediaOverlayEditorSheet(
+                    overlay: overlay,
+                    episodeDuration: viewModel.timelineDuration,
+                    assetDuration: viewModel.mediaAssets.first { $0.id == overlay.assetID }?.duration ?? overlay.duration,
+                    onSave: { viewModel.updateMediaOverlay($0) },
+                    onDelete: { viewModel.removeMediaOverlay(overlay.id) }
                 )
             }
             .sheet(item: $narrationRequest) { request in
@@ -1467,6 +1507,117 @@ class EditorViewModel: ObservableObject {
         updateAudioClip(clip)
     }
 
+    // MARK: Media overlays (picture-in-picture)
+
+    var selectedMediaOverlay: MediaOverlay? {
+        guard let selectedSegmentID else { return nil }
+        return selectedEpisode?.mediaOverlays.first { $0.id == selectedSegmentID }
+    }
+
+    var visibleMediaOverlays: [MediaOverlay] {
+        (selectedEpisode?.mediaOverlays ?? []).filter {
+            $0.isVisible(at: currentTime) || (!isPlaying && $0.id == selectedSegmentID)
+        }
+    }
+
+    func mediaAspect(for overlay: MediaOverlay) -> CGFloat {
+        guard let size = mediaAssets.first(where: { $0.id == overlay.assetID })?.naturalSize.cgSize,
+              size.width > 0, size.height > 0 else { return 16 / 9 }
+        return size.width / size.height
+    }
+
+    func addMediaOverlay(_ asset: MediaAsset) {
+        guard asset.type == .video || asset.type == .image else { return }
+        let isVideo = asset.type == .video
+        let start = min(currentTime, max(0, timelineDuration - 0.5))
+        let remaining = max(0.5, timelineDuration - start)
+        let overlay = MediaOverlay(
+            assetID: asset.id,
+            name: asset.name,
+            isVideo: isVideo,
+            startTime: start,
+            duration: isVideo ? min(max(asset.duration, 0.5), remaining) : min(3, remaining)
+        )
+        mutateSelectedEpisode(reloadPreview: isVideo) { $0.mediaOverlays.append(overlay) }
+        selectedSegmentID = overlay.id
+    }
+
+    func updateMediaOverlay(_ overlay: MediaOverlay) {
+        mutateSelectedEpisode(reloadPreview: overlay.isVideo) { episode in
+            if let index = episode.mediaOverlays.firstIndex(where: { $0.id == overlay.id }) {
+                episode.mediaOverlays[index] = overlay
+            }
+        }
+    }
+
+    func removeMediaOverlay(_ id: UUID) {
+        let isVideo = selectedEpisode?.mediaOverlays.first { $0.id == id }?.isVideo ?? false
+        if selectedSegmentID == id { selectedSegmentID = nil }
+        mutateSelectedEpisode(reloadPreview: isVideo) { $0.mediaOverlays.removeAll { $0.id == id } }
+    }
+
+    func moveMediaOverlay(_ id: UUID, x: Double, y: Double, finished: Bool) {
+        guard let episodeIndex = selectedEpisodeIndex,
+              let index = episodes[episodeIndex].mediaOverlays.firstIndex(where: { $0.id == id }) else { return }
+        if !isDraggingOverlay {
+            isDraggingOverlay = true
+            checkpoint()
+        }
+        selectedSegmentID = id
+        episodes[episodeIndex].mediaOverlays[index].centerX = x
+        episodes[episodeIndex].mediaOverlays[index].centerY = y
+        selectedEpisode = episodes[episodeIndex]
+        if finished {
+            isDraggingOverlay = false
+            let isVideo = episodes[episodeIndex].mediaOverlays[index].isVideo
+            Task { await persistProjectChanges(reloadPreview: isVideo) }
+        }
+    }
+
+    func retimeMediaOverlay(_ id: UUID, move: Double, left: Double, right: Double) {
+        guard var overlay = selectedEpisode?.mediaOverlays.first(where: { $0.id == id }) else { return }
+        let assetDuration = mediaAssets.first { $0.id == overlay.assetID }?.duration ?? overlay.duration
+        var trim = min(left, overlay.duration - 0.3)
+        if overlay.isVideo { trim = max(trim, -overlay.sourceStart) }
+        overlay.startTime = max(0, overlay.startTime + move + trim)
+        if overlay.isVideo { overlay.sourceStart += trim }
+        var duration = max(0.3, overlay.duration - trim + right)
+        if overlay.isVideo { duration = min(duration, max(0.3, assetDuration - overlay.sourceStart)) }
+        overlay.duration = duration
+        updateMediaOverlay(overlay)
+    }
+
+    /// Inserts a library video into the main sequence, after the clip under the playhead.
+    func insertClip(_ asset: MediaAsset, selection: ClipSelection) {
+        guard asset.type == .video else { return }
+        let start = max(0, min(selection.startTime, asset.duration))
+        let end = max(start, min(selection.endTime, asset.duration))
+        guard end - start >= 0.1 else {
+            errorMessage = "O trecho escolhido é curto demais."
+            return
+        }
+        if let narration = selection.narration, !mediaAssets.contains(where: { $0.id == narration.id }) {
+            mediaAssets.append(narration)
+        }
+        let time = currentTime
+        let clip = VideoSegment(
+            startTime: start,
+            endTime: end,
+            sourceType: .clipAsset,
+            assetID: asset.id,
+            narrationAssetID: selection.narration?.id,
+            volume: selection.clipVolume < 0.999 ? selection.clipVolume : nil
+        )
+        mutateSelectedEpisode { episode in
+            var clips = episode.mainClips
+            let current = episode.storyline().last { $0.track == .main && $0.start <= time }
+            let index = current.flatMap { item in clips.firstIndex { $0.id == item.segment.id } }.map { $0 + 1 } ?? clips.count
+            clips.insert(clip, at: min(index, clips.count))
+            episode.mainClips = clips
+        }
+        selectedSegmentID = clip.id
+    }
+
     // MARK: Narration
 
     func narrationRecordingChanged(_ recording: Bool, segment: TimelineSegment?) {
@@ -1585,7 +1736,8 @@ class EditorViewModel: ObservableObject {
         if let selectedSegmentID,
            !orderedSegments.contains(where: { $0.id == selectedSegmentID }),
            !episode.resolvedOverlays(global: project.globalOverlays).contains(where: { $0.id == selectedSegmentID }),
-           !episode.resolvedAudioClips(global: project.globalAudioClips).contains(where: { $0.id == selectedSegmentID }) {
+           !episode.resolvedAudioClips(global: project.globalAudioClips).contains(where: { $0.id == selectedSegmentID }),
+           !episode.mediaOverlays.contains(where: { $0.id == selectedSegmentID }) {
             self.selectedSegmentID = nil
         }
         durationString = timeString(timelineDuration)

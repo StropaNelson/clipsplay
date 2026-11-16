@@ -579,3 +579,229 @@ struct AudioClipEditorSheet: View {
         .presentationDetents([.medium, .large])
     }
 }
+
+// MARK: - Picture-in-picture
+
+struct AddOverlaySheet: View {
+    let assets: [MediaAsset]
+    let onImportAsset: (MediaAsset) -> Void
+    let onAdd: (MediaAsset) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var showingImport = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    if assets.isEmpty {
+                        Text("Importe uma imagem ou vídeo para sobrepor.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(assets) { asset in
+                        Button {
+                            onAdd(asset)
+                            dismiss()
+                        } label: {
+                            HStack(spacing: 12) {
+                                ZStack {
+                                    Color.black
+                                    if let url = asset.thumbnailFileURL, let image = UIImage(contentsOfFile: url.path) {
+                                        Image(uiImage: image).resizable().scaledToFill()
+                                    }
+                                }
+                                .frame(width: 64, height: 40)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                VStack(alignment: .leading) {
+                                    Text(asset.name).lineLimit(1)
+                                    Text(asset.type == .video ? "Vídeo · \(TimelineView.rulerLabel(asset.duration))" : "Imagem")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Image(systemName: "plus.circle.fill")
+                            }
+                        }
+                    }
+                } footer: {
+                    Text("A sobreposição começa na posição do cursor. Depois arraste na prévia para posicionar.")
+                }
+            }
+            .navigationTitle("Sobrepor")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Fechar") { dismiss() }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        showingImport = true
+                    } label: {
+                        Label("Importar", systemImage: "square.and.arrow.down")
+                    }
+                }
+            }
+            .sheet(isPresented: $showingImport) {
+                AssetImportSheet(initialType: .image) { asset in onImportAsset(asset) }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
+struct MediaOverlayEditorSheet: View {
+    let episodeDuration: Double
+    let assetDuration: Double
+    let onSave: (MediaOverlay) -> Void
+    let onDelete: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var overlay: MediaOverlay
+
+    init(overlay: MediaOverlay, episodeDuration: Double, assetDuration: Double, onSave: @escaping (MediaOverlay) -> Void, onDelete: @escaping () -> Void) {
+        self._overlay = State(initialValue: overlay)
+        self.episodeDuration = max(episodeDuration, 1)
+        self.assetDuration = max(assetDuration, 0.5)
+        self.onSave = onSave
+        self.onDelete = onDelete
+    }
+
+    private var maxDuration: Double {
+        let remaining = max(episodeDuration - overlay.startTime, 0.6)
+        return overlay.isVideo ? min(remaining, max(assetDuration - overlay.sourceStart, 0.6)) : remaining
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section(overlay.name) {
+                    HStack {
+                        Text("Tamanho")
+                        Slider(value: $overlay.widthFraction, in: 0.1...1)
+                        Text("\(Int(overlay.widthFraction * 100))%").monospacedDigit().frame(width: 48)
+                    }
+                    if overlay.isVideo {
+                        HStack {
+                            Image(systemName: overlay.volume == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                            Slider(value: $overlay.volume, in: 0...1)
+                            Text("\(Int(overlay.volume * 100))%").monospacedDigit().frame(width: 48)
+                        }
+                    }
+                }
+                Section {
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 3), spacing: 8) {
+                        positionButton("↖︎", x: 0.25, y: 0.22)
+                        positionButton("↑", x: 0.5, y: 0.22)
+                        positionButton("↗︎", x: 0.75, y: 0.22)
+                        positionButton("←", x: 0.25, y: 0.5)
+                        positionButton("•", x: 0.5, y: 0.5)
+                        positionButton("→", x: 0.75, y: 0.5)
+                        positionButton("↙︎", x: 0.25, y: 0.78)
+                        positionButton("↓", x: 0.5, y: 0.78)
+                        positionButton("↘︎", x: 0.75, y: 0.78)
+                    }
+                    .buttonStyle(.bordered)
+                } header: {
+                    Text("Posição")
+                } footer: {
+                    Text("Você também pode arrastar direto na prévia.")
+                }
+                Section("Tempo") {
+                    HStack {
+                        Text("Início")
+                        Slider(value: $overlay.startTime, in: 0...max(episodeDuration - 0.3, 0.1))
+                        Text(TimelineView.rulerLabel(overlay.startTime)).monospacedDigit()
+                    }
+                    HStack {
+                        Text("Duração")
+                        Slider(value: $overlay.duration, in: 0.3...max(maxDuration, 0.4))
+                        Text(String(format: "%.1fs", overlay.duration)).monospacedDigit()
+                    }
+                }
+                Section {
+                    Button("Remover sobreposição", role: .destructive) {
+                        onDelete()
+                        dismiss()
+                    }
+                }
+            }
+            .navigationTitle("Sobreposição")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancelar") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Salvar") {
+                        var result = overlay
+                        result.duration = min(result.duration, maxDuration)
+                        onSave(result)
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func positionButton(_ title: String, x: Double, y: Double) -> some View {
+        Button(title) {
+            overlay.centerX = x
+            overlay.centerY = y
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+/// Image overlays are drawn here during preview; video overlays are rendered by the composition,
+/// so only their selection frame is drawn.
+struct MediaOverlayLayer: View {
+    let overlays: [MediaOverlay]
+    let selectedID: UUID?
+    let imageURL: (MediaOverlay) -> URL?
+    let aspect: (MediaOverlay) -> CGFloat
+    let onSelect: (UUID) -> Void
+    let onMove: (UUID, Double, Double, Bool) -> Void
+
+    var body: some View {
+        GeometryReader { geometry in
+            let size = geometry.size
+            ZStack {
+                ForEach(overlays) { overlay in
+                    let width = CGFloat(overlay.widthFraction) * size.width
+                    let height = width / max(aspect(overlay), 0.1)
+                    ZStack {
+                        if !overlay.isVideo, let url = imageURL(overlay), let image = UIImage(contentsOfFile: url.path) {
+                            Image(uiImage: image).resizable().scaledToFit()
+                        } else {
+                            Color.white.opacity(0.001)
+                        }
+                    }
+                    .frame(width: width, height: height)
+                    .overlay(
+                        Rectangle()
+                            .stroke(Color.white, style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
+                            .opacity(overlay.id == selectedID ? 1 : 0)
+                    )
+                    .position(x: overlay.centerX * size.width, y: overlay.centerY * size.height)
+                    .onTapGesture { onSelect(overlay.id) }
+                    .gesture(
+                        DragGesture(coordinateSpace: .named("mediaCanvas"))
+                            .onChanged { value in
+                                onMove(overlay.id, clamp(value.location.x / size.width), clamp(value.location.y / size.height), false)
+                            }
+                            .onEnded { value in
+                                onMove(overlay.id, clamp(value.location.x / size.width), clamp(value.location.y / size.height), true)
+                            }
+                    )
+                }
+            }
+            .frame(width: size.width, height: size.height)
+            .coordinateSpace(name: "mediaCanvas")
+        }
+    }
+
+    private func clamp(_ value: CGFloat) -> Double {
+        Double(min(0.98, max(0.02, value)))
+    }
+}

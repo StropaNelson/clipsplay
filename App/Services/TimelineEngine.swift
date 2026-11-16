@@ -40,9 +40,23 @@ actor TimelineEngine {
             )
         }
 
+        let overlayVideos = episode.mediaOverlays.filter(\.isVideo).map { overlay in
+            CompositionOverlayVideo(
+                assetID: overlay.assetID,
+                timelineStart: overlay.startTime,
+                sourceStart: overlay.sourceStart,
+                duration: overlay.duration,
+                centerX: overlay.centerX,
+                centerY: overlay.centerY,
+                widthFraction: overlay.widthFraction,
+                volume: overlay.volume
+            )
+        }
+
         return try await VideoProcessor.shared.createComposition(
             from: segments,
             audioClips: audioClips,
+            overlayVideos: overlayVideos,
             sourceURL: project.sourceVideoFileURL,
             additionalAssets: additionalAssets,
             aspect: settings?.aspectRatio ?? project.aspectRatio,
