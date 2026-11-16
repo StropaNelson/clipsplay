@@ -297,6 +297,9 @@ struct VideoSegment: Codable, Identifiable, Hashable {
     var narrationAssetID: UUID?
     var narrationVolume: Float?
     var narrationOffset: Double?
+    /// Extra fade applied to the clip's own audio, on top of transition crossfades (seconds).
+    var audioFadeIn: Double?
+    var audioFadeOut: Double?
     var speed: Double?
     var transformScale: Double?
     var transformRotation: Double?

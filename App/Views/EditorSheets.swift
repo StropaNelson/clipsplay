@@ -1025,6 +1025,14 @@ struct ClipTransformSheet: View {
                     row("Vinheta", value: $adjustments.vignette, range: 0...1, label: "\(Int(adjustments.vignette * 100))%")
                 }
                 Section {
+                    Toggle("Remover fundo", isOn: Binding(
+                        get: { adjustments.removeBackground == true },
+                        set: { adjustments.removeBackground = $0 ? true : nil }
+                    ))
+                } footer: {
+                    Text("Recorta a pessoa do clipe e remove o fundo (experimental; deixa a renderização mais lenta).")
+                }
+                Section {
                     HStack {
                         Button("Girar 90°") { transform.rotation = (transform.rotation + 90).truncatingRemainder(dividingBy: 360) }
                         Spacer()

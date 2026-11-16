@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreImage
 import UIKit
+import Vision
 
 /// A video composition that renders through ClipFilterCompositor, applying
 /// per-clip Core Image adjustments and chroma key on video overlays.
@@ -126,6 +127,9 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
             }
             if let chroma = info.chromaKey, chroma.enabled {
                 image = applyChromaKey(chroma, to: image)
+            }
+            if info.adjustments?.removeBackground == true {
+                image = removePersonBackground(from: image) ?? image
             }
             var transform: CGAffineTransform
             var opacity: Double
@@ -317,5 +321,28 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
             let w = width * t, h = height * t
             return (base, 1, CGRect(x: (width - w) / 2, y: (height - h) / 2, width: w, height: h))
         }
+    }
+}
+
+extension ClipFilterCompositor {
+    /// Masks the frame to the person in it; returns nil when segmentation fails.
+    private func removePersonBackground(from input: CIImage) -> CIImage? {
+        let request = VNGeneratePersonSegmentationRequest()
+        request.qualityLevel = .fast
+        request.outputPixelFormat = kCVPixelFormatType_OneComponent8
+        let handler = VNImageRequestHandler(ciImage: input, options: [:])
+        guard (try? handler.perform([request])) != nil,
+              let mask = request.results?.first else { return nil }
+        let maskImage = CIImage(cvImageBuffer: mask)
+        // The mask arrives in the frame's pixel space; stretch it over the input extent.
+        let extent = input.extent
+        let scaled = maskImage.transformed(by: CGAffineTransform(
+            scaleX: extent.width / maskImage.extent.width,
+            y: extent.height / maskImage.extent.height
+        ))
+        return input.applyingFilter("CIBlendWithMask", parameters: [
+            "inputBackgroundImage": CIImage.empty(),
+            "inputMaskImage": scaled
+        ])
     }
 }

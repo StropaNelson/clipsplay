@@ -980,6 +980,8 @@ struct SegmentEditorView: View {
     @State private var transition: TransitionStyle
     @State private var transitionDuration: Double
     @State private var clipVolume: Float
+    @State private var audioFadeIn: Double
+    @State private var audioFadeOut: Double
     @State private var narrationVolume: Float
     @State private var keepNarration: Bool
     @State private var previewPlayer = AVPlayer()
@@ -1001,6 +1003,8 @@ struct SegmentEditorView: View {
         _transition = State(initialValue: segment.transition)
         _transitionDuration = State(initialValue: segment.transitionDuration)
         _clipVolume = State(initialValue: segment.clipVolume)
+        _audioFadeIn = State(initialValue: segment.audioFadeIn)
+        _audioFadeOut = State(initialValue: segment.audioFadeOut)
         _narrationVolume = State(initialValue: segment.narrationVolume)
         _keepNarration = State(initialValue: segment.narrationAssetID != nil)
     }
@@ -1093,6 +1097,16 @@ struct SegmentEditorView: View {
                         Slider(value: $clipVolume, in: 0...1)
                         Text("\(Int(clipVolume * 100))%").monospacedDigit().frame(width: 48)
                     }
+                    HStack {
+                        Text("Fade in")
+                        Slider(value: $audioFadeIn, in: 0...5, step: 0.5)
+                        Text(String(format: "%.1fs", audioFadeIn)).monospacedDigit()
+                    }
+                    HStack {
+                        Text("Fade out")
+                        Slider(value: $audioFadeOut, in: 0...5, step: 0.5)
+                        Text(String(format: "%.1fs", audioFadeOut)).monospacedDigit()
+                    }
                     if segment.narrationAssetID != nil {
                         Toggle("Manter narração vinculada", isOn: $keepNarration)
                         if keepNarration {
@@ -1139,6 +1153,8 @@ struct SegmentEditorView: View {
                         updated.transition = transition
                         updated.transitionDuration = transitionDuration
                         updated.clipVolume = clipVolume
+                        updated.audioFadeIn = audioFadeIn
+                        updated.audioFadeOut = audioFadeOut
                         updated.narrationVolume = narrationVolume
                         updated.narrationAssetID = keepNarration ? segment.narrationAssetID : nil
                         onSave(updated, applyToAllEpisodes)

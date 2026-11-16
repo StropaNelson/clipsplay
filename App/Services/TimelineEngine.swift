@@ -106,6 +106,8 @@ actor TimelineEngine {
                 transition: segment.transition,
                 transitionDuration: segment.transitionDuration,
                 clipVolume: segment.clipVolume,
+                audioFadeIn: segment.audioFadeIn ?? 0,
+                audioFadeOut: segment.audioFadeOut ?? 0,
                 narrationAssetID: segment.narrationAssetID,
                 narrationVolume: segment.narrationLevel,
                 speed: segment.playbackSpeed,
@@ -194,6 +196,8 @@ struct TimelineSegment: Identifiable {
     var transition: TransitionStyle = .dissolve
     var transitionDuration: Double = 0.5
     var clipVolume: Float = 1
+    var audioFadeIn: Double = 0
+    var audioFadeOut: Double = 0
     var narrationAssetID: UUID?
     var narrationVolume: Float = 1
     var speed: Double = 1

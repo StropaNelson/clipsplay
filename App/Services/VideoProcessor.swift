@@ -259,8 +259,8 @@ actor VideoProcessor {
                     sourceRange: sourceTimeRange,
                     at: start,
                     volume: segment.clipVolume,
-                    fadeIn: segment.overlapIn,
-                    fadeOut: fadeOut,
+                    fadeIn: max(segment.overlapIn, segment.audioFadeIn),
+                    fadeOut: max(fadeOut, segment.audioFadeOut),
                     speed: speed
                 )
             }

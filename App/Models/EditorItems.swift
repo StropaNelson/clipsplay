@@ -197,6 +197,8 @@ struct ClipAdjustments: Codable, Hashable {
     var saturation: Double = 1    // 0...2
     var warmth: Double = 0        // -1...1 (negative cooler)
     var vignette: Double = 0      // 0...1
+    /// Removes the person background via Vision person segmentation (compositor).
+    var removeBackground: Bool?
 
     static let identity = ClipAdjustments()
     var isIdentity: Bool { self == .identity }

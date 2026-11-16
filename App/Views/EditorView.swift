@@ -1265,6 +1265,8 @@ class EditorViewModel: ObservableObject {
             video.transition = segment.transition
             video.transitionDuration = segment.transitionDuration
             video.clipVolume = segment.clipVolume
+            video.audioFadeIn = segment.audioFadeIn > 0.001 ? segment.audioFadeIn : nil
+            video.audioFadeOut = segment.audioFadeOut > 0.001 ? segment.audioFadeOut : nil
             video.narrationAssetID = segment.narrationAssetID
             video.narrationLevel = segment.narrationVolume
             video.playbackSpeed = segment.speed
