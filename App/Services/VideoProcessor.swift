@@ -384,9 +384,8 @@ actor VideoProcessor {
             layer.position = CGPoint(x: overlay.centerX * size.width, y: overlay.centerY * size.height)
             layer.contents = render.image
             layer.contentsGravity = .resizeAspect
-            layer.opacity = Float(overlay.opacity)
             layer.setAffineTransform(CGAffineTransform(rotationAngle: CGFloat(overlay.rotation * .pi / 180)))
-            Self.addVisibility(to: layer, start: overlay.startTime, duration: overlay.duration)
+            Self.addVisibility(to: layer, start: overlay.startTime, duration: overlay.duration, opacity: overlay.opacity)
             parent.addSublayer(layer)
         }
         for overlay in visible {
@@ -440,11 +439,11 @@ actor VideoProcessor {
         return container
     }
 
-    private static func addVisibility(to layer: CALayer, start: Double, duration: Double) {
+    private static func addVisibility(to layer: CALayer, start: Double, duration: Double, opacity: Double = 1) {
         layer.opacity = 0
         let fade = min(0.2 / max(duration, 0.01), 0.25)
         let animation = CAKeyframeAnimation(keyPath: "opacity")
-        animation.values = [0, 1, 1, 0]
+        animation.values = [0, opacity, opacity, 0]
         animation.keyTimes = [0, NSNumber(value: fade), NSNumber(value: 1 - fade), 1]
         animation.beginTime = start <= 0 ? AVCoreAnimationBeginTimeAtZero : start
         animation.duration = duration
