@@ -11,6 +11,7 @@ struct TranscriptionView: View {
     @State private var shareItem: TranscriptShareItem?
     @State private var errorMessage: String?
     @State private var localeIdentifier = "pt-BR"
+    @State private var allowServer = false
 
     private let languages: [(id: String, name: String)] = [
         ("pt-BR", "Português (Brasil)"),
@@ -30,6 +31,10 @@ struct TranscriptionView: View {
                 .pickerStyle(.menu)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .disabled(isTranscribing)
+
+                Toggle("Usar servidor da Apple se o offline falhar", isOn: $allowServer)
+                    .font(.footnote)
+                    .disabled(isTranscribing)
 
                 if isTranscribing {
                     ProgressView("Transcrevendo no dispositivo…")
@@ -64,7 +69,7 @@ struct TranscriptionView: View {
                 }
                 ToolbarItemGroup(placement: .primaryAction) {
                     Menu {
-                        Button("Transcrever no dispositivo", systemImage: "waveform") {
+                        Button(allowServer ? "Transcrever" : "Transcrever no dispositivo", systemImage: "waveform") {
                             Task { await transcribe() }
                         }
                         Button("Importar SRT/VTT", systemImage: "doc.badge.plus") {
@@ -102,7 +107,8 @@ struct TranscriptionView: View {
         do {
             let cues = try await TranscriptionService.shared.transcribeVideo(
                 at: project.sourceVideoFileURL,
-                localeIdentifier: localeIdentifier
+                localeIdentifier: localeIdentifier,
+                allowServer: allowServer
             )
             transcript = SubtitleFile.srt(from: cues)
         } catch {

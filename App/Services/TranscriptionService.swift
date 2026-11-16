@@ -14,7 +14,7 @@ actor TranscriptionService {
 
     private init() {}
 
-    func transcribeVideo(at url: URL, localeIdentifier: String = "pt-BR") async throws -> [TranscriptCue] {
+    func transcribeVideo(at url: URL, localeIdentifier: String = "pt-BR", allowServer: Bool = false) async throws -> [TranscriptCue] {
         let authorization = await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { status in
                 continuation.resume(returning: status)
@@ -34,10 +34,11 @@ actor TranscriptionService {
         let duration = try await AVURLAsset(url: url).load(.duration).seconds
         guard duration.isFinite, duration > 0 else { throw TranscriptionError.noSpeechDetected }
 
-        // Prefer the offline model; fall back to Apple's server when it is missing or hears nothing.
+        // Prefer the offline model; Apple's server is only used when the user opts in.
         var modes: [Bool] = []
         if recognizer.supportsOnDeviceRecognition { modes.append(true) }
-        modes.append(false)
+        if allowServer { modes.append(false) }
+        guard !modes.isEmpty else { throw TranscriptionError.onDeviceRecognitionUnavailable }
 
         var lastError: Error?
         for onDevice in modes {
@@ -190,7 +191,7 @@ actor TranscriptionService {
             case .recognizerUnavailable:
                 return "O serviço de reconhecimento de fala está indisponível no momento."
             case .onDeviceRecognitionUnavailable:
-                return "Este dispositivo não oferece transcrição offline em português."
+                return "Este dispositivo não oferece transcrição offline para esse idioma. Ative “Usar servidor da Apple” para transcrever online."
             case .invalidSubtitleFile:
                 return "O arquivo não contém legendas SRT ou VTT válidas."
             case .noSpeechDetected:
