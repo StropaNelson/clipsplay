@@ -635,6 +635,7 @@ struct EditorView: View {
                     toolButton("Fechar", icon: "xmark") { viewModel.selectedSegmentID = nil }
                     Divider().frame(height: 30).overlay(EditorTheme.divider)
                     toolButton("Editar", icon: "slider.horizontal.3") { editingAudio = clip }
+                    toolButton("Dividir", icon: "scissors") { viewModel.splitAudioClip(clip.id) }
                     toolButton("Cursor", icon: "arrow.right.to.line") { viewModel.moveAudioClipToPlayhead(clip.id) }
                     toolButton("Excluir", icon: "trash", role: .destructive) { viewModel.removeAudioClip(clip.id) }
                 } else {
@@ -1761,6 +1762,23 @@ class EditorViewModel: ObservableObject {
         project.globalAudioClips.removeAll { $0.id == id }
         selectedEpisode = episodes[episodeIndex]
         Task { await persistProjectChanges() }
+    }
+
+    func splitAudioClip(_ id: UUID) {
+        guard var clip = resolvedAudioClips.first(where: { $0.id == id }) else { return }
+        let offset = currentTime - clip.timelineStart
+        guard offset > 0.1, offset < clip.duration - 0.1 else {
+            errorMessage = "Posicione o cursor dentro do áudio (a pelo menos 0,1s das bordas) para dividir."
+            return
+        }
+        var second = clip
+        second.id = UUID()
+        clip.sourceEnd = clip.sourceStart + offset
+        second.sourceStart = clip.sourceEnd
+        second.timelineStart = clip.timelineStart + offset
+        updateAudioClip(clip)
+        store(second)
+        selectedSegmentID = second.id
     }
 
     func moveAudioClipToPlayhead(_ id: UUID) {

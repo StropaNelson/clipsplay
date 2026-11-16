@@ -165,7 +165,8 @@ actor VideoProcessor {
             fadeIn: Double,
             fadeOut: Double,
             speed: Double = 1,
-            kind: AudioClipKind? = nil
+            kind: AudioClipKind? = nil,
+            duckLevel: Float? = nil
         ) async throws {
             let available = try await track.load(.timeRange)
             guard let range = intersection(of: sourceRange, with: available) else { return }
@@ -194,7 +195,8 @@ actor VideoProcessor {
                 volume: volume,
                 fadeIn: fadeIn,
                 fadeOut: fadeOut,
-                kind: kind
+                kind: kind,
+                duckLevel: duckLevel
             ))
         }
 
@@ -301,7 +303,8 @@ actor VideoProcessor {
                 volume: clip.volume,
                 fadeIn: clip.fadeIn,
                 fadeOut: clip.fadeOut,
-                kind: clip.kind
+                kind: clip.kind,
+                duckLevel: clip.duckLevel
             )
         }
 
@@ -918,9 +921,9 @@ actor VideoProcessor {
                     timeRange: CMTimeRange(start: CMTimeSubtract(placement.end, fadeDuration), duration: fadeDuration)
                 )
             }
-            if placement.kind == .music, !speech.isEmpty {
+            let dip = placement.duckLevel ?? 0.3
+            if placement.kind == .music, dip < 0.99, !speech.isEmpty {
                 let start = placement.start.seconds, end = placement.end.seconds
-                let dip = Float(0.3)
                 // If speech already covers the clip's start, begin ducked instead of full volume.
                 if speech.contains(where: { $0.0 <= start && $0.1 > start }) {
                     parameters.setVolume(volume * dip, at: placement.start)
@@ -1088,6 +1091,7 @@ struct CompositionAudioClip {
     let fadeIn: Double
     let fadeOut: Double
     var kind: AudioClipKind = .music
+    var duckLevel: Float? = nil
 }
 
 struct CompositionOverlayVideo {
@@ -1149,6 +1153,7 @@ private struct AudioPlacement {
     let fadeIn: Double
     let fadeOut: Double
     var kind: AudioClipKind? = nil
+    var duckLevel: Float? = nil
 }
 
 enum ProcessorError: LocalizedError {

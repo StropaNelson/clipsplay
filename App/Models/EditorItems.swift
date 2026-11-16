@@ -174,6 +174,8 @@ struct AudioClip: Codable, Identifiable, Hashable {
     var fadeIn: Double = 0
     var fadeOut: Double = 0
     var anchor: ClipAnchor?
+    /// Music only: fraction the volume drops to under speech; nil uses the default (0.3), 1 disables ducking.
+    var duckLevel: Float?
 
     var duration: Double { max(0, sourceEnd - sourceStart) }
     var endTime: Double { timelineStart + duration }

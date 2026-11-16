@@ -672,6 +672,20 @@ struct AudioClipEditorSheet: View {
                     }
                     .disabled(assetURL == nil)
                 }
+                if clip.kind == .music {
+                    Section {
+                        HStack {
+                            Text("Abaixar sob fala")
+                            Slider(value: Binding(
+                                get: { Double(clip.duckLevel ?? 0.3) },
+                                set: { clip.duckLevel = $0 >= 0.99 ? 1 : Float($0) }
+                            ), in: 0...1)
+                            Text(clip.duckLevel == 1 ? "Desl." : "\(Int(Double(clip.duckLevel ?? 0.3) * 100))%").monospacedDigit().frame(width: 48)
+                        }
+                    } footer: {
+                        Text("Quanto a música toca enquanto há narração ou som de vídeo. 100% desliga.")
+                    }
+                }
                 Section("Fade") {
                     HStack {
                         Text("Entrada")
