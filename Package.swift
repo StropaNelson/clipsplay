@@ -39,7 +39,6 @@ let package = Package(
                 .process("Resources")
             ],
             swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency"),
                 .define("DEBUG", .when(configuration: .debug))
             ]
         )
