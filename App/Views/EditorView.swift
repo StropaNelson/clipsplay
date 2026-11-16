@@ -1342,7 +1342,10 @@ class EditorViewModel: ObservableObject {
             Task { await persistProjectChanges() }
         default:
             mutateSelectedEpisode { episode in
-                episode.modifySegment(id: segment.id) { $0.narrationAssetID = asset.id }
+                episode.modifySegment(id: segment.id) { video in
+                    video.narrationAssetID = asset.id
+                    video.narrationOffset = nil
+                }
             }
         }
     }
