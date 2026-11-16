@@ -1580,18 +1580,11 @@ class EditorViewModel: ObservableObject {
                     let start = max(cue.startTime, clip.startTime)
                     let end = min(cue.endTime, clip.endTime)
                     guard end - start >= 0.2 else { continue }
+                    let cueWords = Self.words(for: cue, recognized: words).filter { word in
+                        let middle = (word.start + word.end) / 2
+                        return middle >= clip.startTime && middle < clip.endTime
+                    }
                     if dynamic {
-                        var cueWords = words.filter { word in
-                            let middle = (word.start + word.end) / 2
-                            return middle >= cue.startTime && middle < cue.endTime
-                        }
-                        if cueWords.isEmpty {
-                            cueWords = TranscriptWord.spread(cue.text, from: cue.startTime, to: cue.endTime)
-                        }
-                        cueWords = cueWords.filter { word in
-                            let middle = (word.start + word.end) / 2
-                            return middle >= clip.startTime && middle < clip.endTime
-                        }
                         for group in Self.captionGroups(cueWords) {
                             let groupStart = max(group[0].start, clip.startTime)
                             let groupEnd = min(group[group.count - 1].end, clip.endTime)
@@ -1612,7 +1605,11 @@ class EditorViewModel: ObservableObject {
                             total += 1
                         }
                     } else {
-                        overlays.append(Self.captionOverlay(text: cue.text, start: timeline(start), duration: (end - start) / speed))
+                        // A cue split by a cut only shows the words that remain in this clip.
+                        let isWhole = cue.startTime >= clip.startTime && cue.endTime <= clip.endTime
+                        let text = isWhole ? cue.text : cueWords.map(\.text).joined(separator: " ")
+                        guard !text.isEmpty else { continue }
+                        overlays.append(Self.captionOverlay(text: text, start: timeline(start), duration: (end - start) / speed))
                         total += 1
                     }
                 }
@@ -1624,6 +1621,21 @@ class EditorViewModel: ObservableObject {
             errorMessage = "Nenhuma legenda caiu dentro do conteúdo principal dos episódios."
         }
         Task { await persistProjectChanges(reloadPreview: false) }
+    }
+
+    /// Recognized words of a cue, or estimated ones when the cue text was edited after transcribing.
+    static func words(for cue: TranscriptCue, recognized: [TranscriptWord]) -> [TranscriptWord] {
+        let inside = recognized.filter { word in
+            let middle = (word.start + word.end) / 2
+            return middle >= cue.startTime && middle < cue.endTime
+        }
+        func normalized(_ text: String) -> String {
+            text.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }.joined(separator: " ")
+        }
+        if !inside.isEmpty, normalized(inside.map(\.text).joined(separator: " ")) == normalized(cue.text) {
+            return inside
+        }
+        return TranscriptWord.spread(cue.text, from: cue.startTime, to: cue.endTime)
     }
 
     /// Short punchy groups for dynamic captions: up to 3 words, split on pauses and sentence ends.
