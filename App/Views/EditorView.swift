@@ -2230,7 +2230,9 @@ class EditorViewModel: ObservableObject {
         guard let episode = selectedEpisode else { return }
         for item in episode.storyline() where item.track == .main {
             let clip = item.segment
-            guard clip.startTime <= source, source < clip.endTime else { continue }
+            // Only the recorded video's clips carry source-video timestamps; library clips don't.
+            guard clip.sourceType == .mainVideo,
+                  clip.startTime <= source, source < clip.endTime else { continue }
             seek(to: item.start + (source - clip.startTime) / clip.playbackSpeed)
             return
         }
@@ -2396,7 +2398,11 @@ class EditorViewModel: ObservableObject {
                 allResults.append(contentsOf: result.results)
             }
             if allResults.count > 1 {
-                _ = try? await exportManager.createZIP(from: allResults, projectName: "\(project.name)_multiplicar")
+                do {
+                    _ = try await exportManager.createZIP(from: allResults, projectName: "\(project.name)_multiplicar")
+                } catch {
+                    errorMessage = "Vídeos exportados, mas o ZIP falhou: \(Self.describe(error))"
+                }
             }
             showExportProgress = false
             exportProgress = BatchExportProgress(

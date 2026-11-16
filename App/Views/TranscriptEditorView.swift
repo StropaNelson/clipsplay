@@ -203,7 +203,7 @@ struct TranscriptEditorView: View {
     private var suggestions: [Suggestion] {
         var result: [Suggestion] = []
         let pad = margin
-        if let first = words.first, first.start >= minSilence {
+        if let first = words.first, first.start - pad > 0, first.start >= minSilence {
             result.append(Suggestion(
                 id: "silence-start",
                 title: "Silêncio no início (\(String(format: "%.1f", first.start))s)",
@@ -217,7 +217,7 @@ struct TranscriptEditorView: View {
             if index + 1 < words.count {
                 let next = words[index + 1]
                 let gap = next.start - word.end
-                if gap >= minSilence {
+                if gap >= minSilence, next.start - pad > word.end + pad {
                     result.append(Suggestion(
                         id: "silence-\(index)",
                         title: "Silêncio de \(String(format: "%.1f", gap))s",
