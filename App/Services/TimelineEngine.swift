@@ -237,7 +237,7 @@ struct TimelineSegment: Identifiable {
     var sourceStartTime: Double
     var sourceEndTime: Double
     var sourceType: SourceType
-    let assetID: UUID?
+    var assetID: UUID?
     var isEnabled: Bool
     
     var endTime: Double { startTime + duration }

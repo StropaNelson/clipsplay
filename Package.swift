@@ -35,8 +35,7 @@ let package = Package(
             name: "App",
             path: "App",
             resources: [
-                .process("Assets.xcassets"),
-                .process("Resources")
+                .process("Assets.xcassets")
             ],
             swiftSettings: [
                 .define("DEBUG", .when(configuration: .debug))
