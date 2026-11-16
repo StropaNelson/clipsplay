@@ -164,6 +164,18 @@ struct TranscriptWord: Codable, Hashable {
 }
 
 /// User framing of a clip on top of the fit/fill layout. Offsets are fractions of the frame.
+/// Per-clip color/light adjustments applied through the Core Image compositor.
+struct ClipAdjustments: Codable, Hashable {
+    var brightness: Double = 0    // -1...1
+    var contrast: Double = 1      // 0.25...4
+    var saturation: Double = 1    // 0...2
+    var warmth: Double = 0        // -1...1 (negative cooler)
+    var vignette: Double = 0      // 0...1
+
+    static let identity = ClipAdjustments()
+    var isIdentity: Bool { self == .identity }
+}
+
 struct ClipTransform: Codable, Hashable {
     var scale: Double = 1
     var rotation: Double = 0
@@ -176,6 +188,13 @@ struct ClipTransform: Codable, Hashable {
 struct TimelineMarker: Codable, Identifiable, Hashable {
     var id = UUID()
     var time: Double
+}
+
+/// Chroma-key settings for video overlays (e.g. green screen).
+struct ChromaKeySettings: Codable, Hashable {
+    var enabled: Bool = false
+    var color: RGBAColor = RGBAColor(red: 0, green: 1, blue: 0, alpha: 1)
+    var tolerance: Double = 0.4   // 0...1
 }
 
 struct MediaOverlay: Codable, Identifiable, Hashable {
@@ -194,6 +213,7 @@ struct MediaOverlay: Codable, Identifiable, Hashable {
     var volume: Float = 0
     var storedOpacity: Double?
     var storedRotation: Double?
+    var chromaKey: ChromaKeySettings?
 
     var opacity: Double {
         get { storedOpacity ?? 1 }
@@ -258,6 +278,11 @@ extension VideoSegment {
 
     /// Length on the timeline after applying the playback speed.
     var timelineDuration: Double { duration / playbackSpeed }
+
+    var clipAdjustments: ClipAdjustments {
+        get { adjustments ?? .identity }
+        set { adjustments = newValue.isIdentity ? nil : newValue }
+    }
 
     var clipTransform: ClipTransform {
         get {

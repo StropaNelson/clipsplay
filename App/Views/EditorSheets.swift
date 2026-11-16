@@ -699,9 +699,11 @@ struct MediaOverlayEditorSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var overlay: MediaOverlay
+    @State private var chromaColor: Color
 
     init(overlay: MediaOverlay, episodeDuration: Double, assetDuration: Double, onSave: @escaping (MediaOverlay) -> Void, onDelete: @escaping () -> Void) {
         self._overlay = State(initialValue: overlay)
+        self._chromaColor = State(initialValue: overlay.chromaKey?.color.color ?? .green)
         self.episodeDuration = max(episodeDuration, 1)
         self.assetDuration = max(assetDuration, 0.5)
         self.onSave = onSave
@@ -711,6 +713,21 @@ struct MediaOverlayEditorSheet: View {
     private var maxDuration: Double {
         let remaining = max(episodeDuration - overlay.startTime, 0.6)
         return overlay.isVideo ? min(remaining, max(assetDuration - overlay.sourceStart, 0.6)) : remaining
+    }
+
+    private var chromaEnabled: Binding<Bool> {
+        Binding(
+            get: { overlay.chromaKey?.enabled == true },
+            set: { overlay.chromaKey = $0 ? (overlay.chromaKey ?? ChromaKeySettings(enabled: true)) : nil
+                if $0 { overlay.chromaKey?.enabled = true; overlay.chromaKey?.color = RGBAColor(chromaColor) } }
+        )
+    }
+
+    private var chromaTolerance: Binding<Double> {
+        Binding(
+            get: { overlay.chromaKey?.tolerance ?? 0.4 },
+            set: { overlay.chromaKey?.tolerance = $0 }
+        )
     }
 
     var body: some View {
@@ -738,6 +755,21 @@ struct MediaOverlayEditorSheet: View {
                             Slider(value: $overlay.volume, in: 0...1)
                             Text("\(Int(overlay.volume * 100))%").monospacedDigit().frame(width: 48)
                         }
+                    }
+                }
+                if overlay.isVideo {
+                    Section {
+                        Toggle("Chroma key", isOn: chromaEnabled)
+                        if overlay.chromaKey?.enabled == true {
+                            ColorPicker("Cor de fundo", selection: $chromaColor, supportsOpacity: false)
+                                .onChange(of: chromaColor) { overlay.chromaKey?.color = RGBAColor($0) }
+                            HStack {
+                                Text("Tolerância")
+                                Slider(value: chromaTolerance, in: 0.05...0.8)
+                            }
+                        }
+                    } footer: {
+                        Text("Remove o fundo de uma cor (ex.: tela verde) da sobreposição de vídeo.")
                     }
                 }
                 Section {
@@ -866,10 +898,12 @@ struct MediaOverlayLayer: View {
 struct ClipTransformSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var transform: ClipTransform
-    let onChange: (ClipTransform) -> Void
+    @State private var adjustments: ClipAdjustments
+    let onChange: (ClipTransform, ClipAdjustments) -> Void
 
-    init(transform: ClipTransform, onChange: @escaping (ClipTransform) -> Void) {
+    init(transform: ClipTransform, adjustments: ClipAdjustments, onChange: @escaping (ClipTransform, ClipAdjustments) -> Void) {
         _transform = State(initialValue: transform)
+        _adjustments = State(initialValue: adjustments)
         self.onChange = onChange
     }
 
@@ -882,11 +916,18 @@ struct ClipTransformSheet: View {
                     row("Horizontal", value: $transform.offsetX, range: -1...1, label: "\(Int(transform.offsetX * 100))%")
                     row("Vertical", value: $transform.offsetY, range: -1...1, label: "\(Int(transform.offsetY * 100))%")
                 }
+                Section("Cor e luz") {
+                    row("Brilho", value: $adjustments.brightness, range: -1...1, label: "\(Int(adjustments.brightness * 100))%")
+                    row("Contraste", value: $adjustments.contrast, range: 0.25...2, label: String(format: "%.2f", adjustments.contrast))
+                    row("Saturação", value: $adjustments.saturation, range: 0...2, label: String(format: "%.2f", adjustments.saturation))
+                    row("Temperatura", value: $adjustments.warmth, range: -1...1, label: "\(Int(adjustments.warmth * 100))%")
+                    row("Vinheta", value: $adjustments.vignette, range: 0...1, label: "\(Int(adjustments.vignette * 100))%")
+                }
                 Section {
                     HStack {
                         Button("Girar 90°") { transform.rotation = (transform.rotation + 90).truncatingRemainder(dividingBy: 360) }
                         Spacer()
-                        Button("Redefinir", role: .destructive) { transform = .identity }
+                        Button("Redefinir", role: .destructive) { transform = .identity; adjustments = .identity }
                     }
                 }
             }
@@ -895,7 +936,7 @@ struct ClipTransformSheet: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("OK") {
-                        onChange(transform)
+                        onChange(transform, adjustments)
                         dismiss()
                     }
                 }

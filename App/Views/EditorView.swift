@@ -686,9 +686,10 @@ struct EditorView: View {
                 )
             }
             .sheet(item: $framingSegment) { segment in
-                ClipTransformSheet(transform: segment.transform) { transform in
+                ClipTransformSheet(transform: segment.transform, adjustments: segment.adjustments ?? .identity) { transform, adjustments in
                     var updated = segment
                     updated.transform = transform
+                    updated.adjustments = adjustments.isIdentity ? nil : adjustments
                     viewModel.updateSegment(updated)
                 }
             }
@@ -1262,6 +1263,7 @@ class EditorViewModel: ObservableObject {
             video.narrationLevel = segment.narrationVolume
             video.playbackSpeed = segment.speed
             video.clipTransform = segment.transform
+            video.adjustments = segment.adjustments
         }
         let global = applyToAllEpisodes ?? (segment.trackType != .main)
         guard global, segment.trackType != .main else {

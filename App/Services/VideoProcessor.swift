@@ -245,7 +245,8 @@ actor VideoProcessor {
                 naturalSize: naturalSize,
                 preferredTransform: preferredTransform,
                 transition: segment.transition,
-                transform: segment.transform
+                transform: segment.transform,
+                adjustments: segment.adjustments
             ))
 
             let fadeOut = index + 1 < playable.count ? playable[index + 1].overlapIn : 0
@@ -332,7 +333,8 @@ actor VideoProcessor {
                 centerY: overlay.centerY,
                 widthFraction: overlay.widthFraction,
                 opacity: overlay.opacity,
-                rotation: overlay.rotation
+                rotation: overlay.rotation,
+                chromaKey: overlay.chromaKey
             ))
             if overlay.volume > 0, let audio = try await overlayAsset.loadTracks(withMediaType: .audio).first {
                 try await placeAudio(audio, sourceRange: range, at: start, volume: overlay.volume, fadeIn: 0, fadeOut: 0)
@@ -368,9 +370,12 @@ actor VideoProcessor {
         to videoComposition: AVVideoComposition
     ) -> AVVideoComposition {
         let visible = overlays.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.duration > 0 }
-        guard !visible.isEmpty || !images.isEmpty,
-              let mutable = videoComposition.mutableCopy() as? AVMutableVideoComposition else {
-            return videoComposition
+        guard !visible.isEmpty || !images.isEmpty else { return videoComposition }
+        // Preserve the custom compositor + track metadata through the copy.
+        let mutable = FilterVideoComposition(propertiesOf: videoComposition)
+        if let source = videoComposition as? FilterVideoComposition {
+            mutable.trackRenders = source.trackRenders
+            mutable.fitMode = source.fitMode
         }
         let size = mutable.renderSize
         let parent = CALayer()
@@ -634,10 +639,41 @@ actor VideoProcessor {
             instructions.append(instruction)
         }
 
-        let videoComposition = AVMutableVideoComposition()
+        let videoComposition = FilterVideoComposition()
         videoComposition.renderSize = renderSize
         videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
         videoComposition.instructions = instructions
+        videoComposition.fitMode = fitMode
+        var renders: [CMPersistentTrackID: TrackRenderInfo] = [:]
+        for clip in clips {
+            renders[clip.track.trackID] = TrackRenderInfo(
+                kind: .clip,
+                start: clip.start.seconds,
+                end: clip.end.seconds,
+                naturalSize: clip.naturalSize,
+                preferredTransform: clip.preferredTransform,
+                transform: clip.transform,
+                transition: clip.transition,
+                adjustments: clip.adjustments
+            )
+        }
+        for overlay in overlays {
+            renders[overlay.track.trackID] = TrackRenderInfo(
+                kind: .overlay,
+                start: overlay.start.seconds,
+                end: overlay.end.seconds,
+                naturalSize: overlay.naturalSize,
+                preferredTransform: overlay.preferredTransform,
+                centerX: overlay.centerX,
+                centerY: overlay.centerY,
+                widthFraction: overlay.widthFraction,
+                overlayOpacity: overlay.opacity,
+                overlayRotation: overlay.rotation,
+                chromaKey: overlay.chromaKey
+            )
+        }
+        videoComposition.trackRenders = renders
+        videoComposition.customVideoCompositorClass = ClipFilterCompositor.self
         return videoComposition
     }
 
@@ -988,6 +1024,7 @@ struct CompositionSegment {
     let narrationOffset: Double
     var speed: Double = 1
     var transform = ClipTransform.identity
+    var adjustments: ClipAdjustments?
 }
 
 struct CompositionAudioClip {
@@ -1004,6 +1041,7 @@ struct CompositionAudioClip {
 struct CompositionOverlayVideo {
     let assetID: UUID
     let timelineStart: Double
+    var chromaKey: ChromaKeySettings?
     let sourceStart: Double
     let duration: Double
     let centerX: Double
@@ -1012,6 +1050,7 @@ struct CompositionOverlayVideo {
     let volume: Float
     var opacity: Double = 1
     var rotation: Double = 0
+    var chromaKey: ChromaKeySettings?
 }
 
 struct ImageOverlayRender {
@@ -1047,6 +1086,7 @@ private struct CompositionClipLayout {
     let preferredTransform: CGAffineTransform
     let transition: TransitionStyle
     var transform = ClipTransform.identity
+    var adjustments: ClipAdjustments?
 }
 
 private struct AudioPlacement {

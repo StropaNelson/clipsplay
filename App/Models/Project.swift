@@ -300,6 +300,7 @@ struct VideoSegment: Codable, Identifiable, Hashable {
     var transformRotation: Double?
     var transformOffsetX: Double?
     var transformOffsetY: Double?
+    var adjustments: ClipAdjustments?
     
     init(
         id: UUID = UUID(),

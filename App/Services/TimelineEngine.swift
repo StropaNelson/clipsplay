@@ -27,7 +27,8 @@ actor TimelineEngine {
                 narrationVolume: item.segment.narrationLevel,
                 narrationOffset: item.segment.narrationOffset ?? 0,
                 speed: item.segment.playbackSpeed,
-                transform: item.segment.clipTransform
+                transform: item.segment.clipTransform,
+                adjustments: item.segment.adjustments
             )
         }
         let audioClips = episode.resolvedAudioClips(global: project.globalAudioClips).map { clip in
@@ -47,6 +48,7 @@ actor TimelineEngine {
             CompositionOverlayVideo(
                 assetID: overlay.assetID,
                 timelineStart: overlay.startTime,
+                chromaKey: overlay.chromaKey,
                 sourceStart: overlay.sourceStart,
                 duration: overlay.duration,
                 centerX: overlay.centerX,
@@ -105,7 +107,8 @@ actor TimelineEngine {
                 narrationAssetID: segment.narrationAssetID,
                 narrationVolume: segment.narrationLevel,
                 speed: segment.playbackSpeed,
-                transform: segment.clipTransform
+                transform: segment.clipTransform,
+                adjustments: segment.adjustments
             ))
         }
         return TrackType.allCases.compactMap { type in
@@ -193,6 +196,7 @@ struct TimelineSegment: Identifiable {
     var narrationVolume: Float = 1
     var speed: Double = 1
     var transform = ClipTransform.identity
+    var adjustments: ClipAdjustments?
     
     var endTime: Double { startTime + duration }
     var sourceDuration: Double { sourceEndTime - sourceStartTime }
