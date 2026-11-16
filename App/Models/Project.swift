@@ -86,6 +86,40 @@ struct Project: Codable, Identifiable {
         }
         updateTimestamp()
     }
+    
+    /// Rebuilds episodes at detected topic boundaries instead of fixed-length slices.
+    /// Slivers shorter than ~5s are merged into the surrounding segment.
+    mutating func createEpisodes(at boundaries: [Double]) {
+        let minimum = 5.0
+        var cuts = boundaries
+            .sorted()
+            .filter { $0 > minimum && $0 < sourceVideoDuration - minimum }
+        var merged: [Double] = []
+        for cut in cuts {
+            if let last = merged.last, cut - last < minimum { continue }
+            merged.append(cut)
+        }
+        cuts = merged
+        guard !cuts.isEmpty else { return }
+        var ranges: [(Double, Double)] = []
+        var cursor = 0.0
+        for cut in cuts {
+            ranges.append((cursor, cut))
+            cursor = cut
+        }
+        ranges.append((cursor, sourceVideoDuration))
+        episodes = ranges.enumerated().map { index, range in
+            Episode(
+                index: index,
+                mainStart: range.0,
+                mainEnd: range.1,
+                introTemplate: introTemplate,
+                outroTemplate: outroTemplate,
+                recapSettings: recapSettings
+            )
+        }
+        updateTimestamp()
+    }
 }
 
 enum AspectRatio: String, Codable, CaseIterable, Identifiable {

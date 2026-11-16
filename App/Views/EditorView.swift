@@ -136,7 +136,8 @@ struct EditorView: View {
                 words: viewModel.editableTranscriptWords,
                 onRemove: { viewModel.removeSourceRanges($0) },
                 onSeekWord: { viewModel.seekToSourceTime($0) },
-                onMarkTopics: { viewModel.markTimes($0) }
+                onMarkTopics: { viewModel.markTimes($0) },
+                onCreateEpisodes: { viewModel.createEpisodesAtTopics($0) }
             )
         }
         .sheet(isPresented: $showingTranscription) {
@@ -2244,6 +2245,14 @@ class EditorViewModel: ObservableObject {
         mutateSelectedEpisode(reloadPreview: false) { ep in
             for time in times { ep.markers.append(TimelineMarker(time: time)) }
         }
+    }
+
+    /// Rebuilds the project's episodes at detected topic boundaries (source times).
+    func createEpisodesAtTopics(_ sourceTimes: [Double]) {
+        project.createEpisodes(at: sourceTimes)
+        episodes = project.episodes
+        if let first = episodes.first { selectedEpisode = first }
+        Task { await persistProjectChanges() }
     }
 
     /// Positions the playhead where a source-video time lands in the selected episode.

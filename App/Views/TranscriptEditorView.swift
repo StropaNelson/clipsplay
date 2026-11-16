@@ -6,6 +6,7 @@ struct TranscriptEditorView: View {
     let onRemove: ([ClosedRange<Double>]) -> Void
     var onSeekWord: (Double) -> Void = { _ in }
     var onMarkTopics: ([Double]) -> Void = { _ in }
+    var onCreateEpisodes: ([Double]) -> Void = { _ in }
 
     @Environment(\.dismiss) private var dismiss
     @State private var mode = Mode.text
@@ -228,16 +229,31 @@ struct TranscriptEditorView: View {
     private var applyBar: some View {
         if mode == .topics {
             return AnyView(
-                Button {
-                    onMarkTopics(topicBoundaries.map(\.time))
-                    dismiss()
-                } label: {
-                    Label("Marcar \(topicBoundaries.count) limite(s) na linha do tempo", systemImage: "bookmark")
-                        .frame(maxWidth: .infinity)
+                VStack(spacing: 8) {
+                    Button {
+                        onCreateEpisodes(topicBoundaries.map(\.time))
+                        dismiss()
+                    } label: {
+                        Label("Criar episódios nos \(topicBoundaries.count) limite(s)", systemImage: "rectangle.split.3x1")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(topicBoundaries.isEmpty)
+                    Text("Recria os episódios do projeto inteiro, como em Regenerar.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Button {
+                        onMarkTopics(topicBoundaries.map(\.time))
+                        dismiss()
+                    } label: {
+                        Text("Só marcar na linha do tempo")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .disabled(topicBoundaries.isEmpty)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(topicBoundaries.isEmpty)
                 .padding()
             )
         }
