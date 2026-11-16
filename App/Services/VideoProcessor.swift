@@ -784,8 +784,9 @@ actor VideoProcessor {
     private func makeAudioMix(_ placements: [AudioPlacement]) -> AVAudioMix? {
         guard !placements.isEmpty else { return nil }
         // Duck music under narration/detached speech: merged speech intervals, ±0.3s padding.
+        // Silent speech placements (volume ~0) don't duck anything.
         var speech: [(Double, Double)] = []
-        for p in placements where p.kind == .narration || p.kind == .videoSound {
+        for p in placements where (p.kind == .narration || p.kind == .videoSound) && p.volume > 0.01 {
             speech.append((max(0, p.start.seconds - 0.3), p.end.seconds + 0.3))
         }
         speech.sort { $0.0 < $1.0 }
@@ -831,8 +832,12 @@ actor VideoProcessor {
             }
             if placement.kind == .music, !speech.isEmpty {
                 let start = placement.start.seconds, end = placement.end.seconds
+                let dip = Float(0.3)
+                // If speech already covers the clip's start, begin ducked instead of full volume.
+                if speech.contains(where: { $0.0 <= start && $0.1 > start }) {
+                    parameters.setVolume(volume * dip, at: placement.start)
+                }
                 for (s0, s1) in speech where s1 > start && s0 < end {
-                    let dip = Float(0.3)
                     let downStart = max(start, s0 - 0.3)
                     let downEnd = min(end, s0)
                     if downEnd > downStart {
