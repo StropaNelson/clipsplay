@@ -208,7 +208,7 @@ struct Episode: Codable, Identifiable {
         for index in customRecapSegments.indices { customRecapSegments[index].timelineStartTime = nil }
     }
     var totalDuration: Double {
-        storyline().last.map { $0.start + $0.segment.duration } ?? 0
+        storyline().last?.end ?? 0
     }
     
     var effectiveIntro: VideoSegment? {
