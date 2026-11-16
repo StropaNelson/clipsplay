@@ -51,6 +51,7 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
     var sourcePixelBufferAttributes: [String: any Sendable]? {
         [String(kCVPixelBufferPixelFormatTypeKey): [
             kCVPixelFormatType_32BGRA,
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRangeVideo,
             kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         ]]
     }

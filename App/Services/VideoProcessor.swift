@@ -351,12 +351,16 @@ actor VideoProcessor {
             naturalSize: sourceSize,
             transform: sourceTransform
         )
+        let requiresCustomCompositor = fadeEdges
+            || clipLayouts.contains { $0.adjustments?.isIdentity == false }
+            || overlayLayouts.contains { $0.chromaKey?.enabled == true }
         let videoComposition = makeTransitionVideoComposition(
             clips: clipLayouts,
             overlays: overlayLayouts,
             renderSize: renderSize,
             fitMode: fitMode,
-            duration: composition.duration
+            duration: composition.duration,
+            requiresCustomCompositor: requiresCustomCompositor
         )
         videoComposition.fadeEdges = fadeEdges
         videoComposition.contentDuration = composition.duration.seconds
@@ -627,7 +631,8 @@ actor VideoProcessor {
         overlays: [OverlayLayout],
         renderSize: CGSize,
         fitMode: FitMode,
-        duration: CMTime
+        duration: CMTime,
+        requiresCustomCompositor: Bool
     ) -> FilterVideoComposition {
         let edges = clips.flatMap { [$0.start, $0.end] } + overlays.flatMap { [$0.start, $0.end] }
         let boundaries = ([CMTime.zero, duration] + edges.filter { CMTimeCompare($0, duration) <= 0 })
@@ -726,7 +731,7 @@ actor VideoProcessor {
             ))
         }
         videoComposition.trackRenders = renders
-        videoComposition.customVideoCompositorClass = ClipFilterCompositor.self
+        videoComposition.customVideoCompositorClass = requiresCustomCompositor ? ClipFilterCompositor.self : nil
         return videoComposition
     }
 
