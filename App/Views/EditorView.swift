@@ -2234,6 +2234,7 @@ class EditorViewModel: ObservableObject {
         var times: [Double] = []
         for item in episode.storyline() where item.track == .main {
             let clip = item.segment
+            guard clip.sourceType == .mainVideo else { continue }
             for source in sourceTimes where clip.startTime <= source && source < clip.endTime {
                 times.append(item.start + (source - clip.startTime) / clip.playbackSpeed)
             }
@@ -2249,7 +2250,10 @@ class EditorViewModel: ObservableObject {
 
     /// Rebuilds the project's episodes at detected topic boundaries (source times).
     func createEpisodesAtTopics(_ sourceTimes: [Double]) {
-        project.createEpisodes(at: sourceTimes)
+        guard project.createEpisodes(at: sourceTimes) > 0 else {
+            errorMessage = "Os limites detectados ficam perto demais das bordas (menos de 5s) para virar episódio."
+            return
+        }
         episodes = project.episodes
         if let first = episodes.first { selectedEpisode = first }
         Task { await persistProjectChanges() }

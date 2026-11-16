@@ -89,7 +89,9 @@ struct Project: Codable, Identifiable {
     
     /// Rebuilds episodes at detected topic boundaries instead of fixed-length slices.
     /// Slivers shorter than ~5s are merged into the surrounding segment.
-    mutating func createEpisodes(at boundaries: [Double]) {
+    /// Returns the number of boundary cuts applied (0 when none could be used).
+    @discardableResult
+    mutating func createEpisodes(at boundaries: [Double]) -> Int {
         let minimum = 5.0
         var cuts = boundaries
             .sorted()
@@ -100,7 +102,7 @@ struct Project: Codable, Identifiable {
             merged.append(cut)
         }
         cuts = merged
-        guard !cuts.isEmpty else { return }
+        guard !cuts.isEmpty else { return 0 }
         var ranges: [(Double, Double)] = []
         var cursor = 0.0
         for cut in cuts {
@@ -119,6 +121,7 @@ struct Project: Codable, Identifiable {
             )
         }
         updateTimestamp()
+        return cuts.count
     }
 }
 
