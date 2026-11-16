@@ -459,7 +459,12 @@ actor VideoProcessor {
 
         addVisibility(to: container, start: overlay.startTime, duration: overlay.duration)
         if let animation = overlay.animation, animation != .none {
-            Self.addEntrance(animation, to: container, at: overlay.startTime, size: size)
+            // Animate a wrapper so the container's visibility window still hides it after the end.
+            let wrapper = CALayer()
+            wrapper.frame = CGRect(origin: .zero, size: size)
+            wrapper.addSublayer(container)
+            Self.addEntrance(animation, to: wrapper, at: overlay.startTime, size: size)
+            return wrapper
         }
         return container
     }
