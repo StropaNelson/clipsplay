@@ -1363,7 +1363,8 @@ class EditorViewModel: ObservableObject {
             errorMessage = "Posicione o cursor sobre o conteúdo principal para congelar o quadro."
             return
         }
-        let frame = 1.0 / 30
+        // Shorter than one frame even at 120 fps, so exactly one image is held.
+        let frame = 1.0 / 150
         let cut = min(item.segment.endTime - frame, item.segment.startTime + (time - item.start) * item.segment.playbackSpeed)
         var freezeID = UUID()
         mutateSelectedEpisode { episode in
