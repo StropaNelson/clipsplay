@@ -568,7 +568,7 @@ struct EditorView: View {
                     if segment.trackType == .main {
                         toolButton("Dividir", icon: "scissors") { viewModel.splitAtPlayhead() }
                         toolButton("Congelar", icon: "snowflake") { viewModel.freezeFrame() }
-                        toolButton("Áudio", icon: "waveform") { Task { await viewModel.detachAudio() } }
+                        toolButton("Áudio", icon: "waveform") { Task { @MainActor in await viewModel.detachAudio() } }
                     }
                     Menu {
                         ForEach([0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4], id: \.self) { value in
@@ -682,7 +682,9 @@ struct EditorView: View {
                     request: request,
                     episodeDuration: viewModel.timelineDuration,
                     onSave: { viewModel.saveOverlay($0) },
-                    onDelete: { viewModel.removeOverlay(request.overlay.id) }
+                    onDelete: { viewModel.removeOverlay(request.overlay.id) },
+                    templates: viewModel.project.textTemplates ?? [],
+                    onSaveTemplate: { _, template in viewModel.saveTextTemplate(template) }
                 )
             }
             .sheet(item: $framingSegment) { segment in
@@ -2262,6 +2264,11 @@ class EditorViewModel: ObservableObject {
         }
         episodes = project.episodes
         if let first = episodes.first { selectedEpisode = first }
+        Task { await persistProjectChanges() }
+    }
+
+    func saveTextTemplate(_ template: TextStyleTemplate) {
+        project.textTemplates = (project.textTemplates ?? []) + [template]
         Task { await persistProjectChanges() }
     }
 

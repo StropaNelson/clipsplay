@@ -156,17 +156,23 @@ struct TextOverlayEditorSheet: View {
     let episodeDuration: Double
     let onSave: (TextOverlay) -> Void
     let onDelete: () -> Void
+    var templates: [TextStyleTemplate] = []
+    var onSaveTemplate: ((String, TextStyleTemplate) -> Void)?
 
     @Environment(\.dismiss) private var dismiss
     @State private var overlay: TextOverlay
     @State private var color: Color
+    @State private var templateName = ""
     @FocusState private var isTextFocused: Bool
 
-    init(request: TextEditRequest, episodeDuration: Double, onSave: @escaping (TextOverlay) -> Void, onDelete: @escaping () -> Void) {
+    init(request: TextEditRequest, episodeDuration: Double, onSave: @escaping (TextOverlay) -> Void, onDelete: @escaping () -> Void,
+         templates: [TextStyleTemplate] = [], onSaveTemplate: ((String, TextStyleTemplate) -> Void)? = nil) {
         self.isNew = request.isNew
         self.episodeDuration = max(episodeDuration, 1)
         self.onSave = onSave
         self.onDelete = onDelete
+        self.templates = templates
+        self.onSaveTemplate = onSaveTemplate
         self._overlay = State(initialValue: request.overlay)
         self._color = State(initialValue: request.overlay.color.color)
     }
@@ -185,6 +191,39 @@ struct TextOverlayEditorSheet: View {
                         }
                 }
 
+                if !templates.isEmpty || onSaveTemplate != nil {
+                    Section("Modelo de identidade") {
+                        if !templates.isEmpty {
+                            Picker("Aplicar modelo", selection: templatePicker) {
+                                Text("Nenhum").tag(UUID?.none)
+                                ForEach(templates) { Text($0.name).tag(UUID?.some($0.id)) }
+                            }
+                        }
+                        if onSaveTemplate != nil {
+                            HStack {
+                                TextField("Nome do modelo", text: $templateName)
+                                Button("Salvar") {
+                                    let name = templateName.trimmingCharacters(in: .whitespacesAndNewlines)
+                                    guard !name.isEmpty else { return }
+                                    onSaveTemplate?(name, TextStyleTemplate(
+                                        name: name,
+                                        style: overlay.style,
+                                        color: RGBAColor(color),
+                                        isBold: overlay.isBold,
+                                        fontScale: overlay.fontScale,
+                                        positionX: overlay.positionX,
+                                        positionY: overlay.positionY,
+                                        animation: overlay.animation,
+                                        exitAnimation: overlay.exitAnimation
+                                    ))
+                                    templateName = ""
+                                }
+                                .disabled(templateName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            }
+                        }
+                    }
+                }
+
                 Section("Estilo") {
                     Picker("Estilo", selection: $overlay.style) {
                         ForEach(TextOverlayStyle.allCases) { Text($0.rawValue).tag($0) }
@@ -193,6 +232,9 @@ struct TextOverlayEditorSheet: View {
                     ColorPicker("Cor", selection: $color, supportsOpacity: false)
                     Toggle("Negrito", isOn: $overlay.isBold)
                     Picker("Animação", selection: $overlay.animation) {
+                        ForEach(TextAnimationStyle.allCases) { Text($0.rawValue).tag(TextAnimationStyle?.some($0)) }
+                    }
+                    Picker("Saída", selection: $overlay.exitAnimation) {
                         ForEach(TextAnimationStyle.allCases) { Text($0.rawValue).tag(TextAnimationStyle?.some($0)) }
                     }
                     HStack {
@@ -266,6 +308,23 @@ struct TextOverlayEditorSheet: View {
         .presentationDetents([.medium, .large])
     }
 
+    private var templatePicker: Binding<UUID?> {
+        Binding<UUID?>(
+            get: { nil },
+            set: { id in
+                guard let template = templates.first(where: { $0.id == id }) else { return }
+                overlay.style = template.style
+                overlay.isBold = template.isBold
+                overlay.fontScale = template.fontScale
+                overlay.positionX = template.positionX
+                overlay.positionY = template.positionY
+                overlay.animation = template.animation
+                overlay.exitAnimation = template.exitAnimation
+                color = template.color.color
+            }
+        )
+    }
+
     private func positionButton(_ title: String, y: Double) -> some View {
         Button(title) {
             overlay.positionX = 0.5
@@ -319,7 +378,13 @@ struct TextOverlayLabel: View {
     var time: Double = 0
 
     private var label: Text {
-        guard let words = overlay.highlightWords else { return Text(overlay.text) }
+        guard let words = overlay.highlightWords else {
+            if overlay.animation == .typewriter, entranceProgress < 1 {
+                let count = Int(Double(overlay.text.count) * entranceProgress)
+                return Text(String(overlay.text.prefix(count)))
+            }
+            return Text(overlay.text)
+        }
         let local = time - overlay.startTime
         return words.enumerated().reduce(Text("")) { result, entry in
             let spoken = local >= entry.element.start && local < entry.element.end
@@ -333,9 +398,14 @@ struct TextOverlayLabel: View {
         return min(max((time - overlay.startTime) / 0.4, 0), 1)
     }
 
+    private var exitProgress: Double {
+        guard overlay.exitAnimation != nil, overlay.exitAnimation != .none else { return 1 }
+        return min(max((overlay.endTime - time) / 0.35, 0), 1)
+    }
+
     var body: some View {
         let fontSize = max(6, CGFloat(overlay.fontScale) * canvasSize.height)
-        let progress = entranceProgress
+        let progress = entranceProgress * exitProgress
         label
             .font(.system(size: fontSize, weight: overlay.isBold ? .bold : .regular))
             .foregroundStyle(overlay.color.color)
@@ -355,8 +425,10 @@ struct TextOverlayLabel: View {
                     .opacity(isSelected ? 1 : 0)
             )
             .opacity(progress)
-            .scaleEffect(overlay.animation == .pop ? 0.2 + 0.8 * progress : 1)
-            .offset(y: overlay.animation == .slide ? (1 - progress) * canvasSize.height * 0.15 : 0)
+            .scaleEffect(overlay.animation == .pop ? 0.2 + 0.8 * entranceProgress : 1)
+            .offset(y: overlay.animation == .slide
+                   ? (1 - entranceProgress) * canvasSize.height * 0.15
+                   : (overlay.animation == .bounce ? -(1 - entranceProgress) * canvasSize.height * 0.25 : 0))
     }
 }
 

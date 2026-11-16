@@ -68,7 +68,8 @@ actor TimelineEngine {
             additionalAssets: additionalAssets,
             aspect: settings?.aspectRatio ?? project.aspectRatio,
             resolution: settings?.resolution ?? project.resolution,
-            fitMode: settings?.fitMode ?? project.fitMode
+            fitMode: settings?.fitMode ?? project.fitMode,
+            fadeEdges: settings?.fadeEdges ?? false
         )
     }
     

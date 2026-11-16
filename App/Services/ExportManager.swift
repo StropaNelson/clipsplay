@@ -189,6 +189,8 @@ struct ExportSettings {
     var quality: ExportQuality = .high
     /// Multiplicar conteúdo: variant without burned-in captions.
     var excludeCaptions: Bool = false
+    /// Fade from/to black at the start and end of each episode.
+    var fadeEdges: Bool = false
 }
 
 enum ExportQuality: String, CaseIterable, Identifiable {

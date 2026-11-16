@@ -4,10 +4,13 @@ import UIKit
 
 /// A video composition that renders through ClipFilterCompositor, applying
 /// per-clip Core Image adjustments and chroma key on video overlays.
-final class FilterVideoComposition: AVMutableVideoComposition {
+final class FilterVideoComposition: AVMutableVideoComposition, @unchecked Sendable {
     /// Render infos per track; tracks are reused by several non-overlapping clips.
     var trackRenders: [CMPersistentTrackID: [TrackRenderInfo]] = [:]
     var fitMode: FitMode = .fit
+    /// When set, fades the whole frame to black at both ends of the content.
+    var fadeEdges = false
+    var contentDuration = 0.0
 }
 
 struct TrackRenderInfo {
@@ -40,15 +43,14 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
     private var renderContext: AVVideoCompositionRenderContext?
     private var shouldCancel = false
 
-    var sourcePixelBufferAttributes: [String: Any]? {
+    var sourcePixelBufferAttributes: [String: any Sendable]? {
         [String(kCVPixelBufferPixelFormatTypeKey): [
             kCVPixelFormatType_32BGRA,
-            kCVPixelFormatType_420YpCbCr8BiPlanarFullRangeVideo,
             kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         ]]
     }
 
-    var requiredPixelBufferAttributesForRenderContext: [String: Any] {
+    var requiredPixelBufferAttributesForRenderContext: [String: any Sendable] {
         [String(kCVPixelBufferPixelFormatTypeKey): [kCVPixelFormatType_32BGRA]]
     }
 
@@ -117,8 +119,8 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
         }
 
         for (trackID, info) in clips + overlays {
-            guard let source = request.sourceFrame(byTrackID: trackID) else { continue }
-            var image = source
+            guard let sourceBuffer = request.sourceFrame(byTrackID: trackID) else { continue }
+            var image = CIImage(cvImageBuffer: sourceBuffer)
             if let adjustments = info.adjustments, !adjustments.isIdentity {
                 image = applyAdjustments(adjustments, to: image)
             }
@@ -142,6 +144,13 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
                     )
                     transform = adjusted.0
                     opacity = adjusted.1
+                    if let crop = adjusted.2 {
+                        image = image.transformed(by: transform).cropped(to: crop)
+                        canvas = opacity < 0.999
+                            ? image.applyingFilter("CIColorMatrix", parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: opacity)]).composited(over: canvas)
+                            : image.composited(over: canvas)
+                        continue
+                    }
                 }
             case .overlay:
                 transform = overlayTransform(info, renderSize: renderSize)
@@ -154,7 +163,17 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
             }
             canvas = image.transformed(by: transform).composited(over: canvas)
         }
-        return canvas.cropped(to: CGRect(origin: .zero, size: renderSize))
+        var result = canvas.cropped(to: CGRect(origin: .zero, size: renderSize))
+        if composition.fadeEdges, composition.contentDuration > 0 {
+            let fade = 0.5
+            let alpha = min(1, min(time / fade, (composition.contentDuration - time) / fade))
+            if alpha < 0.999 {
+                result = result.applyingFilter("CIColorMatrix", parameters: [
+                    "inputAVector": CIVector(x: 0, y: 0, z: 0, w: max(0, alpha))
+                ])
+            }
+        }
+        return result
     }
 
     private func applyAdjustments(_ adjustments: ClipAdjustments, to input: CIImage) -> CIImage {
@@ -258,27 +277,27 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
         isIncoming: Bool,
         base: CGAffineTransform,
         renderSize: CGSize
-    ) -> (CGAffineTransform, Double) {
+    ) -> (CGAffineTransform, Double, CGRect?) {
         let width = renderSize.width
         let height = renderSize.height
         let t = progress
         switch style {
         case .none:
-            return (base, 1)
+            return (base, 1, nil)
         case .dissolve:
-            return (base, isIncoming ? t : 1)
+            return (base, isIncoming ? t : 1, nil)
         case .fadeBlack, .fadeWhite:
-            return (base, isIncoming ? max(0, t * 2 - 1) : max(0, 1 - t * 2))
+            return (base, isIncoming ? max(0, t * 2 - 1) : max(0, 1 - t * 2), nil)
         case .slideLeft:
-            return isIncoming ? (base.concatenating(CGAffineTransform(translationX: width * (1 - t), y: 0)), 1) : (base, 1)
+            return isIncoming ? (base.concatenating(CGAffineTransform(translationX: width * (1 - t), y: 0)), 1, nil) : (base, 1, nil)
         case .slideRight:
-            return isIncoming ? (base.concatenating(CGAffineTransform(translationX: -width * (1 - t), y: 0)), 1) : (base, 1)
+            return isIncoming ? (base.concatenating(CGAffineTransform(translationX: -width * (1 - t), y: 0)), 1, nil) : (base, 1, nil)
         case .slideUp:
-            return isIncoming ? (base.concatenating(CGAffineTransform(translationX: 0, y: height * (1 - t))), 1) : (base, 1)
+            return isIncoming ? (base.concatenating(CGAffineTransform(translationX: 0, y: height * (1 - t))), 1, nil) : (base, 1, nil)
         case .push:
             return isIncoming
-                ? (base.concatenating(CGAffineTransform(translationX: width * (1 - t), y: 0)), 1)
-                : (base.concatenating(CGAffineTransform(translationX: -width * t, y: 0)), 1)
+                ? (base.concatenating(CGAffineTransform(translationX: width * (1 - t), y: 0)), 1, nil)
+                : (base.concatenating(CGAffineTransform(translationX: -width * t, y: 0)), 1, nil)
         case .zoom:
             if isIncoming {
                 let center = CGPoint(x: width / 2, y: height / 2)
@@ -287,9 +306,16 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
                     .concatenating(CGAffineTransform(translationX: -center.x, y: -center.y))
                     .concatenating(CGAffineTransform(scaleX: scale, y: scale))
                     .concatenating(CGAffineTransform(translationX: center.x, y: center.y))
-                return (zoomed, t)
+                return (zoomed, t, nil)
             }
-            return (base, 1)
+            return (base, 1, nil)
+        case .wipe:
+            guard isIncoming else { return (base, 1, nil) }
+            return (base, 1, CGRect(x: 0, y: 0, width: width * t, height: height))
+        case .iris:
+            guard isIncoming else { return (base, 1, nil) }
+            let w = width * t, h = height * t
+            return (base, 1, CGRect(x: (width - w) / 2, y: (height - h) / 2, width: w, height: h))
         }
     }
 }

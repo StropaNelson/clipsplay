@@ -112,7 +112,8 @@ actor VideoProcessor {
         additionalAssets: [UUID: URL],
         aspect: AspectRatio,
         resolution: ExportResolution,
-        fitMode: FitMode
+        fitMode: FitMode,
+        fadeEdges: Bool = false
     ) async throws -> CompositionBuildResult {
         // AVAssetTrack only holds a weak reference to its AVAsset. Every asset must stay
         // alive while its tracks are inserted, otherwise AVFoundation fails with
@@ -354,6 +355,8 @@ actor VideoProcessor {
             fitMode: fitMode,
             duration: composition.duration
         )
+        videoComposition.fadeEdges = fadeEdges
+        videoComposition.contentDuration = composition.duration.seconds
         return CompositionBuildResult(
             composition: composition,
             videoComposition: videoComposition,
@@ -376,6 +379,8 @@ actor VideoProcessor {
         if let source = videoComposition as? FilterVideoComposition {
             mutable.trackRenders = source.trackRenders
             mutable.fitMode = source.fitMode
+            mutable.fadeEdges = source.fadeEdges
+            mutable.contentDuration = source.contentDuration
         }
         let size = mutable.renderSize
         let parent = CALayer()
@@ -463,12 +468,17 @@ actor VideoProcessor {
         }
 
         addVisibility(to: container, start: overlay.startTime, duration: overlay.duration)
-        if let animation = overlay.animation, animation != .none {
+        if (overlay.animation ?? .none) != .none || (overlay.exitAnimation ?? .none) != .none {
             // Animate a wrapper so the container's visibility window still hides it after the end.
             let wrapper = CALayer()
             wrapper.frame = CGRect(origin: .zero, size: size)
             wrapper.addSublayer(container)
-            Self.addEntrance(animation, to: wrapper, at: overlay.startTime, size: size)
+            if let animation = overlay.animation, animation != .none {
+                Self.addEntrance(animation, to: wrapper, at: overlay.startTime, size: size)
+            }
+            if let exit = overlay.exitAnimation, exit != .none {
+                Self.addExit(exit, to: wrapper, endingAt: overlay.startTime + overlay.duration, size: size)
+            }
             return wrapper
         }
         return container
@@ -489,16 +499,52 @@ actor VideoProcessor {
             layer.add(a, forKey: keyPath)
         }
         switch style {
-        case .fade:
+        case .fade, .typewriter:
+            // Typewriter approximates the per-character reveal as a fade + slight slide.
             animate("opacity", 0, 1)
+            if style == .typewriter {
+                animate("transform.translation.x", NSNumber(value: -size.width * 0.02), 0)
+            }
         case .slide:
             animate("transform.translation.y", NSNumber(value: size.height * 0.15), 0)
             animate("opacity", 0, 1)
         case .pop:
             animate("transform.scale", 0.2, 1)
             animate("opacity", 0, 1)
+        case .bounce:
+            animate("transform.translation.y", NSNumber(value: -size.height * 0.25), 0)
+            animate("opacity", 0, 1)
         case .none:
             break
+        }
+    }
+
+    /// Exit animation for exported text: 0.35s ending at `end`.
+    private static func addExit(_ style: TextAnimationStyle, to layer: CALayer, endingAt end: Double, size: CGSize) {
+        let begin = max(0, end - 0.35)
+        let duration = 0.35
+        func animate(_ keyPath: String, _ from: NSNumber, _ to: NSNumber) {
+            let a = CABasicAnimation(keyPath: keyPath)
+            a.fromValue = from
+            a.toValue = to
+            a.beginTime = begin <= 0 ? AVCoreAnimationBeginTimeAtZero : begin
+            a.duration = duration
+            a.fillMode = .both
+            a.isRemovedOnCompletion = false
+            layer.add(a, forKey: "exit-" + keyPath)
+        }
+        switch style {
+        case .slide:
+            animate("transform.translation.y", 0, NSNumber(value: size.height * 0.15))
+            animate("opacity", 1, 0)
+        case .pop:
+            animate("transform.scale", 1, 0.2)
+            animate("opacity", 1, 0)
+        case .bounce:
+            animate("transform.translation.y", 0, NSNumber(value: -size.height * 0.25))
+            animate("opacity", 1, 0)
+        case .fade, .typewriter, .none:
+            animate("opacity", 1, 0)
         }
     }
 
@@ -758,6 +804,8 @@ actor VideoProcessor {
                 toEnd: shifted(outgoing.base, x: -width, y: 0),
                 timeRange: range
             )
+        case .wipe, .iris:
+            incoming.layer.setOpacityRamp(fromStartOpacity: 0, toEndOpacity: 1, timeRange: range)
         case .zoom:
             let center = CGPoint(x: width / 2, y: height / 2)
             let zoomed = incoming.base
@@ -1050,7 +1098,6 @@ struct CompositionOverlayVideo {
     let volume: Float
     var opacity: Double = 1
     var rotation: Double = 0
-    var chromaKey: ChromaKeySettings?
 }
 
 struct ImageOverlayRender {
@@ -1069,6 +1116,7 @@ private struct OverlayLayout {
     let widthFraction: Double
     var opacity: Double = 1
     var rotation: Double = 0
+    var chromaKey: ChromaKeySettings?
 }
 
 struct CompositionBuildResult {

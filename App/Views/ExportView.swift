@@ -42,6 +42,7 @@ struct ExportView: View {
                 }
                 
                 Section("Capas dos Episódios") {
+                    Toggle("Fade preto nas pontas", isOn: $settings.fadeEdges)
                     Toggle("Gerar capas", isOn: $settings.includeCovers)
                     
                     if settings.includeCovers {

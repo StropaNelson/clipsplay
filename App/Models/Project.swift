@@ -28,6 +28,8 @@ struct Project: Codable, Identifiable {
     var transcriptWords: [TranscriptWord]?
     var storedGlobalOverlays: [TextOverlay]?
     var storedGlobalAudioClips: [AudioClip]?
+    /// Reusable text style templates ("identidade") saved by the user.
+    var textTemplates: [TextStyleTemplate]?
 
     var globalOverlays: [TextOverlay] {
         get { storedGlobalOverlays ?? [] }

@@ -12,6 +12,8 @@ enum TransitionStyle: String, Codable, CaseIterable, Identifiable {
     case slideUp = "Deslizar ↑"
     case push = "Empurrar"
     case zoom = "Zoom"
+    case wipe = "Cortina"
+    case iris = "Íris"
 
     var id: String { rawValue }
 
@@ -26,6 +28,8 @@ enum TransitionStyle: String, Codable, CaseIterable, Identifiable {
         case .slideUp: return "arrow.up.square"
         case .push: return "arrow.left.arrow.right"
         case .zoom: return "plus.magnifyingglass"
+        case .wipe: return "rectangle.lefthalf.filled"
+        case .iris: return "circle.dashed"
         }
     }
 }
@@ -55,6 +59,20 @@ struct RGBAColor: Codable, Hashable {
     var uiColor: UIColor { UIColor(red: red, green: green, blue: blue, alpha: alpha) }
 }
 
+/// Saved text style preset ("identidade"): applies style, color, size, position and animations.
+struct TextStyleTemplate: Codable, Identifiable, Hashable {
+    var id = UUID()
+    var name: String
+    var style: TextOverlayStyle
+    var color: RGBAColor
+    var isBold: Bool
+    var fontScale: Double
+    var positionX: Double
+    var positionY: Double
+    var animation: TextAnimationStyle?
+    var exitAnimation: TextAnimationStyle?
+}
+
 /// Where a text/audio item repeats. `nil` means it belongs to a single episode.
 enum ClipAnchor: String, Codable, CaseIterable, Identifiable {
     case allEpisodes = "Todos os episódios"
@@ -69,6 +87,8 @@ enum TextAnimationStyle: String, Codable, CaseIterable, Identifiable {
     case fade = "Aparecer"
     case slide = "Deslizar"
     case pop = "Zoom"
+    case typewriter = "Digitação"
+    case bounce = "Queda"
     var id: String { rawValue }
     var icon: String {
         switch self {
@@ -76,6 +96,8 @@ enum TextAnimationStyle: String, Codable, CaseIterable, Identifiable {
         case .fade: return "sun.min"
         case .slide: return "arrow.up.to.line"
         case .pop: return "arrow.up.left.and.arrow.down.right"
+        case .typewriter: return "keyboard"
+        case .bounce: return "arrow.down.to.line"
         }
     }
 }
@@ -106,6 +128,8 @@ struct TextOverlay: Codable, Identifiable, Hashable {
     /// Word timings relative to `startTime`; captions with words highlight the spoken word.
     var words: [TranscriptWord]?
     var animation: TextAnimationStyle?
+    /// Exit animation for the last ~0.4s (none/fade/slide/pop reuse the same kinds).
+    var exitAnimation: TextAnimationStyle?
 
     var endTime: Double { startTime + duration }
 
