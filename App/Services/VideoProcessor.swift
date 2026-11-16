@@ -163,7 +163,8 @@ actor VideoProcessor {
             volume: Float,
             fadeIn: Double,
             fadeOut: Double,
-            speed: Double = 1
+            speed: Double = 1,
+            kind: AudioClipKind? = nil
         ) async throws {
             let available = try await track.load(.timeRange)
             guard let range = intersection(of: sourceRange, with: available) else { return }
@@ -191,7 +192,8 @@ actor VideoProcessor {
                 end: end,
                 volume: volume,
                 fadeIn: fadeIn,
-                fadeOut: fadeOut
+                fadeOut: fadeOut,
+                kind: kind
             ))
         }
 
@@ -270,7 +272,8 @@ actor VideoProcessor {
                     at: start,
                     volume: segment.narrationVolume,
                     fadeIn: 0,
-                    fadeOut: 0
+                    fadeOut: 0,
+                    kind: .narration
                 )
             }
         }
@@ -295,7 +298,8 @@ actor VideoProcessor {
                 at: start,
                 volume: clip.volume,
                 fadeIn: clip.fadeIn,
-                fadeOut: clip.fadeOut
+                fadeOut: clip.fadeOut,
+                kind: clip.kind
             )
         }
 
@@ -454,7 +458,38 @@ actor VideoProcessor {
         }
 
         addVisibility(to: container, start: overlay.startTime, duration: overlay.duration)
+        if let animation = overlay.animation, animation != .none {
+            Self.addEntrance(animation, to: container, at: overlay.startTime, size: size)
+        }
         return container
+    }
+
+    /// Entrance animation for exported text: 0.4s at overlay start.
+    private static func addEntrance(_ style: TextAnimationStyle, to layer: CALayer, at start: Double, size: CGSize) {
+        let begin = start <= 0 ? AVCoreAnimationBeginTimeAtZero : start
+        let duration = 0.4
+        func animate(_ keyPath: String, _ from: NSNumber, _ to: NSNumber) {
+            let a = CABasicAnimation(keyPath: keyPath)
+            a.fromValue = from
+            a.toValue = to
+            a.beginTime = begin
+            a.duration = duration
+            a.fillMode = .both
+            a.isRemovedOnCompletion = false
+            layer.add(a, forKey: keyPath)
+        }
+        switch style {
+        case .fade:
+            animate("opacity", 0, 1)
+        case .slide:
+            animate("transform.translation.y", NSNumber(value: size.height * 0.15), 0)
+            animate("opacity", 0, 1)
+        case .pop:
+            animate("transform.scale", 0.2, 1)
+            animate("opacity", 0, 1)
+        case .none:
+            break
+        }
     }
 
     private static func captionString(_ words: [TranscriptWord], highlighted: Int?, font: CTFont, base: CGColor, highlight: CGColor) -> NSAttributedString {
@@ -743,6 +778,21 @@ actor VideoProcessor {
 
     private func makeAudioMix(_ placements: [AudioPlacement]) -> AVAudioMix? {
         guard !placements.isEmpty else { return nil }
+        // Duck music under narration/detached speech: merged speech intervals, ±0.3s padding.
+        var speech: [(Double, Double)] = []
+        for p in placements where p.kind == .narration || p.kind == .videoSound {
+            speech.append((max(0, p.start.seconds - 0.3), p.end.seconds + 0.3))
+        }
+        speech.sort { $0.0 < $1.0 }
+        var merged: [(Double, Double)] = []
+        for s in speech {
+            if let last = merged.last, s.0 <= last.1 {
+                merged[merged.count - 1] = (last.0, max(last.1, s.1))
+            } else {
+                merged.append(s)
+            }
+        }
+        speech = merged
         var parametersByTrack: [CMPersistentTrackID: AVMutableAudioMixInputParameters] = [:]
         for placement in placements.sorted(by: { CMTimeCompare($0.start, $1.start) < 0 }) {
             let parameters = parametersByTrack[placement.track.trackID]
@@ -773,6 +823,36 @@ actor VideoProcessor {
                     toEndVolume: 0,
                     timeRange: CMTimeRange(start: CMTimeSubtract(placement.end, fadeDuration), duration: fadeDuration)
                 )
+            }
+            if placement.kind == .music, !speech.isEmpty {
+                let start = placement.start.seconds, end = placement.end.seconds
+                for (s0, s1) in speech where s1 > start && s0 < end {
+                    let dip = Float(0.3)
+                    let downStart = max(start, s0 - 0.3)
+                    let downEnd = min(end, s0)
+                    if downEnd > downStart {
+                        parameters.setVolumeRamp(
+                            fromStartVolume: volume,
+                            toEndVolume: volume * dip,
+                            timeRange: CMTimeRange(
+                                start: CMTime(seconds: downStart, preferredTimescale: 600),
+                                duration: CMTime(seconds: downEnd - downStart, preferredTimescale: 600)
+                            )
+                        )
+                    }
+                    let upStart = max(start, s1)
+                    let upEnd = min(end, s1 + 0.4)
+                    if upEnd > upStart {
+                        parameters.setVolumeRamp(
+                            fromStartVolume: volume * dip,
+                            toEndVolume: volume,
+                            timeRange: CMTimeRange(
+                                start: CMTime(seconds: upStart, preferredTimescale: 600),
+                                duration: CMTime(seconds: upEnd - upStart, preferredTimescale: 600)
+                            )
+                        )
+                    }
+                }
             }
             parametersByTrack[placement.track.trackID] = parameters
         }
@@ -908,6 +988,7 @@ struct CompositionAudioClip {
     let volume: Float
     let fadeIn: Double
     let fadeOut: Double
+    var kind: AudioClipKind = .music
 }
 
 struct CompositionOverlayVideo {
@@ -965,6 +1046,7 @@ private struct AudioPlacement {
     let volume: Float
     let fadeIn: Double
     let fadeOut: Double
+    var kind: AudioClipKind? = nil
 }
 
 enum ProcessorError: LocalizedError {

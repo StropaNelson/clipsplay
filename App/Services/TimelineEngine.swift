@@ -38,7 +38,8 @@ actor TimelineEngine {
                 sourceEnd: clip.sourceEnd,
                 volume: clip.volume,
                 fadeIn: clip.fadeIn,
-                fadeOut: clip.fadeOut
+                fadeOut: clip.fadeOut,
+                kind: clip.kind
             )
         }
 

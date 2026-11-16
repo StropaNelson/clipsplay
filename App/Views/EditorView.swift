@@ -568,6 +568,7 @@ struct EditorView: View {
                     if segment.trackType == .main {
                         toolButton("Dividir", icon: "scissors") { viewModel.splitAtPlayhead() }
                         toolButton("Congelar", icon: "snowflake") { viewModel.freezeFrame() }
+                        toolButton("Áudio", icon: "waveform") { viewModel.detachAudio() }
                     }
                     Menu {
                         ForEach([0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4], id: \.self) { value in
@@ -2257,6 +2258,46 @@ class EditorViewModel: ObservableObject {
         episodes = project.episodes
         if let first = episodes.first { selectedEpisode = first }
         Task { await persistProjectChanges() }
+    }
+
+    /// Detaches the selected main clip's audio into its own "Som" track and mutes the clip.
+    func detachAudio() {
+        guard let segment = selectedSegment, segment.trackType == .main,
+              segment.sourceType == .mainVideo, segment.sourceEndTime > segment.sourceStartTime else { return }
+        // Reuse (or register) a media asset that points at the source video file.
+        let fileURL = project.sourceVideoFileURL
+        let asset: MediaAsset
+        if let existing = mediaAssets.first(where: { $0.fileURL == fileURL.path || $0.name == "__source__" }) {
+            asset = existing
+        } else {
+            asset = MediaAsset(
+                name: "__source__",
+                fileURL: fileURL,
+                type: .video,
+                duration: project.sourceVideoDuration,
+                naturalSize: .zero,
+                fileSize: 0,
+                thumbnailURL: nil
+            )
+            mediaAssets.append(asset)
+        }
+        let clip = AudioClip(
+            assetID: asset.id,
+            name: "Som do vídeo",
+            kind: .videoSound,
+            timelineStart: segment.startTime,
+            sourceStart: segment.sourceStartTime,
+            sourceEnd: segment.sourceEndTime,
+            volume: 1
+        )
+        mutateSelectedEpisode { episode in
+            var clips = episode.mainClips
+            guard let index = clips.firstIndex(where: { $0.id == segment.id }) else { return }
+            clips[index].clipVolume = 0
+            episode.mainClips = clips
+            episode.audioClips.append(clip)
+        }
+        selectedSegmentID = clip.id
     }
 
     /// Positions the playhead where a source-video time lands in the selected episode.

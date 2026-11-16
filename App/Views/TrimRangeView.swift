@@ -241,4 +241,43 @@ actor WaveformProvider {
         guard maxPeak > 0 else { return peaks }
         return peaks.map { min(1, $0 / maxPeak) }
     }
+
+    /// Gain (0.1–1.0) that brings the file's average level to a speech-friendly loudness.
+    func normalizedGain(for url: URL?) async -> Float? {
+        guard let url else { return nil }
+        let asset = AVURLAsset(url: url)
+        guard let track = try? await asset.loadTracks(withMediaType: .audio).first else { return nil }
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 8000,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ])
+        guard let reader = try? AVAssetReader(asset: asset), reader.canAdd(output) else { return nil }
+        reader.add(output)
+        guard reader.startReading() else { return nil }
+        var sumSquares = 0.0
+        var count = 0
+        while let buffer = output.copyNextSampleBuffer() {
+            guard let block = CMSampleBufferGetDataBuffer(buffer) else { continue }
+            let length = CMBlockBufferGetDataLength(block)
+            var data = [Int16](repeating: 0, count: length / 2)
+            let status = data.withUnsafeMutableBytes { pointer in
+                CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: length, destination: pointer.baseAddress!)
+            }
+            guard status == kCMBlockBufferNoErr else { continue }
+            for sample in data {
+                let value = Double(sample) / Double(Int16.max)
+                sumSquares += value * value
+            }
+            count += data.count
+        }
+        guard count > 0 else { return nil }
+        let rms = sqrt(sumSquares / Double(count))
+        guard rms > 0.0001 else { return nil }
+        // Target RMS ≈ 0.25 (about -12 dBFS); cap at 1.0 to never amplify.
+        return Float(min(1.0, 0.25 / rms))
+    }
 }

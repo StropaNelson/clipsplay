@@ -64,6 +64,22 @@ enum ClipAnchor: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+enum TextAnimationStyle: String, Codable, CaseIterable, Identifiable {
+    case none = "Nenhuma"
+    case fade = "Aparecer"
+    case slide = "Deslizar"
+    case pop = "Zoom"
+    var id: String { rawValue }
+    var icon: String {
+        switch self {
+        case .none: return "xmark"
+        case .fade: return "sun.min"
+        case .slide: return "arrow.up.to.line"
+        case .pop: return "arrow.up.left.and.arrow.down.right"
+        }
+    }
+}
+
 enum TextOverlayStyle: String, Codable, CaseIterable, Identifiable {
     case plain = "Simples"
     case shadow = "Sombra"
@@ -89,6 +105,7 @@ struct TextOverlay: Codable, Identifiable, Hashable {
     var anchor: ClipAnchor?
     /// Word timings relative to `startTime`; captions with words highlight the spoken word.
     var words: [TranscriptWord]?
+    var animation: TextAnimationStyle?
 
     var endTime: Double { startTime + duration }
 
@@ -108,6 +125,7 @@ struct TextOverlay: Codable, Identifiable, Hashable {
 enum AudioClipKind: String, Codable, CaseIterable, Identifiable {
     case music = "Música"
     case narration = "Narração"
+    case videoSound = "Som"
 
     var id: String { rawValue }
 
@@ -115,6 +133,7 @@ enum AudioClipKind: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .music: return "music.note"
         case .narration: return "mic.fill"
+        case .videoSound: return "waveform"
         }
     }
 }

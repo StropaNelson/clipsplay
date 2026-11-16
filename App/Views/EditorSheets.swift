@@ -192,6 +192,9 @@ struct TextOverlayEditorSheet: View {
                     .pickerStyle(.segmented)
                     ColorPicker("Cor", selection: $color, supportsOpacity: false)
                     Toggle("Negrito", isOn: $overlay.isBold)
+                    Picker("Animação", selection: $overlay.animation) {
+                        ForEach(TextAnimationStyle.allCases) { Text($0.rawValue).tag(TextAnimationStyle?.some($0)) }
+                    }
                     HStack {
                         Text("Tamanho")
                         Slider(value: $overlay.fontScale, in: 0.03...0.16)
@@ -325,8 +328,14 @@ struct TextOverlayLabel: View {
         }
     }
 
+    private var entranceProgress: Double {
+        guard overlay.animation != nil, overlay.animation != .none else { return 1 }
+        return min(max((time - overlay.startTime) / 0.4, 0), 1)
+    }
+
     var body: some View {
         let fontSize = max(6, CGFloat(overlay.fontScale) * canvasSize.height)
+        let progress = entranceProgress
         label
             .font(.system(size: fontSize, weight: overlay.isBold ? .bold : .regular))
             .foregroundStyle(overlay.color.color)
@@ -345,6 +354,9 @@ struct TextOverlayLabel: View {
                     .padding(-4)
                     .opacity(isSelected ? 1 : 0)
             )
+            .opacity(progress)
+            .scaleEffect(overlay.animation == .pop ? 0.2 + 0.8 * progress : 1)
+            .offset(y: overlay.animation == .slide ? (1 - progress) * canvasSize.height * 0.15 : 0)
     }
 }
 
@@ -560,6 +572,18 @@ struct AudioClipEditorSheet: View {
                         tint: .green
                     )
                     .padding(.vertical, 4)
+                }
+                Section {
+                    Button {
+                        Task {
+                            if let normalized = await WaveformProvider.shared.normalizedGain(for: assetURL) {
+                                clip.volume = normalized
+                            }
+                        }
+                    } label: {
+                        Label("Normalizar volume", systemImage: "waveform.badge.magnifyingglass")
+                    }
+                    .disabled(assetURL == nil)
                 }
                 Section("Fade") {
                     HStack {
