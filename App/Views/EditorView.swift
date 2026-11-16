@@ -1774,7 +1774,9 @@ class EditorViewModel: ObservableObject {
         var second = clip
         second.id = UUID()
         clip.sourceEnd = clip.sourceStart + offset
+        clip.fadeOut = 0
         second.sourceStart = clip.sourceEnd
+        second.fadeIn = 0
         second.timelineStart = clip.timelineStart + offset
         updateAudioClip(clip)
         store(second)
