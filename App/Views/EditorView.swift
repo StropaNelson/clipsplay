@@ -59,7 +59,7 @@ struct EditorView: View {
                 topBar
                 Divider().overlay(EditorTheme.divider)
                 workspace
-                    .frame(height: max(220, geometry.size.height * 0.56))
+                    .frame(height: geometry.size.height * 0.52)
                 transportBar
                 Divider().overlay(EditorTheme.divider)
                 TimelineView(
