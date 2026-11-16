@@ -1074,6 +1074,8 @@ struct CompositionSegment {
     let overlapIn: Double
     let transition: TransitionStyle
     let clipVolume: Float
+    let audioFadeIn: Double
+    let audioFadeOut: Double
     let narrationAssetID: UUID?
     let narrationVolume: Float
     let narrationOffset: Double

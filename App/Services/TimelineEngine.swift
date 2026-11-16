@@ -23,6 +23,8 @@ actor TimelineEngine {
                 overlapIn: item.overlap,
                 transition: item.segment.transition,
                 clipVolume: item.segment.clipVolume,
+                audioFadeIn: item.segment.audioFadeIn ?? 0,
+                audioFadeOut: item.segment.audioFadeOut ?? 0,
                 narrationAssetID: item.segment.narrationAssetID,
                 narrationVolume: item.segment.narrationLevel,
                 narrationOffset: item.segment.narrationOffset ?? 0,

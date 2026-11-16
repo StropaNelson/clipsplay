@@ -42,9 +42,11 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
     private let ciContext = CIContext()
     private let contextQueue = DispatchQueue(label: "clipstudio.filtercompositor.rendercontext")
     private let framingQueue = DispatchQueue(label: "clipstudio.filtercompositor.framing")
+    private let chromaCacheQueue = DispatchQueue(label: "clipstudio.filtercompositor.chromacache")
     private var renderContext: AVVideoCompositionRenderContext?
     private var shouldCancel = false
     private var framingTrackers: [CMPersistentTrackID: AutoFramingTracker] = [:]
+    private var chromaCubeCache: [ChromaKeySettings: Data] = [:]
 
     var sourcePixelBufferAttributes: [String: any Sendable]? {
         [String(kCVPixelBufferPixelFormatTypeKey): [
@@ -216,25 +218,57 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
     }
 
     private func applyChromaKey(_ settings: ChromaKeySettings, to input: CIImage) -> CIImage {
-        guard let kernel = Self.chromaKernel else { return input }
-        let key = settings.color
-        return kernel.apply(
-            extent: input.extent,
-            arguments: [
-                input,
-                CIVector(x: key.red, y: key.green, z: key.blue),
-                max(0.05, min(1, settings.tolerance))
-            ]
-        ) ?? input
+        guard let mask = chromaMask(settings, for: input) else { return input }
+        return input.applyingFilter("CIBlendWithMask", parameters: [
+            "inputBackgroundImage": CIImage.empty(),
+            "inputMaskImage": mask
+        ])
     }
 
-    private static let chromaKernel: CIColorKernel? = CIColorKernel(source: """
-    kernel vec4 chromaKey(__sample s, vec3 keyColor, float tolerance) {
-        float d = distance(s.rgb, keyColor);
-        float alpha = smoothstep(tolerance * 0.5, tolerance * 1.5, d);
-        return vec4(s.rgb, s.a * alpha);
+    private func chromaMask(_ settings: ChromaKeySettings, for input: CIImage) -> CIImage? {
+        let data = chromaCacheQueue.sync {
+            if let cached = chromaCubeCache[settings] { return cached }
+            let generated = Self.chromaCubeData(for: settings)
+            chromaCubeCache[settings] = generated
+            return generated
+        }
+        return CIFilter(name: "CIColorCube", parameters: [
+            kCIInputImageKey: input,
+            "inputCubeDimension": 32,
+            "inputCubeData": data
+        ])?.outputImage
     }
-    """)
+
+    private static func chromaCubeData(for settings: ChromaKeySettings, dimension: Int = 32) -> Data {
+        var data = Data(count: dimension * dimension * dimension * 4 * MemoryLayout<Float>.stride)
+        data.withUnsafeMutableBytes { buffer in
+            let values = buffer.bindMemory(to: Float.self)
+            let keyR = Float(settings.color.red)
+            let keyG = Float(settings.color.green)
+            let keyB = Float(settings.color.blue)
+            let edge0 = Float(max(0.001, settings.tolerance * 0.5))
+            let edge1 = Float(max(Double(edge0) + 0.001, settings.tolerance * 1.5))
+            var index = 0
+            for b in 0..<dimension {
+                for g in 0..<dimension {
+                    for r in 0..<dimension {
+                        let red = Float(r) / Float(dimension - 1)
+                        let green = Float(g) / Float(dimension - 1)
+                        let blue = Float(b) / Float(dimension - 1)
+                        let distance = sqrt(pow(red - keyR, 2) + pow(green - keyG, 2) + pow(blue - keyB, 2))
+                        var alpha = max(0, min(1, (distance - edge0) / max(0.0001, edge1 - edge0)))
+                        alpha = alpha * alpha * (3 - 2 * alpha)
+                        values[index] = alpha
+                        values[index + 1] = alpha
+                        values[index + 2] = alpha
+                        values[index + 3] = alpha
+                        index += 4
+                    }
+                }
+            }
+        }
+        return data
+    }
 
     /// Same placement math as the instruction pipeline: fit/fill + user transform.
     private func clipTransform(
@@ -374,8 +408,8 @@ extension ClipFilterCompositor {
         request.outputPixelFormat = kCVPixelFormatType_OneComponent8
         let handler = VNImageRequestHandler(ciImage: input, options: [:])
         guard (try? handler.perform([request])) != nil,
-              let mask = request.results?.first else { return nil }
-        let maskImage = CIImage(cvImageBuffer: mask)
+              let mask = request.results?.first?.pixelBuffer else { return nil }
+        let maskImage = CIImage(cvPixelBuffer: mask)
         // The mask arrives in the frame's pixel space; stretch it over the input extent.
         let extent = input.extent
         let scaled = maskImage.transformed(by: CGAffineTransform(
