@@ -43,8 +43,12 @@ actor ExportManager {
                   let image = UIImage(contentsOfFile: asset.url.path)?.cgImage else { return nil }
             return ImageOverlayRender(image: image, overlay: overlay)
         }
+        var overlays = episode.resolvedOverlays(global: project.globalOverlays)
+        if settings.excludeCaptions {
+            overlays = overlays.filter { $0.isCaption != true }
+        }
         let videoComposition = await processor.applyTextOverlays(
-            episode.resolvedOverlays(global: project.globalOverlays),
+            overlays,
             images: images,
             to: output.videoComposition
         )
@@ -183,6 +187,8 @@ struct ExportSettings {
     var coverCaptureTime: Double = 0
     var fileNamePrefix: String = "Episodio"
     var quality: ExportQuality = .high
+    /// Multiplicar conteúdo: variant without burned-in captions.
+    var excludeCaptions: Bool = false
 }
 
 enum ExportQuality: String, CaseIterable, Identifiable {

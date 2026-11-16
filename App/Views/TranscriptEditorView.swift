@@ -10,7 +10,22 @@ struct TranscriptEditorView: View {
     @State private var struck: Set<Int> = []
     @State private var minSilence = 0.8
     @State private var includeFillers = true
+    @State private var includeRepetitions = true
+    @State private var margin = 0.15
+    @State private var level = CutLevel.equilibrado
     @State private var rejected: Set<String> = []
+
+    enum CutLevel: String, CaseIterable, Identifiable {
+        case conservador = "Conservador"
+        case equilibrado = "Equilibrado"
+        case intenso = "Intenso"
+        var id: String { rawValue }
+
+        var silence: Double { self == .conservador ? 1.2 : self == .equilibrado ? 0.8 : 0.5 }
+        var margin: Double { self == .conservador ? 0.25 : self == .equilibrado ? 0.15 : 0.1 }
+        var fillers: Bool { self != .conservador }
+        var repetitions: Bool { true }
+    }
 
     enum Mode: String, CaseIterable, Identifiable {
         case text = "Texto"
@@ -86,12 +101,24 @@ struct TranscriptEditorView: View {
 
     private var suggestionsMode: some View {
         VStack(alignment: .leading, spacing: 8) {
+            Picker("Nível de corte", selection: $level) {
+                ForEach(CutLevel.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: level) { level in
+                minSilence = level.silence
+                margin = level.margin
+                includeFillers = level.fillers
+                includeRepetitions = level.repetitions
+            }
             HStack {
                 Text("Silêncio maior que \(String(format: "%.1f", minSilence))s")
                     .font(.footnote)
                 Slider(value: $minSilence, in: 0.4...2.0, step: 0.1)
             }
             Toggle("Vícios de linguagem (né, tipo, hum, é…)", isOn: $includeFillers)
+                .font(.footnote)
+            Toggle("Frases repetidas e retomadas", isOn: $includeRepetitions)
                 .font(.footnote)
             if suggestions.isEmpty {
                 Text("Nenhuma sugestão encontrada.")
@@ -153,7 +180,7 @@ struct TranscriptEditorView: View {
 
     private var suggestions: [Suggestion] {
         var result: [Suggestion] = []
-        let pad = 0.15
+        let pad = margin
         if let first = words.first, first.start >= minSilence {
             result.append(Suggestion(
                 id: "silence-start",
@@ -189,7 +216,60 @@ struct TranscriptEditorView: View {
                 ))
             }
         }
+        if includeRepetitions {
+            result.append(contentsOf: retakes(padding: pad))
+        }
         return result.sorted { $0.range.lowerBound < $1.range.lowerBound }
+    }
+
+    /// Detects repeated phrases: the speaker restarts a sentence nearby, so the earlier
+    /// (abandoned) attempt is the one to cut. Groups words into phrases, then compares
+    /// each phrase with the next ones.
+    private func retakes(padding: Double) -> [Suggestion] {
+        var phrases: [[Int]] = []
+        var current: [Int] = []
+        for index in words.indices {
+            if let last = current.last,
+               words[index].start - words[last].end > 0.6
+                || words[last].text.rangeOfCharacter(from: CharacterSet(charactersIn: ".!?")) != nil {
+                phrases.append(current)
+                current = []
+            }
+            current.append(index)
+        }
+        if !current.isEmpty { phrases.append(current) }
+
+        func tokens(_ phrase: [Int]) -> [String] {
+            phrase.map { words[$0].text.lowercased().trimmingCharacters(in: .punctuationCharacters) }
+        }
+        func similar(_ a: [String], _ b: [String]) -> Bool {
+            guard min(a.count, b.count) >= 4 else { return false }
+            let overlap = Set(a).intersection(Set(b)).count
+            return Double(overlap) / Double(max(a.count, b.count)) >= 0.6
+        }
+
+        var result: [Suggestion] = []
+        var used: Set<Int> = []
+        for i in phrases.indices {
+            guard !used.contains(i), phrases[i].count >= 4 else { continue }
+            for j in (i + 1)...min(i + 3, phrases.count - 1) where similar(tokens(phrases[i]), tokens(phrases[j])) {
+                let first = phrases[i].first!, last = phrases[i].last!
+                let start = max(words[first].start - padding, first > 0 ? words[first - 1].end : 0)
+                let end = min(words[last].end + padding, words[phrases[j].first!].start)
+                guard end > start else { break }
+                let text = tokens(phrases[i]).prefix(4).joined(separator: " ")
+                result.append(Suggestion(
+                    id: "retake-\(i)",
+                    title: "Retomada: “\(text)…”",
+                    detail: "\(Self.clock(words[first].start)) · repetida em \(Self.clock(words[phrases[j].first!].start))",
+                    icon: "arrow.uturn.backward",
+                    range: start...end
+                ))
+                used.insert(i)
+                break
+            }
+        }
+        return result
     }
 
     private var acceptedRanges: [ClosedRange<Double>] {

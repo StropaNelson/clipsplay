@@ -385,7 +385,12 @@ struct EditorView: View {
                         Task { await viewModel.exportEpisodes(selection: selection) }
                     }
                 },
-                onExportAll: { afterDismissingPanelSheet { Task { await viewModel.exportAllEpisodes() } } }
+                onExportAll: { afterDismissingPanelSheet { Task { await viewModel.exportAllEpisodes() } } },
+                onExportVariants: { variants in
+                    afterDismissingPanelSheet {
+                        Task { await viewModel.exportVariants(variants) }
+                    }
+                }
             )
         }
     }
@@ -2350,6 +2355,48 @@ class EditorViewModel: ObservableObject {
 
     func exportAllEpisodes() async {
         await exportEpisodes(selection: nil)
+    }
+
+    /// Multiplicar conteúdo: exports every episode once per variant setting, then zips everything.
+    func exportVariants(_ variants: [ExportSettings]) async {
+        guard !variants.isEmpty else { return }
+        showExportProgress = true
+        exportProgress = nil
+        var allResults: [ExportResult] = []
+        do {
+            for (index, variant) in variants.enumerated() {
+                let result = try await exportManager.exportAllEpisodes(
+                    project: currentProject,
+                    settings: variant,
+                    selectedEpisodes: nil
+                ) { progress in
+                    Task { @MainActor in
+                        self.exportProgress = BatchExportProgress(
+                            currentEpisode: progress.currentEpisode,
+                            totalEpisodes: progress.totalEpisodes,
+                            overallProgress: (Double(index) + progress.overallProgress) / Double(variants.count),
+                            currentStage: progress.currentStage,
+                            message: "Variação \(index + 1)/\(variants.count) · \(progress.message)"
+                        )
+                    }
+                }
+                allResults.append(contentsOf: result.results)
+            }
+            if allResults.count > 1 {
+                _ = try? await exportManager.createZIP(from: allResults, projectName: "\(project.name)_multiplicar")
+            }
+            showExportProgress = false
+            exportProgress = BatchExportProgress(
+                currentEpisode: 0,
+                totalEpisodes: allResults.count,
+                overallProgress: 1.0,
+                currentStage: .completed,
+                message: "Multiplicação concluída: \(allResults.count) vídeos"
+            )
+        } catch {
+            showExportProgress = false
+            errorMessage = "Erro na multiplicação: \(Self.describe(error))"
+        }
     }
 
     private func timeString(_ seconds: Double) -> String {

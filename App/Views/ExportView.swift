@@ -6,9 +6,11 @@ struct ExportView: View {
     @Binding var settings: ExportSettings
     let onExport: (Set<Int>?) -> Void
     let onExportAll: () -> Void
+    var onExportVariants: ([ExportSettings]) -> Void = { _ in }
     
     @State private var selectedEpisodes: Set<Int> = []
     @State private var showingExportOptions = false
+    @State private var showingMultiply = false
     
     var body: some View {
         NavigationStack {
@@ -111,12 +113,26 @@ struct ExportView: View {
                     .disabled(episodes.isEmpty)
                 }
                 
+                Section("Multiplicar conteúdo") {
+                    Button {
+                        showingMultiply = true
+                    } label: {
+                        Label("Gerar variações em lote", systemImage: "rectangle.stack.badge.plus")
+                    }
+                    .disabled(episodes.isEmpty)
+                }
+                
                 Section("Estimativa") {
                     ExportEstimateView(project: project, episodes: episodes, settings: settings)
                 }
             }
             .navigationTitle("Exportar")
             .navigationBarTitleDisplayMode(.inline)
+            .sheet(isPresented: $showingMultiply) {
+                MultiplySheet(base: settings, episodeCount: episodes.count) { variants in
+                    onExportVariants(variants)
+                }
+            }
         }
     }
     
@@ -336,5 +352,85 @@ struct ExportProgressView: View {
             }
         }
         .presentationDetents([.height(300)])
+    }
+}
+/// Generates several versions of the same episodes: formats × captions on/off, exported in batch.
+struct MultiplySheet: View {
+    let base: ExportSettings
+    let episodeCount: Int
+    let onExport: ([ExportSettings]) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var formats: Set<AspectRatio> = [.portrait9_16, .square1_1]
+    @State private var withCaptions = true
+    @State private var withoutCaptions = false
+
+    private static let offered: [AspectRatio] = [.portrait9_16, .portrait4_5, .square1_1, .landscape16_9, .original]
+
+    private var variantCount: Int {
+        formats.count * ((withCaptions ? 1 : 0) + (withoutCaptions ? 1 : 0)) * episodeCount
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Formatos") {
+                    ForEach(Self.offered) { ratio in
+                        Button {
+                            if formats.contains(ratio) { formats.remove(ratio) } else { formats.insert(ratio) }
+                        } label: {
+                            HStack {
+                                Image(systemName: formats.contains(ratio) ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(formats.contains(ratio) ? Color.accentColor : Color.secondary)
+                                Text(ratio.rawValue).foregroundStyle(.primary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                Section("Legendas") {
+                    Toggle("Versão com legendas", isOn: $withCaptions)
+                    Toggle("Versão sem legendas", isOn: $withoutCaptions)
+                }
+                Section {
+                    Text("São gerados \(variantCount) vídeos, um por episódio e variação. Os arquivos levam o formato no nome.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Multiplicar conteúdo")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancelar") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Exportar \(variantCount)") {
+                        onExport(variants())
+                        dismiss()
+                    }
+                    .disabled(variantCount == 0)
+                }
+            }
+        }
+    }
+
+    private func variants() -> [ExportSettings] {
+        var list: [ExportSettings] = []
+        let captionOptions: [(Bool, String)] =
+            (withCaptions ? [(false, "")] : []) + (withoutCaptions ? [(true, "_semLegenda")] : [])
+        for ratio in formats.sorted(by: { $0.rawValue < $1.rawValue }) {
+            for (exclude, suffix) in captionOptions {
+                var variant = base
+                variant.aspectRatio = ratio
+                variant.excludeCaptions = exclude
+                let tag = ratio == .original ? "orig" : ratio.rawValue.replacingOccurrences(of: ":", with: "x")
+                variant.fileNamePrefix = "\(base.fileNamePrefix)_\(tag)\(suffix)"
+                // Covers are aspect-independent; generate them only once.
+                variant.includeCovers = list.isEmpty && base.includeCovers
+                list.append(variant)
+            }
+        }
+        return list
     }
 }
