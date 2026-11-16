@@ -1549,10 +1549,11 @@ class EditorViewModel: ObservableObject {
                     let start = max(cue.startTime, clip.startTime)
                     let end = min(cue.endTime, clip.endTime)
                     guard end - start >= 0.2 else { continue }
+                    let speed = clip.playbackSpeed
                     overlays.append(TextOverlay(
                         text: cue.text,
-                        startTime: item.start + (start - clip.startTime),
-                        duration: end - start,
+                        startTime: item.start + (start - clip.startTime) / speed,
+                        duration: (end - start) / speed,
                         positionX: 0.5,
                         positionY: 0.86,
                         fontScale: 0.05,
