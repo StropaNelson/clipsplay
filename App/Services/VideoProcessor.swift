@@ -348,7 +348,6 @@ actor VideoProcessor {
                 let outgoing = layers[0]
                 let incoming = layers[1]
                 let transitionRange = CMTimeRange(start: start, end: end)
-                outgoing.setOpacityRamp(fromStartOpacity: 1, toEndOpacity: 0, timeRange: transitionRange)
                 incoming.setOpacityRamp(fromStartOpacity: 0, toEndOpacity: 1, timeRange: transitionRange)
                 instruction.layerInstructions = [incoming, outgoing]
             } else {
