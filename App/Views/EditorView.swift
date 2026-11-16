@@ -281,7 +281,7 @@ struct EditorView: View {
         case .media:
             MediaLibraryView(
                 assets: $viewModel.mediaAssets,
-                onAdd: { viewModel.showImportAsset = true },
+                onAdd: { afterDismissingPanelSheet { viewModel.showImportAsset = true } },
                 onRemove: { asset in Task { await viewModel.removeMediaAsset(asset) } },
                 onSelectForIntro: { asset, start, end in
                     Task { await viewModel.assign(asset, to: .intro, startTime: start, endTime: end) }
@@ -314,11 +314,23 @@ struct EditorView: View {
                 episodes: viewModel.episodes,
                 settings: $viewModel.exportSettings,
                 onExport: { selection in
-                    Task { await viewModel.exportEpisodes(selection: selection) }
+                    afterDismissingPanelSheet {
+                        Task { await viewModel.exportEpisodes(selection: selection) }
+                    }
                 },
-                onExportAll: { Task { await viewModel.exportAllEpisodes() } }
+                onExportAll: { afterDismissingPanelSheet { Task { await viewModel.exportAllEpisodes() } } }
             )
         }
+    }
+
+    /// SwiftUI can't present a second sheet while the compact panel sheet is still up.
+    private func afterDismissingPanelSheet(_ action: @escaping () -> Void) {
+        guard sheetPanel != nil else {
+            action()
+            return
+        }
+        sheetPanel = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: action)
     }
 
     private func open(_ panel: EditorPanel) {
