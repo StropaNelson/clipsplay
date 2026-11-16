@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import CoreMedia
+import AudioToolbox
 import UIKit
 import QuartzCore
 import CoreText
@@ -62,17 +63,131 @@ actor VideoProcessor {
         try await exportComposition(composition, to: outputURL, preset: AVAssetExportPresetHighestQuality)
     }
 
+    func bestAudioTrackIndex(from sourceURL: URL, duration: Double, languageCode: String? = nil) async throws -> Int {
+        let asset = AVURLAsset(url: sourceURL)
+        let tracks = try await asset.loadTracks(withMediaType: .audio)
+        guard !tracks.isEmpty else { throw ProcessorError.noAudioTrack }
+        guard tracks.count > 1 else { return 0 }
+
+        var candidates: [(index: Int, track: AVAssetTrack, language: String?)] = []
+        for (index, track) in tracks.enumerated() {
+            let enabled = (try? await track.load(.isEnabled)) ?? true
+            guard enabled else { continue }
+            let language: String?
+            do {
+                language = try await track.load(.extendedLanguageTag)
+            } catch {
+                language = nil
+            }
+            candidates.append((index: index, track: track, language: language))
+        }
+        if candidates.isEmpty {
+            candidates = tracks.enumerated().map { (index: $0, track: $1, language: nil) }
+        }
+        if let languageCode,
+           let language = languageCode.split(separator: "-").first.map(String.init) {
+            let languageMatches = candidates.filter { $0.language?.hasPrefix(language) == true }
+            if !languageMatches.isEmpty {
+                candidates = languageMatches
+            }
+        }
+        guard candidates.count > 1 else { return candidates.first?.index ?? 0 }
+
+        let sampleStarts = [0.05, 0.35, 0.65]
+            .map { min(max(0, duration * $0), max(0, duration - 2)) }
+        var bestIndex = candidates.first?.index ?? 0
+        var bestEnergy = -1.0
+        for candidate in candidates {
+            let energy = sampleStarts.reduce(0) {
+                $0 + audioEnergy(of: candidate.track, in: asset, at: $1, duration: min(2, duration))
+            }
+            if energy > bestEnergy {
+                bestEnergy = energy
+                bestIndex = candidate.index
+            }
+        }
+        return bestIndex
+    }
+
+    private func audioEnergy(of track: AVAssetTrack, in asset: AVAsset, at start: Double, duration: Double) -> Double {
+        guard duration > 0, let reader = try? AVAssetReader(asset: asset) else { return 0 }
+        reader.timeRange = CMTimeRange(
+            start: CMTime(seconds: start, preferredTimescale: 600),
+            duration: CMTime(seconds: duration, preferredTimescale: 600)
+        )
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsNonInterleaved: true
+        ])
+        guard reader.canAdd(output) else { return 0 }
+        reader.add(output)
+        guard reader.startReading() else { return 0 }
+
+        var sumSquares = 0.0
+        var sampleCount = 0
+        while let sample = output.copyNextSampleBuffer() {
+            var bufferListSize = 0
+            guard CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+                sample,
+                bufferListSizeNeededOut: &bufferListSize,
+                bufferListOut: nil,
+                bufferListSize: 0,
+                blockBufferAllocator: nil,
+                blockBufferMemoryAllocator: nil,
+                flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+                blockBufferOut: nil
+            ) == noErr, bufferListSize > 0 else { continue }
+
+            let rawList = UnsafeMutableRawPointer.allocate(byteCount: bufferListSize, alignment: 16)
+            defer { rawList.deallocate() }
+            let bufferList = rawList.bindMemory(to: AudioBufferList.self, capacity: 1)
+            var retainedBlockBuffer: Unmanaged<CMBlockBuffer>?
+            guard CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+                sample,
+                bufferListSizeNeededOut: nil,
+                bufferListOut: bufferList,
+                bufferListSize: bufferListSize,
+                blockBufferAllocator: nil,
+                blockBufferMemoryAllocator: nil,
+                flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+                blockBufferOut: &retainedBlockBuffer
+            ) == noErr else { continue }
+            let retainedBuffer = retainedBlockBuffer?.takeRetainedValue()
+            withExtendedLifetime(retainedBuffer) {
+                let buffers = UnsafeBufferPointer(
+                    start: &bufferList.pointee.mBuffers,
+                    count: Int(bufferList.pointee.mNumberBuffers)
+                )
+                for audioBuffer in buffers {
+                    guard let data = audioBuffer.mData?.assumingMemoryBound(to: Float.self) else { continue }
+                    let count = Int(audioBuffer.mDataByteSize) / MemoryLayout<Float>.size
+                    for index in 0..<count {
+                        let value = Double(data[index])
+                        sumSquares += value * value
+                    }
+                    sampleCount += count
+                }
+            }
+        }
+        reader.cancelReading()
+        return sampleCount > 0 ? sumSquares / Double(sampleCount) : 0
+    }
+
     func extractAudioForTranscription(
         from sourceURL: URL,
         to outputURL: URL,
         startTime: Double = 0,
-        duration: Double? = nil
+        duration: Double? = nil,
+        audioTrackIndex: Int = 0
     ) async throws {
         let asset = AVURLAsset(url: sourceURL)
         let sourceTracks = try await asset.loadTracks(withMediaType: .audio)
-        guard let sourceTrack = sourceTracks.first else {
+        guard !sourceTracks.isEmpty else {
             throw ProcessorError.noAudioTrack
         }
+        let sourceTrack = sourceTracks.indices.contains(audioTrackIndex) ? sourceTracks[audioTrackIndex] : sourceTracks[0]
 
         let assetDuration = try await asset.load(.duration).seconds
         let rangeDuration = min(duration ?? assetDuration, assetDuration - startTime)

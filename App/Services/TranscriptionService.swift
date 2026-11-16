@@ -41,26 +41,26 @@ actor TranscriptionService {
         if allowServer { modes.append(false) }
         guard !modes.isEmpty else { throw TranscriptionError.onDeviceRecognitionUnavailable }
 
-        var lastError: Error?
-        for onDevice in modes {
-            do {
-                let cues = try await transcribe(url: url, duration: duration, recognizer: recognizer, onDevice: onDevice)
-                if !cues.isEmpty { return cues }
-            } catch {
-                lastError = error
-            }
-        }
-        if let lastError, !Self.isNoSpeechError(lastError) { throw lastError }
-        throw TranscriptionError.noSpeechDetected
+        let audioTrackIndex = try await VideoProcessor.shared.bestAudioTrackIndex(
+            from: url,
+            duration: duration,
+            languageCode: localeIdentifier
+        )
+        return try await transcribe(url: url, duration: duration, recognizer: recognizer, modes: modes, audioTrackIndex: audioTrackIndex)
     }
 
-    private func transcribe(url: URL, duration: Double, recognizer: SFSpeechRecognizer, onDevice: Bool) async throws -> [TranscriptCue] {
-        let chunkDuration = 45.0
+    private func transcribe(url: URL, duration: Double, recognizer: SFSpeechRecognizer, modes: [Bool], audioTrackIndex: Int) async throws -> [TranscriptCue] {
+        let chunkDuration = 30.0
+        let overlap = 0.75
         var allCues: [TranscriptCue] = []
         var chunkStart = 0.0
+        var lastError: Error?
 
         while chunkStart < duration {
-            let length = min(chunkDuration, duration - chunkStart)
+            let leadingOverlap = chunkStart > 0 ? overlap : 0
+            let trailingOverlap = chunkStart + chunkDuration < duration ? overlap : 0
+            let extractStart = chunkStart - leadingOverlap
+            let extractDuration = chunkDuration + leadingOverlap + trailingOverlap
             let audioURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("\(UUID().uuidString).m4a")
             defer { try? FileManager.default.removeItem(at: audioURL) }
@@ -68,78 +68,186 @@ actor TranscriptionService {
             try await VideoProcessor.shared.extractAudioForTranscription(
                 from: url,
                 to: audioURL,
-                startTime: chunkStart,
-                duration: length
+                startTime: extractStart,
+                duration: extractDuration,
+                audioTrackIndex: audioTrackIndex
             )
 
-            let segments = try await recognize(audioURL: audioURL, recognizer: recognizer, onDevice: onDevice)
-            allCues.append(contentsOf: Self.makeCues(from: segments, chunkDuration: length).map {
+            var segments: [SFTranscriptionSegment] = []
+            var chunkError: Error?
+            for onDevice in modes where segments.isEmpty {
+                do {
+                    segments = try await recognizeFile(audioURL: audioURL, recognizer: recognizer, onDevice: onDevice)
+                } catch {
+                    chunkError = error
+                    do {
+                        segments = try await recognizeBuffered(audioURL: audioURL, recognizer: recognizer, onDevice: onDevice)
+                    } catch {
+                        chunkError = error
+                    }
+                }
+            }
+            if let chunkError, !Self.isNoSpeechError(chunkError) {
+                lastError = chunkError
+            }
+
+            let ownedStart = leadingOverlap
+            let ownedEnd = ownedStart + min(chunkDuration, duration - chunkStart)
+            let untimed = segments.allSatisfy { $0.timestamp == 0 && $0.duration == 0 }
+            let ownedSegments = untimed ? segments : segments.filter {
+                let midpoint = $0.timestamp + $0.duration / 2
+                return midpoint >= ownedStart && midpoint < ownedEnd
+            }
+            let localDuration = untimed ? ownedEnd - ownedStart : extractDuration
+            let timeOffset = untimed ? chunkStart : extractStart
+            allCues.append(contentsOf: Self.makeCues(from: ownedSegments, chunkDuration: localDuration).map {
                 TranscriptCue(
-                    startTime: $0.startTime + chunkStart,
-                    endTime: $0.endTime + chunkStart,
+                    startTime: $0.startTime + timeOffset,
+                    endTime: $0.endTime + timeOffset,
                     text: $0.text,
-                    words: $0.words.map { TranscriptWord(text: $0.text, start: $0.start + chunkStart, end: $0.end + chunkStart) }
+                    words: $0.words.map { TranscriptWord(text: $0.text, start: $0.start + timeOffset, end: $0.end + timeOffset) }
                 )
             })
             chunkStart += chunkDuration
         }
+        if allCues.isEmpty {
+            if let lastError, !Self.isNoSpeechError(lastError) { throw lastError }
+            throw TranscriptionError.noSpeechDetected
+        }
         return allCues
+    }
+
+    private func recognizeFile(audioURL: URL, recognizer: SFSpeechRecognizer, onDevice: Bool) async throws -> [SFTranscriptionSegment] {
+        let request = SFSpeechURLRecognitionRequest(url: audioURL)
+        configure(request, onDevice: onDevice)
+        return try await recognize(request: request, recognizer: recognizer)
     }
 
     /// Feeds decoded PCM to the recognizer. Silent chunks ("No speech detected") return no segments
     /// instead of failing the whole transcription, and the last partial result is kept if the
     /// recognizer ends with an error after already hearing words.
-    private func recognize(audioURL: URL, recognizer: SFSpeechRecognizer, onDevice: Bool) async throws -> [SFTranscriptionSegment] {
+    private func recognizeBuffered(audioURL: URL, recognizer: SFSpeechRecognizer, onDevice: Bool) async throws -> [SFTranscriptionSegment] {
         let file = try AVAudioFile(forReading: audioURL)
         let request = SFSpeechAudioBufferRecognitionRequest()
-        request.requiresOnDeviceRecognition = onDevice
-        request.shouldReportPartialResults = true
-        request.taskHint = .dictation
-        request.addsPunctuation = true
-
-        let format = file.processingFormat
-        let frameCapacity: AVAudioFrameCount = 8192
-        while file.framePosition < file.length {
-            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCapacity) else { break }
-            try file.read(into: buffer, frameCount: frameCapacity)
-            if buffer.frameLength == 0 { break }
-            request.append(buffer)
-        }
-        request.endAudio()
-
+        configure(request, onDevice: onDevice)
         let state = RecognitionState()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[SFTranscriptionSegment], Error>) in
                 state.continuation = continuation
                 state.task = recognizer.recognitionTask(with: request) { result, error in
-                    if let result {
-                        let segments = result.bestTranscription.segments
-                        if result.isFinal {
-                            state.finish(.success(state.collect(final: segments)))
-                            return
-                        }
-                        // Since iOS 16 the transcription restarts after each pause; the result that
-                        // closes an utterance carries metadata, so keep it before the text resets.
-                        if result.speechRecognitionMetadata != nil {
-                            state.commit(segments)
-                        } else {
-                            state.update(partial: segments)
-                        }
-                    }
-                    if let error {
-                        let collected = state.collect(final: nil)
-                        if !collected.isEmpty {
-                            state.finish(.success(collected))
-                        } else if Self.isNoSpeechError(error) {
-                            state.finish(.success([]))
-                        } else {
-                            state.finish(.failure(error))
-                        }
-                    }
+                    Self.handle(result: result, error: error, state: state)
+                }
+                do {
+                    try Self.appendSpeechBuffers(from: file, to: request)
+                    request.endAudio()
+                } catch {
+                    state.finish(.failure(error))
                 }
             }
         } onCancel: {
             state.task?.cancel()
+            state.finish(.failure(CancellationError()))
+        }
+    }
+
+    private func configure(_ request: SFSpeechRecognitionRequest, onDevice: Bool) {
+        request.requiresOnDeviceRecognition = onDevice
+        request.shouldReportPartialResults = true
+        request.taskHint = .dictation
+        request.addsPunctuation = true
+    }
+
+    private func recognize(request: SFSpeechRecognitionRequest, recognizer: SFSpeechRecognizer) async throws -> [SFTranscriptionSegment] {
+        let state = RecognitionState()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[SFTranscriptionSegment], Error>) in
+                state.continuation = continuation
+                state.task = recognizer.recognitionTask(with: request) { result, error in
+                    Self.handle(result: result, error: error, state: state)
+                }
+            }
+        } onCancel: {
+            state.task?.cancel()
+            state.finish(.failure(CancellationError()))
+        }
+    }
+
+    nonisolated private static func handle(result: SFSpeechRecognitionResult?, error: Error?, state: RecognitionState) {
+        if let result {
+            let segments = result.bestTranscription.segments
+            if result.isFinal {
+                state.finish(.success(state.collect(final: segments)))
+                return
+            }
+            // Since iOS 16 the transcription restarts after each pause; the result that
+            // closes an utterance carries metadata, so keep it before the text resets.
+            if result.speechRecognitionMetadata != nil {
+                state.commit(segments)
+            } else {
+                state.update(partial: segments)
+            }
+        }
+        if let error {
+            let collected = state.collect(final: nil)
+            if !collected.isEmpty {
+                state.finish(.success(collected))
+            } else if isNoSpeechError(error) {
+                state.finish(.success([]))
+            } else {
+                state.finish(.failure(error))
+            }
+        }
+    }
+
+    nonisolated private static func appendSpeechBuffers(from file: AVAudioFile, to request: SFSpeechAudioBufferRecognitionRequest) throws {
+        let inputFormat = file.processingFormat
+        guard file.length > 0,
+              file.length <= AVAudioFramePosition(AVAudioFrameCount.max),
+              let input = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: AVAudioFrameCount(file.length)) else { return }
+        try file.read(into: input)
+        guard input.frameLength > 0 else { return }
+        guard let inputData = input.floatChannelData else {
+            request.append(input)
+            return
+        }
+
+        var sumSquares = 0.0
+        var sampleCount = 0
+        let channelCount = Int(inputFormat.channelCount)
+        for channel in 0..<channelCount {
+            let samples = inputData[channel]
+            for frame in 0..<Int(input.frameLength) {
+                let value = Double(samples[frame])
+                sumSquares += value * value
+            }
+            sampleCount += Int(input.frameLength)
+        }
+        let rms = sampleCount > 0 ? sqrt(sumSquares / Double(sampleCount)) : 0
+        let gain = Float(min(3.0, max(1.0, rms > 0.001 ? 0.12 / rms : 1.0)))
+
+        guard let outputFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: inputFormat.sampleRate,
+            channels: 1,
+            interleaved: false
+        ) else { return }
+        let frameCapacity: AVAudioFrameCount = 8192
+        var position: AVAudioFrameCount = 0
+        while position < input.frameLength {
+            let frameCount = min(frameCapacity, input.frameLength - position)
+            guard let output = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCapacity) else { break }
+            output.frameLength = frameCount
+            guard let outputSamples = output.floatChannelData?[0] else { break }
+            for offset in 0..<Int(frameCount) {
+                let frame = Int(position) + offset
+                var mixed = Float(0)
+                for channel in 0..<channelCount {
+                    mixed += inputData[channel][frame]
+                }
+                outputSamples[offset] = max(-0.98, min(0.98, mixed / Float(channelCount) * gain))
+            }
+            request.append(output)
+            position += frameCount
         }
     }
 
@@ -219,26 +327,20 @@ private final class RecognitionState: @unchecked Sendable {
     var continuation: CheckedContinuation<[SFTranscriptionSegment], Error>?
     var task: SFSpeechRecognitionTask?
     private var committed: [SFTranscriptionSegment] = []
-    private var lastCommittedText = ""
-    private var lastCommittedStart = -10.0
     private var latest: [SFTranscriptionSegment] = []
-
-    private static func text(_ segments: [SFTranscriptionSegment]) -> String {
-        segments.map(\.substring).joined(separator: " ")
-    }
 
     func commit(_ segments: [SFTranscriptionSegment]) {
         lock.lock()
         defer { lock.unlock() }
         // The same utterance can arrive twice (metadata result, then final); repeated words
         // spoken later have a different start time and are kept.
-        let text = Self.text(segments)
-        let start = segments.first?.timestamp ?? 0
-        let isDuplicate = text == lastCommittedText && abs(start - lastCommittedStart) < 0.3
-        if !segments.isEmpty, !isDuplicate {
-            committed.append(contentsOf: segments)
-            lastCommittedText = text
-            lastCommittedStart = start
+        for segment in segments {
+            let alreadyCommitted = committed.contains {
+                $0.substring == segment.substring && abs($0.timestamp - segment.timestamp) < 0.05
+            }
+            if !alreadyCommitted {
+                committed.append(segment)
+            }
         }
         latest = []
     }
