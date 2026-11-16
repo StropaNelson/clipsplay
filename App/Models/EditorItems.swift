@@ -240,6 +240,24 @@ extension VideoSegment {
         }
     }
 
+    /// A new piece of this clip starting at `sourceTime`, keeping speed, framing, volume and narration.
+    func continuation(from sourceTime: Double) -> VideoSegment {
+        var piece = VideoSegment(
+            startTime: sourceTime,
+            endTime: endTime,
+            sourceType: sourceType,
+            assetID: assetID,
+            transitionStyle: TransitionStyle.none,
+            narrationAssetID: narrationAssetID,
+            volume: volume
+        )
+        piece.narrationVolume = narrationVolume
+        piece.narrationOffset = (narrationOffset ?? 0) + (sourceTime - startTime) / playbackSpeed
+        piece.speed = speed
+        piece.clipTransform = clipTransform
+        return piece
+    }
+
     /// Freeze frames are one-frame source ranges stretched over the timeline.
     var isFreezeFrame: Bool { playbackSpeed < 0.2 }
 }

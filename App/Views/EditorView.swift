@@ -1337,19 +1337,8 @@ class EditorViewModel: ObservableObject {
             guard let index = clips.firstIndex(where: { $0.id == item.segment.id }) else { return }
             var first = clips[index]
             first.endTime = cut
-            var second = VideoSegment(
-                startTime: cut,
-                endTime: clips[index].endTime,
-                sourceType: first.sourceType,
-                assetID: first.assetID,
-                transitionStyle: TransitionStyle.none,
-                narrationAssetID: first.narrationAssetID,
-                volume: first.volume
-            )
             // The second half keeps playing the narration from where the first half stops.
-            second.narrationVolume = first.narrationVolume
-            second.narrationOffset = (first.narrationOffset ?? 0) + first.timelineDuration
-            second.speed = first.speed
+            let second = clips[index].continuation(from: cut)
             newID = second.id
             clips.replaceSubrange(index...index, with: [first, second])
             episode.mainClips = clips
@@ -1398,16 +1387,7 @@ class EditorViewModel: ObservableObject {
             }
             replacement.append(freeze)
             if original.endTime - cut > 0.05 {
-                var second = VideoSegment(
-                    startTime: cut,
-                    endTime: original.endTime,
-                    sourceType: original.sourceType,
-                    assetID: original.assetID,
-                    transitionStyle: TransitionStyle.none,
-                    volume: original.volume
-                )
-                second.speed = original.speed
-                replacement.append(second)
+                replacement.append(original.continuation(from: cut))
             }
             clips.replaceSubrange(index...index, with: replacement)
             episode.mainClips = clips
@@ -1433,6 +1413,7 @@ class EditorViewModel: ObservableObject {
                 copy.narrationVolume = original.narrationVolume
                 copy.narrationOffset = original.narrationOffset
                 copy.speed = original.speed
+                copy.clipTransform = original.clipTransform
                 clips.insert(copy, at: index + 1)
                 episode.mainClips = clips
             }
@@ -2082,17 +2063,7 @@ class EditorViewModel: ObservableObject {
                     result.append(left)
                 }
                 if item.end - range.upperBound > 0.05 {
-                    var right = VideoSegment(
-                        startTime: clip.startTime + (range.upperBound - item.start) * speed,
-                        endTime: clip.endTime,
-                        sourceType: clip.sourceType,
-                        assetID: clip.assetID,
-                        transitionStyle: TransitionStyle.none,
-                        volume: clip.volume
-                    )
-                    right.speed = clip.speed
-                    right.clipTransform = clip.clipTransform
-                    result.append(right)
+                    result.append(clip.continuation(from: clip.startTime + (range.upperBound - item.start) * speed))
                 }
             }
             guard touched else { return }
