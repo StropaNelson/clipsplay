@@ -1580,9 +1580,10 @@ class EditorViewModel: ObservableObject {
                     let start = max(cue.startTime, clip.startTime)
                     let end = min(cue.endTime, clip.endTime)
                     guard end - start >= 0.2 else { continue }
+                    // Keep words with a meaningful part inside the clip (cuts remove whole words plus padding).
                     let cueWords = Self.words(for: cue, recognized: words).filter { word in
-                        let middle = (word.start + word.end) / 2
-                        return middle >= clip.startTime && middle < clip.endTime
+                        let overlap = min(word.end, clip.endTime) - max(word.start, clip.startTime)
+                        return overlap > min(0.08, (word.end - word.start) / 2)
                     }
                     if dynamic {
                         for group in Self.captionGroups(cueWords) {
