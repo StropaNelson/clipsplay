@@ -7,6 +7,7 @@ struct EditorView: View {
     let project: Project
     @StateObject private var viewModel: EditorViewModel
     @Environment(\.dismiss) private var dismiss
+    @State private var showingTranscription = false
     
     init(project: Project) {
         self.project = project
@@ -36,6 +37,7 @@ struct EditorView: View {
                     Menu {
                         Button("Salvar", systemImage: "square.and.arrow.down") { Task { await viewModel.saveProject() } }
                         Button("Duplicar", systemImage: "doc.on.doc") { viewModel.showDuplicateSheet = true }
+                        Button("Transcrição", systemImage: "captions.bubble") { showingTranscription = true }
                         Divider()
                         Button("Exportar Episódios", systemImage: "square.and.arrow.up") { viewModel.selectedTab = .export }
                     } label: {
@@ -59,6 +61,9 @@ struct EditorView: View {
             }
             .sheet(isPresented: $viewModel.showExportProgress) {
                 ExportProgressView(viewModel: viewModel)
+            }
+            .sheet(isPresented: $showingTranscription) {
+                TranscriptionView(project: project)
             }
             .alert("Erro", isPresented: .constant(viewModel.errorMessage != nil)) {
                 Button("OK") { viewModel.errorMessage = nil }
@@ -199,9 +204,15 @@ struct EditorView: View {
                     assets: $viewModel.mediaAssets,
                     onAdd: { viewModel.showImportAsset = true },
                     onRemove: { asset in Task { await viewModel.removeMediaAsset(asset) } },
-                    onSelectForIntro: { asset in viewModel.assignAssetToIntro(asset) },
-                    onSelectForOutro: { asset in viewModel.assignAssetToOutro(asset) },
-                    onSelectForRecap: { asset in viewModel.assignAssetToRecap(asset) }
+                    onSelectForIntro: { asset, start, end in
+                        Task { await viewModel.assignAssetToIntro(asset, startTime: start, endTime: end) }
+                    },
+                    onSelectForOutro: { asset, start, end in
+                        Task { await viewModel.assignAssetToOutro(asset, startTime: start, endTime: end) }
+                    },
+                    onSelectForRecap: { asset, start, end in
+                        Task { await viewModel.assignAssetToRecap(asset, startTime: start, endTime: end) }
+                    }
                 )
             case .timeline:
                 TimelineView(
@@ -266,7 +277,7 @@ class EditorViewModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var exportProgress: BatchExportProgress?
     
-    private let project: Project
+    private var project: Project
     private let storage = ProjectStorage.shared
     private let importer = VideoImporter.shared
     private let processor = VideoProcessor.shared
@@ -294,6 +305,7 @@ class EditorViewModel: ObservableObject {
     func loadProjectData() async {
         do {
             let loaded = try await storage.loadProject(id: project.id)
+            project = loaded
             episodes = loaded.episodes
             mediaAssets = loaded.mediaAssets
             if let first = episodes.first { selectEpisode(first) }
@@ -319,6 +331,7 @@ class EditorViewModel: ObservableObject {
         
         do {
             try await storage.saveProject(updated)
+            project = updated
         } catch {
             errorMessage = "Erro ao salvar: \(error.localizedDescription)"
         }
@@ -343,65 +356,94 @@ class EditorViewModel: ObservableObject {
     }
     
     func regenerateEpisodes(length: Double) async {
-        var updated = project
-        updated.episodeLength = length
-        updated.regenerateEpisodes()
-        episodes = updated.episodes
-        try? await storage.saveProject(updated)
+        project.episodeLength = length
+        project.regenerateEpisodes()
+        episodes = project.episodes
+        await persistProjectChanges()
     }
     
     func addMediaAsset(_ asset: MediaAsset) async {
         mediaAssets.append(asset)
-        var updated = project
-        updated.mediaAssets = mediaAssets
-        try? await storage.saveProject(updated)
+        await persistProjectChanges()
     }
     
     func removeMediaAsset(_ asset: MediaAsset) async {
         mediaAssets.removeAll { $0.id == asset.id }
-        var updated = project
-        updated.mediaAssets = mediaAssets
-        try? await storage.saveProject(updated)
+        await persistProjectChanges()
     }
     
-    func assignAssetToIntro(_ asset: MediaAsset) {
+    func assignAssetToIntro(_ asset: MediaAsset, startTime: Double, endTime: Double) async {
         guard asset.type == .video else { return }
-        var updated = project
-        updated.introTemplate = SegmentTemplate(
+        project.introTemplate = SegmentTemplate(
             name: asset.name,
             sourceType: .introAsset,
             assetID: asset.id,
-            startTime: 0,
-            endTime: asset.duration,
+            startTime: startTime,
+            endTime: endTime,
             targetTrack: .intro
         )
-        updateEpisodeTemplates()
+        for index in episodes.indices {
+            episodes[index].introSegment = project.introTemplate?.toSegment()
+            episodes[index].customIntroTemplate = nil
+            episodes[index].useGlobalIntro = true
+        }
+        await persistProjectChanges()
     }
     
-    func assignAssetToOutro(_ asset: MediaAsset) {
+    func assignAssetToOutro(_ asset: MediaAsset, startTime: Double, endTime: Double) async {
         guard asset.type == .video else { return }
-        var updated = project
-        updated.outroTemplate = SegmentTemplate(
+        project.outroTemplate = SegmentTemplate(
             name: asset.name,
             sourceType: .outroAsset,
             assetID: asset.id,
-            startTime: 0,
-            endTime: asset.duration,
+            startTime: startTime,
+            endTime: endTime,
             targetTrack: .outro
         )
-        updateEpisodeTemplates()
-    }
-    
-    func assignAssetToRecap(_ asset: MediaAsset) {
-        guard asset.type == .video else { return }
-        // Add to recap settings
-    }
-    
-    private func updateEpisodeTemplates() {
         for index in episodes.indices {
-            episodes[index].introSegment = project.introTemplate?.toSegment()
             episodes[index].outroSegment = project.outroTemplate?.toSegment()
+            episodes[index].customOutroTemplate = nil
+            episodes[index].useGlobalOutro = true
         }
+        await persistProjectChanges()
+    }
+    
+    func assignAssetToRecap(_ asset: MediaAsset, startTime: Double, endTime: Double) async {
+        guard asset.type == .video else { return }
+        let segment = VideoSegment(
+            startTime: startTime,
+            endTime: endTime,
+            sourceType: .recapAsset,
+            assetID: asset.id
+        )
+        project.recapSettings.enabled = true
+        project.recapSettings.mode = .manual
+        project.recapSettings.manualSegments = [segment]
+        for index in episodes.indices {
+            episodes[index].recapSegments = [segment]
+            episodes[index].customRecapSegments = []
+            episodes[index].useGlobalRecap = true
+        }
+        await persistProjectChanges()
+    }
+    
+    private func persistProjectChanges() async {
+        project.episodes = episodes
+        project.mediaAssets = mediaAssets
+        do {
+            try await storage.saveProject(project)
+        } catch {
+            errorMessage = "Erro ao salvar projeto: \(error.localizedDescription)"
+        }
+        refreshSelectedEpisode()
+    }
+
+    private func refreshSelectedEpisode() {
+        guard let selectedEpisode,
+              let updatedEpisode = episodes.first(where: { $0.id == selectedEpisode.id }) else { return }
+        self.selectedEpisode = updatedEpisode
+        updateTimelineForEpisode(updatedEpisode)
+        loadPreview(for: updatedEpisode)
     }
     
     private func updateTimelineForEpisode(_ episode: Episode) {
@@ -414,6 +456,50 @@ class EditorViewModel: ObservableObject {
     
     func updateTimelineTracks(_ tracks: [TrackType: [TimelineSegment]]) {
         timelineTracks = tracks
+        guard let selectedEpisode,
+              let episodeIndex = episodes.firstIndex(where: { $0.id == selectedEpisode.id }) else { return }
+
+        var updatedEpisode = episodes[episodeIndex]
+        if let main = tracks[.main]?.first {
+            updatedEpisode.mainStart = main.sourceStartTime
+            updatedEpisode.mainEnd = main.sourceEndTime
+            updatedEpisode.mainTimelineStartTime = main.startTime
+        }
+        if let intro = tracks[.intro]?.first {
+            updatedEpisode.introSegment = videoSegment(from: intro)
+            updatedEpisode.customIntroTemplate = nil
+            updatedEpisode.useGlobalIntro = true
+        } else {
+            updatedEpisode.useGlobalIntro = false
+        }
+        updatedEpisode.recapSegments = (tracks[.recap] ?? []).map(videoSegment(from:))
+        updatedEpisode.customRecapSegments = []
+        updatedEpisode.useGlobalRecap = !updatedEpisode.recapSegments.isEmpty
+        if let outro = tracks[.outro]?.first {
+            updatedEpisode.outroSegment = videoSegment(from: outro)
+            updatedEpisode.customOutroTemplate = nil
+            updatedEpisode.useGlobalOutro = true
+        } else {
+            updatedEpisode.useGlobalOutro = false
+        }
+        episodes[episodeIndex] = updatedEpisode
+        project.episodes = episodes
+        selectedEpisode = updatedEpisode
+        Task {
+            await persistProjectChanges()
+        }
+    }
+
+    private func videoSegment(from segment: TimelineSegment) -> VideoSegment {
+        VideoSegment(
+            startTime: segment.sourceStartTime,
+            endTime: segment.sourceEndTime,
+            sourceType: segment.sourceType,
+            assetID: segment.assetID,
+            trackIndex: 0,
+            isEnabled: segment.isEnabled,
+            timelineStartTime: segment.startTime
+        )
     }
     
     func movePlayhead(to time: Double) {
@@ -424,14 +510,16 @@ class EditorViewModel: ObservableObject {
         Task {
             do {
                 let assetURLs = Dictionary(uniqueKeysWithValues: mediaAssets.map { ($0.id, $0.url) })
-                let composition = try await timelineEngine.buildPreviewComposition(
+                let output = try await timelineEngine.buildPreviewComposition(
                     project: project,
                     episode: episode,
-                    additionalAssets: assetURLs,
-                    maxDuration: episode.totalDuration
+                    additionalAssets: assetURLs
                 )
                 await MainActor.run {
-                    let player = AVPlayer(playerItem: AVPlayerItem(asset: composition))
+                    let playerItem = AVPlayerItem(asset: output.composition)
+                    playerItem.videoComposition = output.videoComposition
+                    playerItem.audioMix = output.audioMix
+                    let player = AVPlayer(playerItem: playerItem)
                     self.previewPlayer = player
                     setupTimeObserver(for: player)
                     self.durationString = timeString(episode.totalDuration)

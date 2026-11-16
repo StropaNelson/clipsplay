@@ -148,6 +148,7 @@ struct Episode: Codable, Identifiable {
     var useGlobalIntro: Bool
     var useGlobalOutro: Bool
     var useGlobalRecap: Bool
+    var mainTimelineStartTime: Double?
     
     init(index: Int, mainStart: Double, mainEnd: Double, introTemplate: SegmentTemplate?, outroTemplate: SegmentTemplate?, recapSettings: RecapSettings) {
         self.id = UUID()
@@ -163,6 +164,7 @@ struct Episode: Codable, Identifiable {
         self.useGlobalIntro = introTemplate != nil
         self.useGlobalOutro = outroTemplate != nil
         self.useGlobalRecap = true
+        self.mainTimelineStartTime = nil
         
         if recapSettings.enabled {
             if recapSettings.mode == .automatic && index > 0 {
@@ -170,19 +172,39 @@ struct Episode: Codable, Identifiable {
                 let recapStart = max(0, recapEnd - recapSettings.duration)
                 self.recapSegments = [VideoSegment(startTime: recapStart, endTime: recapEnd, sourceType: .mainVideo)]
             } else if recapSettings.mode == .manual {
-                self.recapSegments = recapSettings.manualSegments.map { VideoSegment(startTime: $0.startTime, endTime: $0.endTime, sourceType: .mainVideo) }
+                self.recapSegments = recapSettings.manualSegments
             }
         }
     }
     
     var mainDuration: Double { mainEnd - mainStart }
     var totalDuration: Double {
-        var dur = mainDuration
-        if let intro = effectiveIntro { dur += intro.duration }
-        if let outro = effectiveOutro { dur += outro.duration }
-        dur += recapSegments.reduce(0) { $0 + $1.duration }
-        dur += customRecapSegments.reduce(0) { $0 + $1.duration }
-        return dur
+        var cursor = 0.0
+        var timelineEnd = 0.0
+        var previousDuration = 0.0
+        var hasPreviousSegment = false
+
+        func append(duration: Double, at customStart: Double?) {
+            let overlap = hasPreviousSegment ? min(0.35, min(previousDuration / 3, duration / 3)) : 0
+            let start = customStart ?? max(0, cursor - overlap)
+            let end = start + duration
+            cursor = max(cursor, end)
+            timelineEnd = max(timelineEnd, end)
+            previousDuration = duration
+            hasPreviousSegment = true
+        }
+
+        if let intro = effectiveIntro, intro.isEnabled {
+            append(duration: intro.duration, at: intro.timelineStartTime)
+        }
+        for recap in effectiveRecaps where recap.isEnabled {
+            append(duration: recap.duration, at: recap.timelineStartTime)
+        }
+        append(duration: mainDuration, at: mainTimelineStartTime)
+        if let outro = effectiveOutro, outro.isEnabled {
+            append(duration: outro.duration, at: outro.timelineStartTime)
+        }
+        return timelineEnd
     }
     
     var effectiveIntro: VideoSegment? {
@@ -210,7 +232,7 @@ struct Episode: Codable, Identifiable {
             let start = max(0, end - settings.duration)
             recapSegments = [VideoSegment(startTime: start, endTime: end, sourceType: .mainVideo)]
         } else if settings.mode == .manual {
-            recapSegments = settings.manualSegments.map { VideoSegment(startTime: $0.startTime, endTime: $0.endTime, sourceType: .mainVideo) }
+            recapSegments = settings.manualSegments
         }
     }
 }
@@ -223,8 +245,17 @@ struct VideoSegment: Codable, Identifiable, Hashable {
     var assetID: UUID?
     var trackIndex: Int
     var isEnabled: Bool
+    var timelineStartTime: Double?
     
-    init(startTime: Double, endTime: Double, sourceType: SourceType, assetID: UUID? = nil, trackIndex: Int = 0, isEnabled: Bool = true) {
+    init(
+        startTime: Double,
+        endTime: Double,
+        sourceType: SourceType,
+        assetID: UUID? = nil,
+        trackIndex: Int = 0,
+        isEnabled: Bool = true,
+        timelineStartTime: Double? = nil
+    ) {
         self.id = UUID()
         self.startTime = startTime
         self.endTime = endTime
@@ -232,6 +263,7 @@ struct VideoSegment: Codable, Identifiable, Hashable {
         self.assetID = assetID
         self.trackIndex = trackIndex
         self.isEnabled = isEnabled
+        self.timelineStartTime = timelineStartTime
     }
     
     var duration: Double { max(0, endTime - startTime) }

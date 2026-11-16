@@ -1,19 +1,21 @@
 import SwiftUI
 import PhotosUI
 import UniformTypeIdentifiers
+import AVKit
 
 struct MediaLibraryView: View {
     @Binding var assets: [MediaAsset]
     let onAdd: () -> Void
     let onRemove: (MediaAsset) -> Void
-    let onSelectForIntro: (MediaAsset) -> Void
-    let onSelectForOutro: (MediaAsset) -> Void
-    let onSelectForRecap: (MediaAsset) -> Void
+    let onSelectForIntro: (MediaAsset, Double, Double) -> Void
+    let onSelectForOutro: (MediaAsset, Double, Double) -> Void
+    let onSelectForRecap: (MediaAsset, Double, Double) -> Void
     
     @State private var showingImporter = false
     @State private var selectedFilter: AssetType? = nil
     @State private var showingActionSheet = false
     @State private var assetForAction: MediaAsset?
+    @State private var trimRequest: AssetTrimRequest?
     
     var filteredAssets: [MediaAsset] {
         if let filter = selectedFilter {
@@ -103,15 +105,129 @@ struct MediaLibraryView: View {
             presenting: assetForAction
         ) { asset in
             if asset.type == .video {
-                Button("Usar como Introdução") { onSelectForIntro(asset) }
-                Button("Usar como Encerramento") { onSelectForOutro(asset) }
-                Button("Usar como Recapitulação") { onSelectForRecap(asset) }
+                Button("Usar como Introdução") { beginTrimming(asset, for: .intro) }
+                Button("Usar como Encerramento") { beginTrimming(asset, for: .outro) }
+                Button("Usar como Recapitulação") { beginTrimming(asset, for: .recap) }
             }
             Button("Excluir", role: .destructive) { onRemove(asset) }
             Button("Cancelar", role: .cancel) {}
         } message: { asset in
             Text("Escolha como usar este \(asset.type.rawValue.lowercased())")
         }
+        .sheet(item: $trimRequest) { request in
+            AssetTrimSheet(asset: request.asset, track: request.track) { start, end in
+                switch request.track {
+                case .intro: onSelectForIntro(request.asset, start, end)
+                case .outro: onSelectForOutro(request.asset, start, end)
+                case .recap: onSelectForRecap(request.asset, start, end)
+                default: break
+                }
+            }
+        }
+    }
+
+    private func beginTrimming(_ asset: MediaAsset, for track: TrackType) {
+        trimRequest = AssetTrimRequest(asset: asset, track: track)
+    }
+}
+
+private struct AssetTrimRequest: Identifiable {
+    let id = UUID()
+    let asset: MediaAsset
+    let track: TrackType
+}
+
+private struct AssetTrimSheet: View {
+    let asset: MediaAsset
+    let track: TrackType
+    let onAssign: (Double, Double) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var startTime = 0.0
+    @State private var endTime: Double
+    @State private var player: AVPlayer
+
+    private let minimumDuration = 0.1
+
+    init(asset: MediaAsset, track: TrackType, onAssign: @escaping (Double, Double) -> Void) {
+        self.asset = asset
+        self.track = track
+        self.onAssign = onAssign
+        self._endTime = State(initialValue: asset.duration)
+        self._player = State(initialValue: AVPlayer(url: asset.url))
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    VideoPlayer(player: player)
+                        .frame(height: 220)
+
+                    HStack {
+                        Text("Início")
+                        Slider(
+                            value: $startTime,
+                            in: 0...max(asset.duration - minimumDuration, minimumDuration)
+                        )
+                        Text(formatTime(startTime))
+                            .monospacedDigit()
+                    }
+                    .onChange(of: startTime) { newStart in
+                        endTime = max(endTime, min(newStart + minimumDuration, asset.duration))
+                    }
+
+                    HStack {
+                        Text("Fim")
+                        Slider(
+                            value: $endTime,
+                            in: min(startTime + minimumDuration, asset.duration)...asset.duration
+                        )
+                        Text(formatTime(endTime))
+                            .monospacedDigit()
+                    }
+
+                    Button {
+                        player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+                        player.currentItem?.forwardPlaybackEndTime = CMTime(seconds: endTime, preferredTimescale: 600)
+                        player.play()
+                    } label: {
+                        Label("Pré-visualizar trecho", systemImage: "play.fill")
+                    }
+                } header: {
+                    Text(asset.name)
+                } footer: {
+                    Text("Selecione o trecho do vídeo que será usado como \(track.rawValue.lowercased()).")
+                }
+            }
+            .navigationTitle("Aparar vídeo")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancelar") {
+                        player.pause()
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Atribuir") {
+                        player.pause()
+                        onAssign(startTime, endTime)
+                        dismiss()
+                    }
+                    .disabled(asset.duration < minimumDuration || endTime <= startTime)
+                }
+            }
+            .onDisappear {
+                player.pause()
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func formatTime(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        return String(format: "%02d:%02d", total / 60, total % 60)
     }
 }
 

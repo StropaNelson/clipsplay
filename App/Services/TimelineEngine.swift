@@ -7,11 +7,16 @@ actor TimelineEngine {
     
     private init() {}
     
-    func buildEpisodeComposition(project: Project, episode: Episode, additionalAssets: [UUID: URL]) async throws -> (composition: AVMutableComposition, segments: [CompositionSegment]) {
+    func buildEpisodeComposition(
+        project: Project,
+        episode: Episode,
+        additionalAssets: [UUID: URL],
+        settings: ExportSettings? = nil
+    ) async throws -> CompositionBuildResult {
         let processor = VideoProcessor.shared
         var segments: [CompositionSegment] = []
         
-        if let intro = episode.effectiveIntro {
+        if let intro = episode.effectiveIntro, intro.isEnabled {
             segments.append(CompositionSegment(
                 sourceType: intro.sourceType,
                 assetID: intro.assetID,
@@ -19,11 +24,12 @@ actor TimelineEngine {
                     start: CMTime(seconds: intro.startTime, preferredTimescale: 600),
                     duration: CMTime(seconds: intro.duration, preferredTimescale: 600)
                 ),
-                targetTrack: .intro
+                targetTrack: .intro,
+                timelineStartTime: intro.timelineStartTime
             ))
         }
         
-        for recap in episode.effectiveRecaps {
+        for recap in episode.effectiveRecaps where recap.isEnabled {
             segments.append(CompositionSegment(
                 sourceType: recap.sourceType,
                 assetID: recap.assetID,
@@ -31,7 +37,8 @@ actor TimelineEngine {
                     start: CMTime(seconds: recap.startTime, preferredTimescale: 600),
                     duration: CMTime(seconds: recap.duration, preferredTimescale: 600)
                 ),
-                targetTrack: .recap
+                targetTrack: .recap,
+                timelineStartTime: recap.timelineStartTime
             ))
         }
         
@@ -42,10 +49,11 @@ actor TimelineEngine {
                 start: CMTime(seconds: episode.mainStart, preferredTimescale: 600),
                 duration: CMTime(seconds: episode.mainDuration, preferredTimescale: 600)
             ),
-            targetTrack: .main
+            targetTrack: .main,
+            timelineStartTime: episode.mainTimelineStartTime
         ))
         
-        if let outro = episode.effectiveOutro {
+        if let outro = episode.effectiveOutro, outro.isEnabled {
             segments.append(CompositionSegment(
                 sourceType: outro.sourceType,
                 assetID: outro.assetID,
@@ -53,46 +61,31 @@ actor TimelineEngine {
                     start: CMTime(seconds: outro.startTime, preferredTimescale: 600),
                     duration: CMTime(seconds: outro.duration, preferredTimescale: 600)
                 ),
-                targetTrack: .outro
+                targetTrack: .outro,
+                timelineStartTime: outro.timelineStartTime
             ))
         }
         
-        let composition = try await processor.createComposition(from: segments, sourceURL: project.sourceVideoFileURL, additionalAssets: additionalAssets)
-        return (composition, segments)
+        return try await processor.createComposition(
+            from: segments,
+            sourceURL: project.sourceVideoFileURL,
+            additionalAssets: additionalAssets,
+            aspect: settings?.aspectRatio ?? project.aspectRatio,
+            resolution: settings?.resolution ?? project.resolution,
+            fitMode: settings?.fitMode ?? project.fitMode
+        )
     }
     
-    func buildPreviewComposition(project: Project, episode: Episode, additionalAssets: [UUID: URL], maxDuration: Double = 30) async throws -> AVMutableComposition {
-        let (composition, _) = try await buildEpisodeComposition(project: project, episode: episode, additionalAssets: additionalAssets)
-        
-        let totalDuration = composition.duration.seconds
-        if totalDuration <= maxDuration { return composition }
-        
-        let trimmed = AVMutableComposition()
-        guard let vTrack = trimmed.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
-            throw TimelineError.cannotCreateTrack
-        }
-        let aTrack = composition.tracks(withMediaType: .audio).first != nil ? 
-            trimmed.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) : nil
-        
-        let sourceVideo = composition.tracks(withMediaType: .video).first!
-        let sourceAudio = composition.tracks(withMediaType: .audio).first
-        
-        try vTrack.insertTimeRange(
-            CMTimeRange(start: .zero, duration: CMTime(seconds: maxDuration, preferredTimescale: 600)),
-            of: sourceVideo,
-            at: .zero
+    func buildPreviewComposition(
+        project: Project,
+        episode: Episode,
+        additionalAssets: [UUID: URL]
+    ) async throws -> CompositionBuildResult {
+        try await buildEpisodeComposition(
+            project: project,
+            episode: episode,
+            additionalAssets: additionalAssets
         )
-        vTrack.preferredTransform = sourceVideo.preferredTransform
-        
-        if let sourceAudio, let aTrack {
-            try aTrack.insertTimeRange(
-                CMTimeRange(start: .zero, duration: CMTime(seconds: maxDuration, preferredTimescale: 600)),
-                of: sourceAudio,
-                at: .zero
-            )
-        }
-        
-        return trimmed
     }
     
     nonisolated func computeTrackSegments(for episode: Episode, project: Project) -> [TrackSegments] {
@@ -103,12 +96,29 @@ actor TimelineEngine {
         }
         
         var currentTime = 0.0
+        var timelineEnd = 0.0
+        var previousDuration = 0.0
+        var hasPreviousSegment = false
+
+        func nextStart(_ customStart: Double?, duration: Double) -> Double {
+            let overlap = hasPreviousSegment ? min(0.35, min(previousDuration / 3, duration / 3)) : 0
+            return customStart ?? max(0, currentTime - overlap)
+        }
+
+        func updateCursor(startTime: Double, duration: Double) {
+            let endTime = startTime + duration
+            currentTime = max(currentTime, endTime)
+            timelineEnd = max(timelineEnd, endTime)
+            previousDuration = duration
+            hasPreviousSegment = true
+        }
         
-        if let intro = episode.effectiveIntro {
+        if let intro = episode.effectiveIntro, intro.isEnabled {
+            let startTime = nextStart(intro.timelineStartTime, duration: intro.duration)
             tracks[.intro]?.append(TimelineSegment(
                 id: intro.id,
                 trackType: .intro,
-                startTime: currentTime,
+                startTime: startTime,
                 duration: intro.duration,
                 sourceStartTime: intro.startTime,
                 sourceEndTime: intro.endTime,
@@ -116,14 +126,15 @@ actor TimelineEngine {
                 assetID: intro.assetID,
                 isEnabled: intro.isEnabled
             ))
-            currentTime += intro.duration
+            updateCursor(startTime: startTime, duration: intro.duration)
         }
         
-        for recap in episode.effectiveRecaps {
+        for recap in episode.effectiveRecaps where recap.isEnabled {
+            let startTime = nextStart(recap.timelineStartTime, duration: recap.duration)
             tracks[.recap]?.append(TimelineSegment(
                 id: recap.id,
                 trackType: .recap,
-                startTime: currentTime,
+                startTime: startTime,
                 duration: recap.duration,
                 sourceStartTime: recap.startTime,
                 sourceEndTime: recap.endTime,
@@ -131,13 +142,14 @@ actor TimelineEngine {
                 assetID: recap.assetID,
                 isEnabled: recap.isEnabled
             ))
-            currentTime += recap.duration
+            updateCursor(startTime: startTime, duration: recap.duration)
         }
         
+        let mainStartTime = nextStart(episode.mainTimelineStartTime, duration: episode.mainDuration)
         tracks[.main]?.append(TimelineSegment(
             id: UUID(),
             trackType: .main,
-            startTime: currentTime,
+            startTime: mainStartTime,
             duration: episode.mainDuration,
             sourceStartTime: episode.mainStart,
             sourceEndTime: episode.mainEnd,
@@ -145,13 +157,14 @@ actor TimelineEngine {
             assetID: nil,
             isEnabled: true
         ))
-        currentTime += episode.mainDuration
+        updateCursor(startTime: mainStartTime, duration: episode.mainDuration)
         
-        if let outro = episode.effectiveOutro {
+        if let outro = episode.effectiveOutro, outro.isEnabled {
+            let startTime = nextStart(outro.timelineStartTime, duration: outro.duration)
             tracks[.outro]?.append(TimelineSegment(
                 id: outro.id,
                 trackType: .outro,
-                startTime: currentTime,
+                startTime: startTime,
                 duration: outro.duration,
                 sourceStartTime: outro.startTime,
                 sourceEndTime: outro.endTime,
@@ -159,12 +172,12 @@ actor TimelineEngine {
                 assetID: outro.assetID,
                 isEnabled: outro.isEnabled
             ))
-            currentTime += outro.duration
+            updateCursor(startTime: startTime, duration: outro.duration)
         }
         
         return TrackType.allCases.compactMap { type in
             guard let segments = tracks[type], !segments.isEmpty else { return nil }
-            return TrackSegments(trackType: type, segments: segments, totalDuration: currentTime)
+            return TrackSegments(trackType: type, segments: segments, totalDuration: timelineEnd)
         }
     }
     

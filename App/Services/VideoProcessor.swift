@@ -59,37 +59,159 @@ actor VideoProcessor {
         
         try await exportComposition(composition, to: outputURL, preset: AVAssetExportPresetHighestQuality)
     }
+
+    func extractAudioForTranscription(
+        from sourceURL: URL,
+        to outputURL: URL,
+        startTime: Double = 0,
+        duration: Double? = nil
+    ) async throws {
+        let asset = AVURLAsset(url: sourceURL)
+        let sourceTracks = try await asset.loadTracks(withMediaType: .audio)
+        guard let sourceTrack = sourceTracks.first else {
+            throw ProcessorError.noAudioTrack
+        }
+
+        let assetDuration = try await asset.load(.duration).seconds
+        let rangeDuration = min(duration ?? assetDuration, assetDuration - startTime)
+        guard startTime >= 0, rangeDuration > 0 else {
+            throw ProcessorError.invalidTimeRange
+        }
+        let composition = AVMutableComposition()
+        guard let audioTrack = composition.addMutableTrack(
+            withMediaType: .audio,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw ProcessorError.cannotCreateTrack
+        }
+        try audioTrack.insertTimeRange(
+            CMTimeRange(
+                start: CMTime(seconds: startTime, preferredTimescale: 600),
+                duration: CMTime(seconds: rangeDuration, preferredTimescale: 600)
+            ),
+            of: sourceTrack,
+            at: .zero
+        )
+
+        try? FileManager.default.removeItem(at: outputURL)
+        guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetAppleM4A) else {
+            throw ProcessorError.exportSessionUnavailable
+        }
+        exporter.outputURL = outputURL
+        exporter.outputFileType = .m4a
+        try await runExport(ExportSessionBox(exporter))
+    }
     
-    func createComposition(from segments: [CompositionSegment], sourceURL: URL, additionalAssets: [UUID: URL]) async throws -> AVMutableComposition {
+    func createComposition(
+        from segments: [CompositionSegment],
+        sourceURL: URL,
+        additionalAssets: [UUID: URL],
+        aspect: AspectRatio,
+        resolution: ExportResolution,
+        fitMode: FitMode
+    ) async throws -> CompositionBuildResult {
         let asset = AVURLAsset(url: sourceURL)
         let videoTracks = try await asset.loadTracks(withMediaType: .video)
         guard let sourceVideo = videoTracks.first else { throw ProcessorError.noVideoTrack }
-        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
-        let sourceAudio = audioTracks.first
+        let sourceAudioTracks = try await asset.loadTracks(withMediaType: .audio)
+        let sourceAudio = sourceAudioTracks.first
+        let sourceSize = try await sourceVideo.load(.naturalSize)
         let sourceTransform = try await sourceVideo.load(.preferredTransform)
         
         let composition = AVMutableComposition()
-        guard let vTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+        guard let videoTrackA = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
+              let videoTrackB = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
+              let audioTrackA = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid),
+              let audioTrackB = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
             throw ProcessorError.cannotCreateTrack
         }
-        let aTrack = sourceAudio != nil ? composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) : nil
-        
+
+        let videoTracks = [videoTrackA, videoTrackB]
+        let audioTracks = [audioTrackA, audioTrackB]
+        let transitionLimit = 0.35
         var cursor = CMTime.zero
-        for segment in segments {
-            let tracks = try await getTrackForSegment(segment, sourceVideo: sourceVideo, sourceAudio: sourceAudio, additionalAssets: additionalAssets)
-            let range = segment.timeRange
-            try vTrack.insertTimeRange(range, of: tracks.video, at: cursor)
-            if let sourceAudio = tracks.audio, let aTrack = aTrack {
-                try aTrack.insertTimeRange(range, of: sourceAudio, at: cursor)
+        var previousDuration: CMTime?
+        var clipLayouts: [CompositionClipLayout] = []
+        var audioLayouts: [(start: CMTime, end: CMTime, track: AVMutableCompositionTrack, hasAudio: Bool)] = []
+
+        for segment in segments where segment.timeRange.duration.seconds > 0 {
+            let source = try await getTrackForSegment(
+                segment,
+                sourceVideo: sourceVideo,
+                sourceAudio: sourceAudio,
+                additionalAssets: additionalAssets
+            )
+            let duration = segment.timeRange.duration
+            let overlapDuration: CMTime
+            if let previousDuration {
+                let overlap = min(transitionLimit, min(previousDuration.seconds / 3, duration.seconds / 3))
+                overlapDuration = CMTime(seconds: max(0, overlap), preferredTimescale: 600)
+            } else {
+                overlapDuration = .zero
             }
-            cursor = CMTimeAdd(cursor, range.duration)
+
+            let start = segment.timelineStartTime.map {
+                CMTime(seconds: $0, preferredTimescale: 600)
+            } ?? CMTimeSubtract(cursor, overlapDuration)
+            guard start.seconds.isFinite, start.seconds >= 0 else {
+                throw ProcessorError.invalidTimeRange
+            }
+            let end = CMTimeAdd(start, duration)
+            let lane = clipLayouts.count % 2
+            let compositionVideoTrack = videoTracks[lane]
+            try compositionVideoTrack.insertTimeRange(segment.timeRange, of: source.video, at: start)
+
+            let naturalSize = try await source.video.load(.naturalSize)
+            let transform = try await source.video.load(.preferredTransform)
+            clipLayouts.append(CompositionClipLayout(
+                track: compositionVideoTrack,
+                start: start,
+                end: end,
+                naturalSize: naturalSize,
+                preferredTransform: transform
+            ))
+
+            let compositionAudioTrack = audioTracks[lane]
+            if let sourceAudio = source.audio {
+                try compositionAudioTrack.insertTimeRange(segment.timeRange, of: sourceAudio, at: start)
+                audioLayouts.append((start, end, compositionAudioTrack, true))
+            } else {
+                audioLayouts.append((start, end, compositionAudioTrack, false))
+            }
+
+            cursor = CMTimeCompare(cursor, end) > 0 ? cursor : end
+            previousDuration = duration
         }
-        
-        vTrack.preferredTransform = sourceTransform
-        return composition
+
+        guard !clipLayouts.isEmpty else { throw ProcessorError.invalidTimeRange }
+
+        let renderSize = calculateRenderSize(
+            aspect: aspect,
+            resolution: resolution,
+            naturalSize: sourceSize,
+            transform: sourceTransform
+        )
+        let videoComposition = makeCrossfadeVideoComposition(
+            clips: clipLayouts,
+            renderSize: renderSize,
+            fitMode: fitMode,
+            duration: cursor
+        )
+        let audioMix = makeCrossfadeAudioMix(layouts: audioLayouts)
+        return CompositionBuildResult(
+            composition: composition,
+            videoComposition: videoComposition,
+            audioMix: audioMix
+        )
     }
     
-    func exportComposition(_ composition: AVComposition, to outputURL: URL, preset: String, videoComposition: AVVideoComposition? = nil) async throws {
+    func exportComposition(
+        _ composition: AVComposition,
+        to outputURL: URL,
+        preset: String,
+        videoComposition: AVVideoComposition? = nil,
+        audioMix: AVAudioMix? = nil
+    ) async throws {
         try? FileManager.default.removeItem(at: outputURL)
         
         guard let exporter = AVAssetExportSession(asset: composition, presetName: preset) else {
@@ -100,6 +222,7 @@ actor VideoProcessor {
         exporter.outputFileType = .mp4
         exporter.shouldOptimizeForNetworkUse = true
         exporter.videoComposition = videoComposition
+        exporter.audioMix = audioMix
         
         try await runExport(ExportSessionBox(exporter))
     }
@@ -132,6 +255,127 @@ actor VideoProcessor {
         instruction.layerInstructions = [layer]
         videoComp.instructions = [instruction]
         return videoComp
+    }
+
+    private func makeCrossfadeVideoComposition(
+        clips: [CompositionClipLayout],
+        renderSize: CGSize,
+        fitMode: FitMode,
+        duration: CMTime
+    ) -> AVMutableVideoComposition {
+        let boundaries = ([CMTime.zero, duration] + clips.flatMap { [$0.start, $0.end] })
+            .sorted { CMTimeCompare($0, $1) < 0 }
+            .reduce(into: [CMTime]()) { result, time in
+                if result.last.map({ CMTimeCompare($0, time) != 0 }) ?? true {
+                    result.append(time)
+                }
+            }
+
+        var instructions: [AVVideoCompositionInstructionProtocol] = []
+        for index in 0..<(boundaries.count - 1) {
+            let start = boundaries[index]
+            let end = boundaries[index + 1]
+            guard CMTimeCompare(end, start) > 0 else { continue }
+            let activeClips = clips
+                .filter { CMTimeCompare($0.start, start) <= 0 && CMTimeCompare($0.end, end) >= 0 }
+                .sorted { CMTimeCompare($0.start, $1.start) < 0 }
+            let instruction = AVMutableVideoCompositionInstruction()
+            instruction.timeRange = CMTimeRange(start: start, end: end)
+            guard !activeClips.isEmpty else {
+                instruction.backgroundColor = UIColor.black.cgColor
+                instructions.append(instruction)
+                continue
+            }
+            let layers = activeClips.map { clip -> AVMutableVideoCompositionLayerInstruction in
+                let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: clip.track)
+                layer.setTransform(
+                    renderTransform(for: clip, renderSize: renderSize, fitMode: fitMode),
+                    at: start
+                )
+                layer.setOpacity(1, at: start)
+                return layer
+            }
+
+            if activeClips.count == 2 {
+                let outgoing = layers[0]
+                let incoming = layers[1]
+                let transitionRange = CMTimeRange(start: start, end: end)
+                outgoing.setOpacityRamp(fromStartOpacity: 1, toEndOpacity: 0, timeRange: transitionRange)
+                incoming.setOpacityRamp(fromStartOpacity: 0, toEndOpacity: 1, timeRange: transitionRange)
+                instruction.layerInstructions = [incoming, outgoing]
+            } else {
+                instruction.layerInstructions = layers
+            }
+            instructions.append(instruction)
+        }
+
+        let videoComposition = AVMutableVideoComposition()
+        videoComposition.renderSize = renderSize
+        videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
+        videoComposition.instructions = instructions
+        return videoComposition
+    }
+
+    private func renderTransform(
+        for clip: CompositionClipLayout,
+        renderSize: CGSize,
+        fitMode: FitMode
+    ) -> CGAffineTransform {
+        let transformedRect = CGRect(origin: .zero, size: clip.naturalSize)
+            .applying(clip.preferredTransform)
+        let orientedWidth = abs(transformedRect.width)
+        let orientedHeight = abs(transformedRect.height)
+        let scaleX = renderSize.width / max(orientedWidth, 1)
+        let scaleY = renderSize.height / max(orientedHeight, 1)
+        let scale = fitMode == .fill ? max(scaleX, scaleY) : min(scaleX, scaleY)
+        var transform = clip.preferredTransform.concatenating(
+            CGAffineTransform(translationX: -transformedRect.minX, y: -transformedRect.minY)
+        )
+        transform = transform.concatenating(CGAffineTransform(scaleX: scale, y: scale))
+        transform = transform.concatenating(
+            CGAffineTransform(
+                translationX: (renderSize.width - orientedWidth * scale) / 2,
+                y: (renderSize.height - orientedHeight * scale) / 2
+            )
+        )
+        return transform
+    }
+
+    private func makeCrossfadeAudioMix(
+        layouts: [(start: CMTime, end: CMTime, track: AVMutableCompositionTrack, hasAudio: Bool)]
+    ) -> AVAudioMix? {
+        guard layouts.contains(where: \.hasAudio) else { return nil }
+        var parametersByTrack: [CMPersistentTrackID: AVMutableAudioMixInputParameters] = [:]
+        for layout in layouts where layout.hasAudio {
+            let parameters = parametersByTrack[layout.track.trackID]
+                ?? AVMutableAudioMixInputParameters(track: layout.track)
+            parameters.setVolume(1, at: layout.start)
+            parametersByTrack[layout.track.trackID] = parameters
+        }
+
+        if layouts.count > 1 {
+            for index in 1..<layouts.count {
+                let outgoing = layouts[index - 1]
+                let incoming = layouts[index]
+                let overlapStart = incoming.start
+                let overlapEnd = CMTimeCompare(outgoing.end, incoming.end) < 0 ? outgoing.end : incoming.end
+                guard CMTimeCompare(overlapEnd, overlapStart) > 0 else { continue }
+                let range = CMTimeRange(start: overlapStart, end: overlapEnd)
+
+                if outgoing.hasAudio,
+                   let parameters = parametersByTrack[outgoing.track.trackID] {
+                    parameters.setVolumeRamp(fromStartVolume: 1, toEndVolume: 0, timeRange: range)
+                }
+                if incoming.hasAudio,
+                   let parameters = parametersByTrack[incoming.track.trackID] {
+                    parameters.setVolumeRamp(fromStartVolume: 0, toEndVolume: 1, timeRange: range)
+                }
+            }
+        }
+
+        let mix = AVMutableAudioMix()
+        mix.inputParameters = Array(parametersByTrack.values)
+        return mix
     }
     
     nonisolated func calculateRenderSize(aspect: AspectRatio, resolution: ExportResolution, naturalSize: CGSize, transform: CGAffineTransform) -> CGSize {
@@ -260,10 +504,26 @@ struct CompositionSegment {
     let assetID: UUID?
     let timeRange: CMTimeRange
     let targetTrack: TrackType
+    let timelineStartTime: Double?
+}
+
+struct CompositionBuildResult {
+    let composition: AVMutableComposition
+    let videoComposition: AVVideoComposition
+    let audioMix: AVAudioMix?
+}
+
+private struct CompositionClipLayout {
+    let track: AVMutableCompositionTrack
+    let start: CMTime
+    let end: CMTime
+    let naturalSize: CGSize
+    let preferredTransform: CGAffineTransform
 }
 
 enum ProcessorError: LocalizedError {
     case noVideoTrack
+    case noAudioTrack
     case cannotCreateTrack
     case exportSessionUnavailable
     case exportFailed
@@ -275,6 +535,7 @@ enum ProcessorError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .noVideoTrack: return "O arquivo não contém uma faixa de vídeo."
+        case .noAudioTrack: return "O arquivo não contém áudio para transcrever."
         case .cannotCreateTrack: return "Não foi possível criar a faixa de composição."
         case .exportSessionUnavailable: return "Não foi possível iniciar a exportação com essas configurações."
         case .exportFailed: return "A exportação falhou."

@@ -21,24 +21,15 @@ actor ExportManager {
     ) async throws -> ExportResult {
         progressHandler(ExportProgress(stage: .preparing, episode: episodeNumber, progress: 0, message: "Preparando composição..."))
         
-        let (composition, _) = try await timelineEngine.buildEpisodeComposition(project: project, episode: episode, additionalAssets: additionalAssets)
+        let output = try await timelineEngine.buildEpisodeComposition(
+            project: project,
+            episode: episode,
+            additionalAssets: additionalAssets,
+            settings: settings
+        )
+        let composition = output.composition
         
         progressHandler(ExportProgress(stage: .composing, episode: episodeNumber, progress: 0.1, message: "Montando segmentos..."))
-        
-        let renderSize = processor.calculateRenderSize(
-            aspect: settings.aspectRatio,
-            resolution: settings.resolution,
-            naturalSize: project.sourceVideoNaturalSize.cgSize,
-            transform: project.sourceVideoTransform.cgAffineTransform
-        )
-        
-        let videoComposition = await processor.createVideoComposition(
-            for: composition.tracks(withMediaType: .video).first!,
-            renderSize: renderSize,
-            transform: project.sourceVideoTransform.cgAffineTransform,
-            sourceSize: project.sourceVideoNaturalSize.cgSize,
-            fitMode: settings.fitMode
-        )
         
         let exportDir = await storage.getExportDirectory()
         let videoURL = exportDir.appendingPathComponent(
@@ -51,7 +42,8 @@ actor ExportManager {
             composition,
             to: videoURL,
             preset: settings.resolution.presetName,
-            videoComposition: videoComposition
+            videoComposition: output.videoComposition,
+            audioMix: output.audioMix
         )
         
         progressHandler(ExportProgress(stage: .exporting, episode: episodeNumber, progress: 0.9, message: "Finalizando vídeo..."))

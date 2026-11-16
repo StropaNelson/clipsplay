@@ -282,7 +282,7 @@ struct TimelineView: View {
             duration: 5,
             sourceStartTime: 0,
             sourceEndTime: 5,
-            sourceType: trackType == .main ? .mainVideo : .introAsset,
+            sourceType: .mainVideo,
             assetID: nil,
             isEnabled: true
         )
@@ -500,7 +500,6 @@ struct SegmentEditorView: View {
     
     @Environment(\.dismiss) private var dismiss
     @State private var startTime: Double
-    @State private var duration: Double
     @State private var sourceStartTime: Double
     @State private var sourceEndTime: Double
     @State private var isEnabled: Bool
@@ -516,7 +515,6 @@ struct SegmentEditorView: View {
         self.onDelete = onDelete
         
         _startTime = State(initialValue: segment.startTime)
-        _duration = State(initialValue: segment.duration)
         _sourceStartTime = State(initialValue: segment.sourceStartTime)
         _sourceEndTime = State(initialValue: segment.sourceEndTime)
         _isEnabled = State(initialValue: segment.isEnabled)
@@ -539,15 +537,6 @@ struct SegmentEditorView: View {
                             .textFieldStyle(.roundedBorder)
                         Text("s")
                     }
-                    HStack {
-                        Text("Duração")
-                        Spacer()
-                        TextField("", value: $duration, format: .number)
-                            .keyboardType(.decimalPad)
-                            .frame(width: 80)
-                            .textFieldStyle(.roundedBorder)
-                        Text("s")
-                    }
                     Toggle("Ativo", isOn: $isEnabled)
                 }
                 
@@ -555,6 +544,11 @@ struct SegmentEditorView: View {
                     Picker("Tipo", selection: $sourceType) {
                         ForEach(availableSourceTypes) { type in
                             Text(type.rawValue).tag(type)
+                        }
+                    }
+                    .onChange(of: sourceType) { _ in
+                        if let selectedAsset, !filteredAssets.contains(where: { $0.id == selectedAsset.id }) {
+                            self.selectedAsset = nil
                         }
                     }
                     
@@ -602,16 +596,22 @@ struct SegmentEditorView: View {
                     Button("Salvar") {
                         var updated = segment
                         updated.startTime = startTime
-                        updated.duration = duration
                         updated.sourceStartTime = sourceStartTime
                         updated.sourceEndTime = sourceEndTime
+                        updated.duration = sourceEndTime - sourceStartTime
                         updated.isEnabled = isEnabled
                         updated.sourceType = sourceType
                         updated.assetID = selectedAsset?.id
                         onSave(updated)
                         dismiss()
                     }
-                    .disabled(sourceEndTime <= sourceStartTime || duration <= 0)
+                    .disabled(
+                        startTime < 0
+                            || sourceStartTime < 0
+                            || sourceEndTime <= sourceStartTime
+                            || (sourceType != .mainVideo && selectedAsset == nil)
+                            || sourceEndTime > (selectedAsset?.duration ?? project.sourceVideoDuration)
+                    )
                 }
             }
         }
