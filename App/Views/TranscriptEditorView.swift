@@ -112,6 +112,7 @@ struct TranscriptEditorView: View {
                             .onTapGesture {
                                 if !search.isEmpty && matches {
                                     onSeekWord(words[index].start)
+                                    dismiss()
                                 } else if isStruck {
                                     struck.remove(index)
                                 } else {
