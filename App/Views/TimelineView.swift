@@ -465,9 +465,14 @@ struct TimelineView: View {
         }
         .frame(width: width, height: laneHeight - 4, alignment: .leading)
         .clipShape(RoundedRectangle(cornerRadius: 5))
+        .contentShape(Rectangle())
+        .onTapGesture { onSelect(id) }
+        // Attached before the handle overlays so the handles' own drags aren't overridden.
+        .highPriorityGesture(isSelected ? laneGesture(id: id, part: .move, onCommit: onCommit) : nil)
         .overlay(
             RoundedRectangle(cornerRadius: 5)
                 .stroke(isSelected ? Color.white : color, lineWidth: isSelected ? 2.5 : 1)
+                .allowsHitTesting(false)
         )
         .overlay(alignment: .leading) {
             if isSelected { edgeHandle(height: laneHeight - 4).gesture(laneGesture(id: id, part: .left, onCommit: onCommit)) }
@@ -475,9 +480,6 @@ struct TimelineView: View {
         .overlay(alignment: .trailing) {
             if isSelected { edgeHandle(height: laneHeight - 4).gesture(laneGesture(id: id, part: .right, onCommit: onCommit)) }
         }
-        .contentShape(Rectangle())
-        .onTapGesture { onSelect(id) }
-        .highPriorityGesture(isSelected ? laneGesture(id: id, part: .move, onCommit: onCommit) : nil)
         .offset(x: xPosition(for: start), y: 2)
     }
 
