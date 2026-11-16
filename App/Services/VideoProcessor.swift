@@ -101,7 +101,7 @@ actor VideoProcessor {
         exporter.shouldOptimizeForNetworkUse = true
         exporter.videoComposition = videoComposition
         
-        try await runExport(exporter)
+        try await runExport(ExportSessionBox(exporter))
     }
     
     func createVideoComposition(for track: AVCompositionTrack, renderSize: CGSize, transform: CGAffineTransform, sourceSize: CGSize, fitMode: FitMode) -> AVMutableVideoComposition {
@@ -134,7 +134,7 @@ actor VideoProcessor {
         return videoComp
     }
     
-    func calculateRenderSize(aspect: AspectRatio, resolution: ExportResolution, naturalSize: CGSize, transform: CGAffineTransform) -> CGSize {
+    nonisolated func calculateRenderSize(aspect: AspectRatio, resolution: ExportResolution, naturalSize: CGSize, transform: CGAffineTransform) -> CGSize {
         let rect = CGRect(origin: .zero, size: naturalSize).applying(transform)
         let sourceW = abs(rect.width)
         let sourceH = abs(rect.height)
@@ -219,17 +219,25 @@ actor VideoProcessor {
         }
     }
     
-    private func runExport(_ exporter: AVAssetExportSession) async throws {
+    private func runExport(_ exporterBox: ExportSessionBox) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            exporter.exportAsynchronously {
-                switch exporter.status {
+            exporterBox.session.exportAsynchronously {
+                switch exporterBox.session.status {
                 case .completed: continuation.resume()
-                case .failed: continuation.resume(throwing: exporter.error ?? ProcessorError.exportFailed)
+                case .failed: continuation.resume(throwing: exporterBox.session.error ?? ProcessorError.exportFailed)
                 case .cancelled: continuation.resume(throwing: ProcessorError.exportCancelled)
-                default: continuation.resume(throwing: exporter.error ?? ProcessorError.exportFailed)
+                default: continuation.resume(throwing: exporterBox.session.error ?? ProcessorError.exportFailed)
                 }
             }
         }
+    }
+}
+
+private final class ExportSessionBox: @unchecked Sendable {
+    let session: AVAssetExportSession
+
+    init(_ session: AVAssetExportSession) {
+        self.session = session
     }
 }
 

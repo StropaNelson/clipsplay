@@ -2,6 +2,7 @@ import SwiftUI
 import AVKit
 import PhotosUI
 
+@MainActor
 struct EditorView: View {
     let project: Project
     @StateObject private var viewModel: EditorViewModel
@@ -176,7 +177,7 @@ struct EditorView: View {
         .background(.thinMaterial)
         .overlay(alignment: .bottom) {
             Rectangle()
-                .fill(Color(.separator))
+                .fill(Color(uiColor: .separator))
                 .frame(height: 0.5)
         }
     }
@@ -397,9 +398,9 @@ class EditorViewModel: ObservableObject {
     }
     
     private func updateEpisodeTemplates() {
-        for i in episodes.indices {
-            episodes[i].introSegment = project.introTemplate?.toSegment()
-            episodes[i].outroSegment = project.outroTemplate?.toSegment()
+        for index in episodes.indices {
+            episodes[index].introSegment = project.introTemplate?.toSegment()
+            episodes[index].outroSegment = project.outroTemplate?.toSegment()
         }
     }
     
@@ -495,7 +496,6 @@ class EditorViewModel: ObservableObject {
         exportProgress = nil
         
         do {
-            let assetURLs = Dictionary(uniqueKeysWithValues: mediaAssets.map { ($0.id, $0.url) })
             let result = try await exportManager.exportAllEpisodes(
                 project: project,
                 settings: exportSettings,
@@ -507,7 +507,7 @@ class EditorViewModel: ObservableObject {
             }
             
             if exportSettings.includeCovers, !result.results.isEmpty {
-                let zipURL = try await exportManager.createZIP(from: result.results, projectName: project.name)
+                _ = try await exportManager.createZIP(from: result.results, projectName: project.name)
                 // Share zip
             }
             

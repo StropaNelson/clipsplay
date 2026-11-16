@@ -62,7 +62,7 @@ actor TimelineEngine {
     }
     
     func buildPreviewComposition(project: Project, episode: Episode, additionalAssets: [UUID: URL], maxDuration: Double = 30) async throws -> AVMutableComposition {
-        let (composition, segments) = try await buildEpisodeComposition(project: project, episode: episode, additionalAssets: additionalAssets)
+        let (composition, _) = try await buildEpisodeComposition(project: project, episode: episode, additionalAssets: additionalAssets)
         
         let totalDuration = composition.duration.seconds
         if totalDuration <= maxDuration { return composition }

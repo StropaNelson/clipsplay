@@ -21,11 +21,11 @@ actor ExportManager {
     ) async throws -> ExportResult {
         progressHandler(ExportProgress(stage: .preparing, episode: episodeNumber, progress: 0, message: "Preparando composição..."))
         
-        let (composition, segments) = try await timelineEngine.buildEpisodeComposition(project: project, episode: episode, additionalAssets: additionalAssets)
+        let (composition, _) = try await timelineEngine.buildEpisodeComposition(project: project, episode: episode, additionalAssets: additionalAssets)
         
         progressHandler(ExportProgress(stage: .composing, episode: episodeNumber, progress: 0.1, message: "Montando segmentos..."))
         
-        let renderSize = await processor.calculateRenderSize(
+        let renderSize = processor.calculateRenderSize(
             aspect: settings.aspectRatio,
             resolution: settings.resolution,
             naturalSize: project.sourceVideoNaturalSize.cgSize,

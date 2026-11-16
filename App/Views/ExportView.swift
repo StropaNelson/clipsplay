@@ -139,7 +139,7 @@ struct EpisodeExportRow: View {
             HStack {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .font(.title2)
-                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                    .foregroundColor(isSelected ? Color.accentColor : Color.secondary)
                 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Episódio \(episode.index + 1)")

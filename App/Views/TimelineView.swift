@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreMedia
+import UIKit
 
 struct TimelineView: View {
     let episode: Episode?
@@ -42,20 +43,7 @@ struct TimelineView: View {
     
     var body: some View {
         GeometryReader { geometry in
-            ZStack(alignment: .topLeading) {
-                ScrollView([.horizontal, .vertical], showsIndicators: true) {
-                    ZStack(alignment: .topLeading) {
-                        timelineContent
-                            .frame(width: max(contentWidth, geometry.size.width), height: trackHeight * CGFloat(TrackType.allCases.count) + rulerHeight)
-                    }
-                }
-                
-                zoomControls
-                
-                if let episode = episode {
-                    playheadView(geometry: geometry, episode: episode)
-                }
-            }
+            timelineCanvas(size: geometry.size)
         }
         .background(Color(.systemGroupedBackground))
         .overlay(alignment: .bottom) {
@@ -75,6 +63,24 @@ struct TimelineView: View {
                         deleteSegment(segment)
                     }
                 )
+            }
+        }
+    }
+
+    private func timelineCanvas(size: CGSize) -> some View {
+        let canvasWidth = max(contentWidth, size.width)
+        let canvasHeight = trackHeight * CGFloat(TrackType.allCases.count) + rulerHeight
+
+        return ZStack(alignment: .topLeading) {
+            ScrollView([.horizontal, .vertical], showsIndicators: true) {
+                timelineContent
+                    .frame(width: canvasWidth, height: canvasHeight)
+            }
+
+            zoomControls
+
+            if let episode = episode {
+                playheadView(episode: episode)
             }
         }
     }
@@ -130,7 +136,7 @@ struct TimelineView: View {
             let x = (time - horizontalOffset / pixelsPerSecond) * pixelsPerSecond
             VStack(alignment: .leading, spacing: 0) {
                 Rectangle()
-                    .fill(Color(.separator))
+                    .fill(Color(uiColor: .separator))
                     .frame(width: 1, height: rulerHeight)
 
                 Text(formatTime(time))
@@ -152,7 +158,7 @@ struct TimelineView: View {
         return 60
     }
     
-    private func playheadView(geometry: GeometryProxy, episode: Episode) -> some View {
+    private func playheadView(episode: Episode) -> some View {
         let x = playheadPosition * pixelsPerSecond
         let totalHeight = trackHeight * CGFloat(TrackType.allCases.count) + rulerHeight
         
@@ -268,7 +274,7 @@ struct TimelineView: View {
     }
     
     private func addSegment(to trackType: TrackType) {
-        guard let episode = episode else { return }
+        guard episode != nil else { return }
         let newSegment = TimelineSegment(
             id: UUID(),
             trackType: trackType,
@@ -384,7 +390,7 @@ struct TrackView: View {
         }
         .overlay(alignment: .bottom) {
             Rectangle()
-                .fill(Color(.separator))
+                .fill(Color(uiColor: .separator))
                 .frame(height: 0.5)
         }
     }

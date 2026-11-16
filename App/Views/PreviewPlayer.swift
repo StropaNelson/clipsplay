@@ -2,6 +2,7 @@ import SwiftUI
 import AVKit
 import AVFoundation
 
+@MainActor
 struct PreviewPlayerView: View {
     let player: AVPlayer
     let onSeek: (Double) -> Void
