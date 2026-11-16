@@ -23,6 +23,7 @@ struct Project: Codable, Identifiable {
     var outroTemplate: SegmentTemplate?
     var recapSettings: RecapSettings
     var coverSettings: CoverSettings
+    var transcriptSRT: String?
     
     init(name: String, sourceVideoURL: URL, sourceVideoDuration: Double, naturalSize: CGSize, transform: CGAffineTransform) {
         self.id = UUID()

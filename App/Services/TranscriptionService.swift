@@ -111,15 +111,23 @@ actor TranscriptionService {
                 state.continuation = continuation
                 state.task = recognizer.recognitionTask(with: request) { result, error in
                     if let result {
-                        state.latest = result.bestTranscription.segments
+                        let segments = result.bestTranscription.segments
                         if result.isFinal {
-                            state.finish(.success(result.bestTranscription.segments))
+                            state.finish(.success(state.collect(final: segments)))
                             return
+                        }
+                        // Since iOS 16 the transcription restarts after each pause; the result that
+                        // closes an utterance carries metadata, so keep it before the text resets.
+                        if result.speechRecognitionMetadata != nil {
+                            state.commit(segments)
+                        } else {
+                            state.update(partial: segments)
                         }
                     }
                     if let error {
-                        if let latest = state.latest, !latest.isEmpty {
-                            state.finish(.success(latest))
+                        let collected = state.collect(final: nil)
+                        if !collected.isEmpty {
+                            state.finish(.success(collected))
                         } else if Self.isNoSpeechError(error) {
                             state.finish(.success([]))
                         } else {
@@ -205,7 +213,55 @@ private final class RecognitionState: @unchecked Sendable {
     private let lock = NSLock()
     var continuation: CheckedContinuation<[SFTranscriptionSegment], Error>?
     var task: SFSpeechRecognitionTask?
-    var latest: [SFTranscriptionSegment]?
+    private var committed: [SFTranscriptionSegment] = []
+    private var lastCommittedText = ""
+    private var latest: [SFTranscriptionSegment] = []
+
+    private static func text(_ segments: [SFTranscriptionSegment]) -> String {
+        segments.map(\.substring).joined(separator: " ")
+    }
+
+    func commit(_ segments: [SFTranscriptionSegment]) {
+        lock.lock()
+        defer { lock.unlock() }
+        let text = Self.text(segments)
+        if !segments.isEmpty, text != lastCommittedText {
+            committed.append(contentsOf: segments)
+            lastCommittedText = text
+        }
+        latest = []
+    }
+
+    /// Commits the previous partial when the recognizer silently starts a new utterance.
+    func update(partial segments: [SFTranscriptionSegment]) {
+        lock.lock()
+        let restarted = !latest.isEmpty
+            && segments.count < latest.count
+            && segments.first?.substring != latest.first?.substring
+        let previous = latest
+        latest = segments
+        lock.unlock()
+        if restarted {
+            commit(previous)
+            lock.lock()
+            latest = segments
+            lock.unlock()
+        }
+    }
+
+    func collect(final segments: [SFTranscriptionSegment]?) -> [SFTranscriptionSegment] {
+        if let segments {
+            commit(segments)
+        } else {
+            lock.lock()
+            let pending = latest
+            lock.unlock()
+            commit(pending)
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        return committed
+    }
 
     func finish(_ result: Result<[SFTranscriptionSegment], Error>) {
         lock.lock()

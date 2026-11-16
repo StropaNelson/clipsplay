@@ -3,6 +3,15 @@ import UniformTypeIdentifiers
 
 struct TranscriptionView: View {
     let project: Project
+    let onTranscriptChange: (String) -> Void
+    let onApplyCaptions: ([TranscriptCue]) -> Void
+
+    init(project: Project, onTranscriptChange: @escaping (String) -> Void, onApplyCaptions: @escaping ([TranscriptCue]) -> Void) {
+        self.project = project
+        self.onTranscriptChange = onTranscriptChange
+        self.onApplyCaptions = onApplyCaptions
+        self._transcript = State(initialValue: project.transcriptSRT ?? "")
+    }
 
     @Environment(\.dismiss) private var dismiss
     @State private var transcript = ""
@@ -60,7 +69,21 @@ struct TranscriptionView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
+            .safeAreaInset(edge: .bottom) {
+                if !transcript.isEmpty && !isTranscribing {
+                    Button {
+                        applyCaptions()
+                    } label: {
+                        Label("Aplicar como legendas no vídeo", systemImage: "captions.bubble.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .padding()
+                }
+            }
             .padding()
+            .onChange(of: transcript) { onTranscriptChange($0) }
             .navigationTitle("Transcrição")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -138,6 +161,16 @@ struct TranscriptionView: View {
             if (error as NSError).code != NSUserCancelledError {
                 errorMessage = "Falha ao importar legenda: \(error.localizedDescription)"
             }
+        }
+    }
+
+    private func applyCaptions() {
+        do {
+            let cues = try SubtitleFile.parse(transcript)
+            onApplyCaptions(cues)
+            dismiss()
+        } catch {
+            errorMessage = "Não foi possível ler as legendas: \(error.localizedDescription)"
         }
     }
 

@@ -117,7 +117,11 @@ struct EditorView: View {
             ExportProgressView(viewModel: viewModel)
         }
         .sheet(isPresented: $showingTranscription) {
-            TranscriptionView(project: project)
+            TranscriptionView(
+                project: viewModel.currentProject,
+                onTranscriptChange: { viewModel.saveTranscript($0) },
+                onApplyCaptions: { viewModel.applyCaptions($0) }
+            )
         }
         .sheet(item: $sheetPanel) { panel in
             panelContent(panel)
@@ -799,6 +803,7 @@ class EditorViewModel: ObservableObject {
     private var undoStack: [UndoState] = []
     private var isDraggingOverlay = false
     private var narrationStartTime: Double?
+    private var transcriptSaveTask: Task<Void, Never>?
     @Published var canUndo = false
 
     init(project: Project) {
@@ -1210,6 +1215,54 @@ class EditorViewModel: ObservableObject {
             isDraggingOverlay = false
             Task { await persistProjectChanges(reloadPreview: false) }
         }
+    }
+
+    // MARK: Captions
+
+    func saveTranscript(_ text: String) {
+        project.transcriptSRT = text
+        transcriptSaveTask?.cancel()
+        transcriptSaveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard let self, !Task.isCancelled else { return }
+            await self.persistProjectChanges(reloadPreview: false)
+        }
+    }
+
+    /// Converts transcript cues (timed against the source video) into caption overlays in every
+    /// episode, following each main clip's position on that episode's timeline.
+    func applyCaptions(_ cues: [TranscriptCue]) {
+        checkpoint()
+        var total = 0
+        for index in episodes.indices {
+            var overlays = episodes[index].textOverlays.filter { $0.isCaption != true }
+            for item in episodes[index].storyline() where item.track == .main && item.segment.sourceType == .mainVideo {
+                let clip = item.segment
+                for cue in cues where cue.endTime > clip.startTime && cue.startTime < clip.endTime {
+                    let start = max(cue.startTime, clip.startTime)
+                    let end = min(cue.endTime, clip.endTime)
+                    guard end - start >= 0.2 else { continue }
+                    overlays.append(TextOverlay(
+                        text: cue.text,
+                        startTime: item.start + (start - clip.startTime),
+                        duration: end - start,
+                        positionX: 0.5,
+                        positionY: 0.86,
+                        fontScale: 0.05,
+                        color: .white,
+                        style: .box,
+                        isBold: false,
+                        isCaption: true
+                    ))
+                    total += 1
+                }
+            }
+            episodes[index].textOverlays = overlays
+        }
+        if total == 0 {
+            errorMessage = "Nenhuma legenda caiu dentro do conteúdo principal dos episódios."
+        }
+        Task { await persistProjectChanges(reloadPreview: false) }
     }
 
     // MARK: Audio

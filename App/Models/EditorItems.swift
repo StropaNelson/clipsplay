@@ -76,6 +76,7 @@ struct TextOverlay: Codable, Identifiable, Hashable {
     var color: RGBAColor = .white
     var style: TextOverlayStyle = .shadow
     var isBold: Bool = true
+    var isCaption: Bool?
 
     var endTime: Double { startTime + duration }
 
