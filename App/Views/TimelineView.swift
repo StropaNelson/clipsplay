@@ -484,7 +484,6 @@ struct SegmentEditorView: View {
                             .textFieldStyle(.roundedBorder)
                         Text("s")
                     }
-                    Toggle("Ativo", isOn: $isEnabled)
                 }
                 
                 Section("Origem do Conteúdo") {
