@@ -1167,7 +1167,7 @@ class EditorViewModel: ObservableObject {
 
     var visibleOverlays: [TextOverlay] {
         (selectedEpisode?.textOverlays ?? []).filter {
-            $0.isVisible(at: currentTime) || $0.id == selectedSegmentID
+            $0.isVisible(at: currentTime) || (!isPlaying && $0.id == selectedSegmentID)
         }
     }
 
