@@ -261,7 +261,7 @@ struct TimelineView: View {
                 .frame(width: contentWidth, height: laneHeight)
                 .contentShape(Rectangle())
                 .onTapGesture { onSelect(nil) }
-            ForEach(overlays) { overlay in
+            ForEach(overlays.sorted { $0.duration > $1.duration }) { overlay in
                 laneItem(
                     title: overlay.text,
                     icon: "textformat",
@@ -282,7 +282,7 @@ struct TimelineView: View {
                 .frame(width: contentWidth, height: laneHeight)
                 .contentShape(Rectangle())
                 .onTapGesture { onSelect(nil) }
-            ForEach(audioClips) { clip in
+            ForEach(audioClips.sorted { $0.duration > $1.duration }) { clip in
                 laneItem(
                     title: clip.name,
                     icon: clip.kind.icon,
