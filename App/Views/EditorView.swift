@@ -135,7 +135,8 @@ struct EditorView: View {
             TranscriptEditorView(
                 words: viewModel.editableTranscriptWords,
                 onRemove: { viewModel.removeSourceRanges($0) },
-                onSeekWord: { viewModel.seekToSourceTime($0) }
+                onSeekWord: { viewModel.seekToSourceTime($0) },
+                onMarkTopics: { viewModel.markTimes($0) }
             )
         }
         .sheet(isPresented: $showingTranscription) {
@@ -2222,6 +2223,26 @@ class EditorViewModel: ObservableObject {
                 moved.time = time
                 return moved
             }
+        }
+    }
+
+    /// Adds markers at topic boundaries (already timeline-relative times are not needed here:
+    /// Editar fala reports source times, so convert through the episode layout).
+    func markTimes(_ sourceTimes: [Double]) {
+        guard let episode = selectedEpisode else { return }
+        var times: [Double] = []
+        for item in episode.storyline() where item.track == .main {
+            let clip = item.segment
+            for source in sourceTimes where clip.startTime <= source && source < clip.endTime {
+                times.append(item.start + (source - clip.startTime) / clip.playbackSpeed)
+            }
+        }
+        guard !times.isEmpty else {
+            errorMessage = "Os limites detectados não caem no conteúdo principal deste episódio."
+            return
+        }
+        mutateSelectedEpisode(reloadPreview: false) { ep in
+            for time in times { ep.markers.append(TimelineMarker(time: time)) }
         }
     }
 

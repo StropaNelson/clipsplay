@@ -5,6 +5,7 @@ struct TranscriptEditorView: View {
     let words: [TranscriptWord]
     let onRemove: ([ClosedRange<Double>]) -> Void
     var onSeekWord: (Double) -> Void = { _ in }
+    var onMarkTopics: ([Double]) -> Void = { _ in }
 
     @Environment(\.dismiss) private var dismiss
     @State private var mode = Mode.text
@@ -32,6 +33,7 @@ struct TranscriptEditorView: View {
     enum Mode: String, CaseIterable, Identifiable {
         case text = "Texto"
         case suggestions = "Sugestões"
+        case topics = "Assuntos"
         var id: String { rawValue }
     }
 
@@ -57,8 +59,10 @@ struct TranscriptEditorView: View {
 
                 if mode == .text {
                     textMode
-                } else {
+                } else if mode == .suggestions {
                     suggestionsMode
+                } else {
+                    topicsMode
                 }
             }
             .padding()
@@ -169,11 +173,77 @@ struct TranscriptEditorView: View {
         }
     }
 
+    /// Topic boundaries: long pauses combined with a vocabulary shift between the
+    /// surrounding word windows (Jaccard distance over a ~15-word window).
+    private var topicBoundaries: [(time: Double, score: Double)] {
+        let window = 15
+        var result: [(Double, Double)] = []
+        for index in words.indices.dropFirst() {
+            let gap = words[index].start - words[index - 1].end
+            guard gap >= 1.0 else { continue }
+            let before = Set(words[max(0, index - window)..<index].map {
+                $0.text.lowercased().trimmingCharacters(in: .punctuationCharacters)
+            }.filter { !$0.isEmpty })
+            let after = Set(words[index..<min(words.count, index + window)].map {
+                $0.text.lowercased().trimmingCharacters(in: .punctuationCharacters)
+            }.filter { !$0.isEmpty })
+            let union = before.union(after).count
+            guard union > 0 else { continue }
+            let distance = 1 - Double(before.intersection(after).count) / Double(union)
+            if distance >= 0.5 {
+                result.append((words[index].start, distance))
+            }
+        }
+        return result
+    }
+
+    private var topicsMode: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Pontos onde uma pausa coincide com mudança de vocabulário — candidatos a dividir em episódios. Toque para ir ao ponto na prévia.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            if topicBoundaries.isEmpty {
+                Text("Nenhuma mudança de assunto detectada.")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(topicBoundaries, id: \.time) { boundary in
+                    Button { onSeekWord(boundary.time) } label: {
+                        HStack {
+                            Image(systemName: "bookmark")
+                            Text(Self.clock(boundary.time)).monospacedDigit()
+                            Spacer()
+                            Text("mudança \(String(format: "%.0f%%", boundary.score * 100))")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+                .listStyle(.plain)
+            }
+        }
+    }
+
     private var applyBar: some View {
+        if mode == .topics {
+            return AnyView(
+                Button {
+                    onMarkTopics(topicBoundaries.map(\.time))
+                    dismiss()
+                } label: {
+                    Label("Marcar \(topicBoundaries.count) limite(s) na linha do tempo", systemImage: "bookmark")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(topicBoundaries.isEmpty)
+                .padding()
+            )
+        }
         let ranges = mode == .text ? struckRanges : acceptedRanges
         let count = mode == .text ? struck.count : ranges.count
         let label = mode == .text ? "Cortar \(count) palavra(s)" : "Aplicar \(count) sugestão(ões)"
-        return Button {
+        return AnyView(Button {
             onRemove(ranges)
             dismiss()
         } label: {
@@ -184,7 +254,7 @@ struct TranscriptEditorView: View {
         .tint(.red)
         .controlSize(.large)
         .disabled(ranges.isEmpty)
-        .padding()
+        .padding())
     }
 
     private func wordRange(_ index: Int) -> ClosedRange<Double> {
