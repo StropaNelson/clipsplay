@@ -70,7 +70,7 @@ struct TranscriptionView: View {
                         }
                     }
 
-                if let errorMessage {
+                if let errorMessage = errorMessage {
                     Text(errorMessage)
                         .font(.footnote)
                         .foregroundStyle(.red)

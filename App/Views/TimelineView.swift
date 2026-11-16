@@ -160,7 +160,7 @@ struct TimelineView: View {
         .foregroundStyle(.white.opacity(0.75))
         .frame(width: headerWidth, height: height)
         .background(EditorTheme.panelRaised, in: RoundedRectangle(cornerRadius: 8))
-        if let action {
+        if let action = action {
             Button(action: action) { content }.buttonStyle(.plain)
         } else {
             content
@@ -570,7 +570,7 @@ struct TimelineView: View {
         )
         return ZStack(alignment: .leading) {
             color.opacity(0.55)
-            if let waveform {
+            if let waveform = waveform {
                 WaveformView(url: waveform.0, sourceStart: waveform.1, sourceDuration: waveform.2, color: .white.opacity(0.55))
                     .padding(.vertical, 3)
             }
@@ -620,7 +620,7 @@ struct TimelineView: View {
     }
 
     private func snapped(_ seconds: Double, part: DragPart, edges: (Double, Double)?) -> Double {
-        guard let edges else { return seconds }
+        guard let edges = edges else { return seconds }
         let tolerance = Double(10 / pixelsPerSecond)
         let candidates: [Double]
         switch part {
@@ -922,7 +922,7 @@ struct FilmstripView: View {
     @MainActor
     private func loadFrames(count: Int) async {
         frames = [:]
-        guard let url else { return }
+        guard let url = url else { return }
         for index in 0..<count {
             if Task.isCancelled { return }
             let time = sourceStart + sourceDuration * (Double(index) + 0.5) / Double(count)
@@ -1014,7 +1014,7 @@ struct SegmentEditorView: View {
     }
 
     private func loadPreview() {
-        guard let sourceURL else { return }
+        guard let sourceURL = sourceURL else { return }
         previewPlayer.replaceCurrentItem(with: AVPlayerItem(url: sourceURL))
         scrub(to: sourceStartTime)
     }
@@ -1039,7 +1039,7 @@ struct SegmentEditorView: View {
                             }
                         }
                         .onChange(of: sourceType) { _ in
-                            if let selectedAsset, !filteredAssets.contains(where: { $0.id == selectedAsset.id }) {
+                            if let selectedAsset = selectedAsset, !filteredAssets.contains(where: { $0.id == selectedAsset.id }) {
                                 self.selectedAsset = nil
                             }
                         }
@@ -1127,7 +1127,7 @@ struct SegmentEditorView: View {
                     }
                 }
 
-                if let onDelete {
+                if let onDelete = onDelete {
                     Section {
                         Button("Excluir clipe", role: .destructive) {
                             onDelete()

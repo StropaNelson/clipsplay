@@ -141,7 +141,7 @@ struct TextOverlay: Codable, Identifiable, Hashable {
 
     /// Word timings, only while they still match the text (editing the text drops the highlight).
     var highlightWords: [TranscriptWord]? {
-        guard let words, !words.isEmpty, words.map(\.text).joined(separator: " ") == text else { return nil }
+        guard let words = words, !words.isEmpty, words.map(\.text).joined(separator: " ") == text else { return nil }
         return words
     }
 }

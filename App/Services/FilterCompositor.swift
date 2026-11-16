@@ -79,7 +79,7 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
                 context = renderContext
                 cancelled = shouldCancel
             }
-            guard !cancelled, let context, let buffer = context.newPixelBuffer() else {
+            guard !cancelled, let context = context, let buffer = context.newPixelBuffer() else {
                 request.finishCancelledRequest()
                 return
             }
@@ -150,7 +150,7 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
                     time: time
                 )
                 opacity = 1
-                if let incoming, let outgoing, incoming.0 == trackID || outgoing.0 == trackID {
+                if let incoming = incoming, let outgoing = outgoing, incoming.0 == trackID || outgoing.0 == trackID {
                     let isIncoming = incoming.0 == trackID
                     let adjusted = transitionGeometry(
                         style: incoming.1.transition,
@@ -437,7 +437,7 @@ private final class AutoFramingTracker {
     }
 
     func target(for image: CIImage, at time: Double) -> CGPoint? {
-        if let lastTarget, abs(time - lastDetectionTime) < 0.35 { return lastTarget }
+        if let lastTarget = lastTarget, abs(time - lastDetectionTime) < 0.35 { return lastTarget }
         if lastTarget == nil, abs(time - lastDetectionTime) < 0.35 { return nil }
         lastDetectionTime = time
         let extent = image.extent
@@ -451,7 +451,7 @@ private final class AutoFramingTracker {
             x: extent.minX + (detected.x - detectionImage.extent.minX) / detectionScale,
             y: extent.minY + (detected.y - detectionImage.extent.minY) / detectionScale
         )
-        if let lastTarget {
+        if let lastTarget = lastTarget {
             self.lastTarget = CGPoint(
                 x: lastTarget.x * 0.76 + detected.x * 0.24,
                 y: lastTarget.y * 0.76 + detected.y * 0.24

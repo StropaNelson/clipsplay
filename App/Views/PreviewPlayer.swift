@@ -97,7 +97,7 @@ struct PreviewPlayerView: View {
             setupTimeObserver()
         }
         .onDisappear {
-            if let timeObserver {
+            if let timeObserver = timeObserver {
                 player.removeTimeObserver(timeObserver)
             }
             controlsTimer?.invalidate()

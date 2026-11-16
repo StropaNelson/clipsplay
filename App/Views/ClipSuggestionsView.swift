@@ -113,7 +113,7 @@ struct ClipSuggestionsView: View {
                 .padding(.horizontal)
             }
 
-            if let errorMessage {
+            if let errorMessage = errorMessage {
                 Text(errorMessage)
                     .font(.caption)
                     .foregroundStyle(.red)

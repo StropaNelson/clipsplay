@@ -1074,7 +1074,7 @@ class EditorViewModel: ObservableObject {
     }
 
     var selectedSegment: TimelineSegment? {
-        guard let selectedSegmentID else { return nil }
+        guard let selectedSegmentID = selectedSegmentID else { return nil }
         return orderedSegments.first { $0.id == selectedSegmentID }
     }
 
@@ -1566,7 +1566,7 @@ class EditorViewModel: ObservableObject {
     }
 
     var selectedOverlay: TextOverlay? {
-        guard let selectedSegmentID else { return nil }
+        guard let selectedSegmentID = selectedSegmentID else { return nil }
         return resolvedOverlays.first { $0.id == selectedSegmentID }
     }
 
@@ -1660,7 +1660,7 @@ class EditorViewModel: ObservableObject {
         transcriptSaveTask?.cancel()
         transcriptSaveTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 800_000_000)
-            guard let self, !Task.isCancelled else { return }
+            guard let self = self, !Task.isCancelled else { return }
             await self.persistProjectChanges(reloadPreview: false)
         }
     }
@@ -1775,7 +1775,7 @@ class EditorViewModel: ObservableObject {
     // MARK: Audio
 
     var selectedAudioClip: AudioClip? {
-        guard let selectedSegmentID else { return nil }
+        guard let selectedSegmentID = selectedSegmentID else { return nil }
         return resolvedAudioClips.first { $0.id == selectedSegmentID }
     }
 
@@ -1809,7 +1809,7 @@ class EditorViewModel: ObservableObject {
             return
         }
         var start = atPlayhead ? currentTime : 0
-        if !atPlayhead, let anchor, let base = selectedEpisode?.anchorStart(anchor) {
+        if !atPlayhead, let anchor = anchor, let base = selectedEpisode?.anchorStart(anchor) {
             start = base
         }
         let clip = AudioClip(
@@ -1872,7 +1872,7 @@ class EditorViewModel: ObservableObject {
     // MARK: Media overlays (picture-in-picture)
 
     var selectedMediaOverlay: MediaOverlay? {
-        guard let selectedSegmentID else { return nil }
+        guard let selectedSegmentID = selectedSegmentID else { return nil }
         return selectedEpisode?.mediaOverlays.first { $0.id == selectedSegmentID }
     }
 
@@ -2004,7 +2004,7 @@ class EditorViewModel: ObservableObject {
     func narrationRecordingChanged(_ recording: Bool, segment: TimelineSegment?) {
         guard let player = previewPlayer else { return }
         if recording {
-            if let segment {
+            if let segment = segment {
                 seek(to: segment.startTime)
             }
             narrationStartTime = currentTime
@@ -2015,7 +2015,7 @@ class EditorViewModel: ObservableObject {
             player.pause()
             player.isMuted = previewMuted
             isPlaying = false
-            if let narrationStartTime { seek(to: narrationStartTime) }
+            if let narrationStartTime = narrationStartTime { seek(to: narrationStartTime) }
         }
     }
 
@@ -2077,7 +2077,7 @@ class EditorViewModel: ObservableObject {
     }
 
     private var selectedEpisodeIndex: Int? {
-        guard let selectedEpisode else { return nil }
+        guard let selectedEpisode = selectedEpisode else { return nil }
         return episodes.firstIndex { $0.id == selectedEpisode.id }
     }
 
@@ -2096,7 +2096,7 @@ class EditorViewModel: ObservableObject {
     }
 
     private func refreshSelectedEpisode(reloadPreview: Bool = true) {
-        guard let selectedEpisode else {
+        guard let selectedEpisode = selectedEpisode else {
             if let first = episodes.first { selectEpisode(first) }
             return
         }
@@ -2114,7 +2114,7 @@ class EditorViewModel: ObservableObject {
             tracks[track.trackType] = track.segments
         }
         timelineTracks = tracks
-        if let selectedSegmentID,
+        if let selectedSegmentID = selectedSegmentID,
            !orderedSegments.contains(where: { $0.id == selectedSegmentID }),
            !episode.resolvedOverlays(global: project.globalOverlays).contains(where: { $0.id == selectedSegmentID }),
            !episode.resolvedAudioClips(global: project.globalAudioClips).contains(where: { $0.id == selectedSegmentID }),
@@ -2127,7 +2127,7 @@ class EditorViewModel: ObservableObject {
     // MARK: Preview
 
     func reloadPreview() {
-        guard let selectedEpisode else { return }
+        guard let selectedEpisode = selectedEpisode else { return }
         loadPreview(for: selectedEpisode, keepTime: true)
     }
 
@@ -2145,7 +2145,7 @@ class EditorViewModel: ObservableObject {
         previewError = nil
 
         previewTask = Task { [weak self] in
-            guard let self else { return }
+            guard let self = self else { return }
             do {
                 let output = try await self.timelineEngine.buildPreviewComposition(
                     project: projectSnapshot,
@@ -2205,7 +2205,7 @@ class EditorViewModel: ObservableObject {
     }
 
     private func setupTimeObserver(for player: AVPlayer) {
-        if let timeObserver, let timeObserverPlayer {
+        if let timeObserver = timeObserver, let timeObserverPlayer = timeObserverPlayer {
             timeObserverPlayer.removeTimeObserver(timeObserver)
         }
         timeObserver = player.addPeriodicTimeObserver(
@@ -2213,7 +2213,7 @@ class EditorViewModel: ObservableObject {
             queue: .main
         ) { [weak self, weak player] time in
             Task { @MainActor [weak self, weak player] in
-                guard let self, let player, player === self.previewPlayer else { return }
+                guard let self = self, let player = player, player === self.previewPlayer else { return }
                 self.updateTime(time.seconds)
                 self.isPlaying = player.timeControlStatus != .paused
             }
@@ -2274,7 +2274,7 @@ class EditorViewModel: ObservableObject {
         let target = forward
             ? times.first { $0 > currentTime + 0.05 }
             : times.last { $0 < currentTime - 0.05 }
-        if let target { seek(to: target) }
+        if let target = target { seek(to: target) }
     }
 
     /// Markers surrounding the playhead; the main content between them can be ripple-deleted.
@@ -2448,7 +2448,7 @@ class EditorViewModel: ObservableObject {
             selected = episode
             nextIndex += 1
         }
-        guard let selected else { return }
+        guard let selected = selected else { return }
         selectedEpisode = selected
         if hadCaptions, let srt = project.transcriptSRT, let cues = try? SubtitleFile.parse(srt) {
             applyCaptions(cues, dynamic: captionsAreDynamic, recordUndo: false)

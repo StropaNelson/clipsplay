@@ -87,7 +87,7 @@ actor TranscriptionService {
                     }
                 }
             }
-            if let chunkError, !Self.isNoSpeechError(chunkError) {
+            if let chunkError = chunkError, !Self.isNoSpeechError(chunkError) {
                 lastError = chunkError
             }
 
@@ -111,7 +111,7 @@ actor TranscriptionService {
             chunkStart += chunkDuration
         }
         if allCues.isEmpty {
-            if let lastError, !Self.isNoSpeechError(lastError) { throw lastError }
+            if let lastError = lastError, !Self.isNoSpeechError(lastError) { throw lastError }
             throw TranscriptionError.noSpeechDetected
         }
         return allCues
@@ -173,7 +173,7 @@ actor TranscriptionService {
     }
 
     nonisolated private static func handle(result: SFSpeechRecognitionResult?, error: Error?, state: RecognitionState) {
-        if let result {
+        if let result = result {
             let segments = result.bestTranscription.segments
             if result.isFinal {
                 state.finish(.success(state.collect(final: segments)))
@@ -187,7 +187,7 @@ actor TranscriptionService {
                 state.update(partial: segments)
             }
         }
-        if let error {
+        if let error = error {
             let collected = state.collect(final: nil)
             if !collected.isEmpty {
                 state.finish(.success(collected))
@@ -289,7 +289,7 @@ actor TranscriptionService {
             }
         }
 
-        if let cueStart, !words.isEmpty {
+        if let cueStart = cueStart, !words.isEmpty {
             cues.append(TranscriptCue(startTime: cueStart, endTime: cueEnd, text: words.joined(separator: " "), words: timed))
         }
         return cues
@@ -363,7 +363,7 @@ private final class RecognitionState: @unchecked Sendable {
     }
 
     func collect(final segments: [SFTranscriptionSegment]?) -> [SFTranscriptionSegment] {
-        if let segments {
+        if let segments = segments {
             commit(segments)
         } else {
             lock.lock()

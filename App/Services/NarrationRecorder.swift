@@ -52,7 +52,7 @@ final class NarrationRecorder: ObservableObject {
     }
 
     func stop() {
-        guard let recorder else { return }
+        guard let recorder = recorder else { return }
         recordedDuration = recorder.currentTime
         recorder.stop()
         recordedURL = recorder.url
@@ -69,7 +69,7 @@ final class NarrationRecorder: ObservableObject {
             stopPlayback()
             return
         }
-        guard let recordedURL else { return }
+        guard let recordedURL = recordedURL else { return }
         do {
             let player = try AVAudioPlayer(contentsOf: recordedURL)
             player.play()
@@ -93,7 +93,7 @@ final class NarrationRecorder: ObservableObject {
 
     func discard() {
         stopPlayback()
-        if let recordedURL {
+        if let recordedURL = recordedURL {
             try? FileManager.default.removeItem(at: recordedURL)
         }
         recordedURL = nil
@@ -109,12 +109,12 @@ final class NarrationRecorder: ObservableObject {
     }
 
     private func tick() {
-        if let recorder, recorder.isRecording {
+        if let recorder = recorder, recorder.isRecording {
             recorder.updateMeters()
             elapsed = recorder.currentTime
             let power = recorder.averagePower(forChannel: 0)
             level = max(0, min(1, (power + 50) / 50))
-        } else if let player {
+        } else if let player = player {
             elapsed = player.currentTime
             if !player.isPlaying {
                 stopPlayback()

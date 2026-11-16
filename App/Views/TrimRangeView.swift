@@ -173,7 +173,7 @@ struct WaveformView: View {
             }
         }
         .task(id: url?.path ?? "") {
-            guard let url else { return }
+            guard let url = url else { return }
             peaks = await WaveformProvider.shared.peaks(for: url)
         }
     }
@@ -244,7 +244,7 @@ actor WaveformProvider {
 
     /// Gain (0.1–1.0) that brings the file's average level to a speech-friendly loudness.
     func normalizedGain(for url: URL?) async -> Float? {
-        guard let url else { return nil }
+        guard let url = url else { return nil }
         let asset = AVURLAsset(url: url)
         guard let track = try? await asset.loadTracks(withMediaType: .audio).first else { return nil }
         let output = AVAssetReaderTrackOutput(track: track, outputSettings: [

@@ -198,7 +198,7 @@ struct AssetTrimSheet: View {
                 }
 
                 Section {
-                    if let narration {
+                    if let narration = narration {
                         HStack {
                             Image(systemName: "mic.fill").foregroundStyle(.orange)
                             VStack(alignment: .leading) {
@@ -490,7 +490,7 @@ struct AssetImportSheet: View {
                 matching: .images
             )
             .onChange(of: imageSelection) { item in
-                guard let item else { return }
+                guard let item = item else { return }
                 importPhoto(item)
             }
         }

@@ -56,7 +56,7 @@ actor VideoProcessor {
         try videoTrack.insertTimeRange(timeRange, of: sourceVideo, at: .zero)
         videoTrack.preferredTransform = try await sourceVideo.load(.preferredTransform)
         
-        if let sourceAudio, let audioTrack {
+        if let sourceAudio = sourceAudio, let audioTrack = audioTrack {
             try audioTrack.insertTimeRange(timeRange, of: sourceAudio, at: .zero)
         }
         
@@ -84,7 +84,7 @@ actor VideoProcessor {
         if candidates.isEmpty {
             candidates = tracks.enumerated().map { (index: $0, track: $1, language: nil) }
         }
-        if let languageCode,
+        if let languageCode = languageCode,
            let language = languageCode.split(separator: "-").first.map(String.init) {
             let languageMatches = candidates.filter { $0.language?.hasPrefix(language) == true }
             if !languageMatches.isEmpty {
