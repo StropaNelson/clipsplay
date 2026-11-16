@@ -1,492 +1,439 @@
 import SwiftUI
+import AVFoundation
 import CoreMedia
 import UIKit
 
-struct TimelineView: View {
-    let episode: Episode?
-    let project: Project
-    let tracks: [TrackType: [TimelineSegment]]
-    let onTrackUpdate: ([TrackType: [TimelineSegment]]) -> Void
-    let onPlayheadMove: (Double) -> Void
-    
-    @State private var zoomLevel: Double = 1.0
-    @State private var horizontalOffset: Double = 0
-    @State private var playheadPosition: Double = 0
-    @State private var selectedSegment: TimelineSegment?
-    @State private var showingSegmentEditor = false
-    @State private var dragOffset: CGSize = .zero
-    @State private var isDragging = false
-    @State private var dragSegment: TimelineSegment?
-    @State private var dragTrack: TrackType?
-    
-    private let trackHeight: CGFloat = 60
-    private let rulerHeight: CGFloat = 40
-    private let minZoom: Double = 0.25
-    private let maxZoom: Double = 20.0
-    private let basePixelsPerSecond: CGFloat = 20
-    
-    var totalDuration: Double {
-        episode?.totalDuration ?? project.sourceVideoDuration
-    }
-    
-    var visibleDuration: Double {
-        totalDuration / zoomLevel
-    }
-    
-    var pixelsPerSecond: CGFloat {
-        basePixelsPerSecond * zoomLevel
-    }
-    
-    var contentWidth: CGFloat {
-        CGFloat(totalDuration) * pixelsPerSecond
-    }
-    
-    var body: some View {
-        GeometryReader { geometry in
-            timelineCanvas(size: geometry.size)
-        }
-        .background(Color(.systemGroupedBackground))
-        .overlay(alignment: .bottom) {
-            timelineToolbar
-        }
-        .sheet(isPresented: $showingSegmentEditor) {
-            if let segment = selectedSegment, let trackType = dragTrack ?? trackForSegment(segment) {
-                SegmentEditorView(
-                    segment: segment,
-                    trackType: trackType,
-                    project: project,
-                    episode: episode,
-                    onSave: { updated in
-                        updateSegment(segment, with: updated)
-                    },
-                    onDelete: {
-                        deleteSegment(segment)
-                    }
-                )
-            }
+extension TrackType {
+    var color: Color {
+        switch self {
+        case .intro: return Color(red: 0.62, green: 0.40, blue: 1.0)
+        case .recap: return Color(red: 1.0, green: 0.60, blue: 0.20)
+        case .main: return Color(red: 0.16, green: 0.62, blue: 1.0)
+        case .outro: return Color(red: 0.20, green: 0.80, blue: 0.50)
+        case .audio: return .pink
+        case .overlay: return .cyan
         }
     }
 
-    private func timelineCanvas(size: CGSize) -> some View {
-        let canvasWidth = max(contentWidth, size.width)
-        let canvasHeight = trackHeight * CGFloat(TrackType.allCases.count) + rulerHeight
-
-        return ZStack(alignment: .topLeading) {
-            ScrollView([.horizontal, .vertical], showsIndicators: true) {
-                timelineContent
-                    .frame(width: canvasWidth, height: canvasHeight)
-            }
-
-            zoomControls
-
-            if let episode = episode {
-                playheadView(episode: episode)
-            }
-        }
-    }
-    
-    private var timelineContent: some View {
-        VStack(spacing: 0) {
-            timeRuler
-            
-            ForEach(TrackType.allCases) { trackType in
-                TrackView(
-                    trackType: trackType,
-                    segments: tracks[trackType] ?? [],
-                    totalDuration: totalDuration,
-                    pixelsPerSecond: pixelsPerSecond,
-                    horizontalOffset: horizontalOffset,
-                    onSegmentTap: { segment in
-                        selectedSegment = segment
-                        dragTrack = trackType
-                        showingSegmentEditor = true
-                    },
-                    onSegmentDrag: { segment, translation in
-                        handleSegmentDrag(segment, trackType: trackType, translation: translation)
-                    },
-                    onSegmentDragEnd: { segment, translation in
-                        finalizeSegmentDrag(segment, trackType: trackType, translation: translation)
-                    }
-                )
-            }
-        }
-    }
-    
-    private var timeRuler: some View {
-        ZStack(alignment: .topLeading) {
-            Rectangle()
-                .fill(Color(.secondarySystemGroupedBackground))
-                .frame(height: rulerHeight)
-            
-            let majorInterval = majorTickInterval()
-            let startTime = horizontalOffset / pixelsPerSecond
-            let endTime = startTime + visibleDuration
-            let tickCount = max(0, Int((endTime - startTime) / majorInterval) + 1)
-            
-            ForEach(0..<tickCount, id: \.self) { index in
-                timeRulerTick(index: index, startTime: startTime, majorInterval: majorInterval)
-            }
+    var shortLabel: String {
+        switch self {
+        case .intro: return "INTRO"
+        case .recap: return "RECAP"
+        case .main: return "PRINCIPAL"
+        case .outro: return "FINAL"
+        case .audio: return "ÁUDIO"
+        case .overlay: return "TEXTO"
         }
     }
 
-    @ViewBuilder
-    private func timeRulerTick(index: Int, startTime: Double, majorInterval: Double) -> some View {
-        let time = startTime + Double(index) * majorInterval
-        if time >= 0 && time <= totalDuration {
-            let x = (time - horizontalOffset / pixelsPerSecond) * pixelsPerSecond
-            VStack(alignment: .leading, spacing: 0) {
-                Rectangle()
-                    .fill(Color(uiColor: .separator))
-                    .frame(width: 1, height: rulerHeight)
-
-                Text(formatTime(time))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .offset(x: 2, y: 2)
-            }
-            .position(x: x, y: rulerHeight / 2)
+    var icon: String {
+        switch self {
+        case .intro: return "play.rectangle.on.rectangle"
+        case .recap: return "arrow.counterclockwise"
+        case .main: return "film"
+        case .outro: return "flag.checkered"
+        case .audio: return "music.note"
+        case .overlay: return "textformat"
         }
-    }
-    
-    private func majorTickInterval() -> Double {
-        let interval = visibleDuration / 10
-        if interval <= 1 { return 0.5 }
-        if interval <= 5 { return 1 }
-        if interval <= 15 { return 5 }
-        if interval <= 60 { return 15 }
-        if interval <= 120 { return 30 }
-        return 60
-    }
-    
-    private func playheadView(episode: Episode) -> some View {
-        let x = playheadPosition * pixelsPerSecond
-        let totalHeight = trackHeight * CGFloat(TrackType.allCases.count) + rulerHeight
-        
-        return ZStack(alignment: .topLeading) {
-            Rectangle()
-                .fill(Color.red)
-                .frame(width: 2, height: totalHeight)
-            
-            Triangle()
-                .fill(Color.red)
-                .frame(width: 16, height: 16)
-                .offset(x: -8, y: -8)
-            
-            Text(formatTime(playheadPosition))
-                .font(.caption.monospacedDigit().bold())
-                .foregroundStyle(.red)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.red, in: Capsule())
-                .offset(x: -40, y: -28)
-        }
-        .position(x: x, y: totalHeight / 2)
-        .gesture(
-            DragGesture()
-                .onChanged { value in
-                    let newX = value.location.x
-                    let newTime = newX / pixelsPerSecond
-                    playheadPosition = max(0, min(totalDuration, newTime))
-                    onPlayheadMove(playheadPosition)
-                }
-        )
-    }
-    
-    private var zoomControls: some View {
-        VStack {
-            HStack {
-                Spacer()
-                VStack(spacing: 8) {
-                    Button { zoomIn() } label: {
-                        Image(systemName: "plus.magnifyingglass")
-                    }
-                    Button { zoomOut() } label: {
-                        Image(systemName: "minus.magnifyingglass")
-                    }
-                    Button { zoomFit() } label: {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right")
-                    }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .padding()
-            }
-            Spacer()
-        }
-    }
-    
-    private var timelineToolbar: some View {
-        HStack(spacing: 16) {
-            Label("Zoom: \(Int(zoomLevel * 100))%", systemImage: "magnifyingglass")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            
-            Spacer()
-            
-            Button {
-                addSegment(to: .intro)
-            } label: {
-                Label("Adicionar Intro", systemImage: "plus")
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(episode == nil)
-            
-            Button {
-                addSegment(to: .recap)
-            } label: {
-                Label("Adicionar Recap", systemImage: "plus")
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(episode == nil)
-            
-            Button {
-                addSegment(to: .outro)
-            } label: {
-                Label("Adicionar Outro", systemImage: "plus")
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(episode == nil)
-        }
-        .padding()
-        .background(.thinMaterial)
-    }
-    
-    private func zoomIn() {
-        withAnimation(.spring(response: 0.2)) {
-            zoomLevel = min(maxZoom, zoomLevel * 1.5)
-        }
-    }
-    
-    private func zoomOut() {
-        withAnimation(.spring(response: 0.2)) {
-            zoomLevel = max(minZoom, zoomLevel / 1.5)
-        }
-    }
-    
-    private func zoomFit() {
-        withAnimation(.spring(response: 0.3)) {
-            zoomLevel = 1.0
-            horizontalOffset = 0
-        }
-    }
-    
-    private func addSegment(to trackType: TrackType) {
-        guard episode != nil else { return }
-        let newSegment = TimelineSegment(
-            id: UUID(),
-            trackType: trackType,
-            startTime: playheadPosition,
-            duration: 5,
-            sourceStartTime: 0,
-            sourceEndTime: 5,
-            sourceType: .mainVideo,
-            assetID: nil,
-            isEnabled: true
-        )
-        var updatedTracks = tracks
-        updatedTracks[trackType, default: []].append(newSegment)
-        onTrackUpdate(updatedTracks)
-    }
-    
-    private func handleSegmentDrag(_ segment: TimelineSegment, trackType: TrackType, translation: CGSize) {
-        dragSegment = segment
-        dragOffset = translation
-        isDragging = true
-    }
-    
-    private func finalizeSegmentDrag(_ segment: TimelineSegment, trackType: TrackType, translation: CGSize) {
-        let timeDelta = Double(translation.width) / pixelsPerSecond
-        var updatedTracks = tracks
-        
-        if var trackSegments = updatedTracks[trackType],
-           let index = trackSegments.firstIndex(where: { $0.id == segment.id }) {
-            var updatedSegment = trackSegments[index]
-            updatedSegment.startTime = max(0, min(totalDuration - updatedSegment.duration, segment.startTime + timeDelta))
-            trackSegments[index] = updatedSegment
-            updatedTracks[trackType] = trackSegments
-            onTrackUpdate(updatedTracks)
-        }
-        
-        dragSegment = nil
-        dragOffset = .zero
-        isDragging = false
-    }
-    
-    private func updateSegment(_ segment: TimelineSegment, with updated: TimelineSegment) {
-        var updatedTracks = tracks
-        if var trackSegments = updatedTracks[updated.trackType],
-           let index = trackSegments.firstIndex(where: { $0.id == segment.id }) {
-            trackSegments[index] = updated
-            updatedTracks[updated.trackType] = trackSegments
-            onTrackUpdate(updatedTracks)
-        }
-    }
-    
-    private func deleteSegment(_ segment: TimelineSegment) {
-        var updatedTracks = tracks
-        if var trackSegments = updatedTracks[segment.trackType] {
-            trackSegments.removeAll { $0.id == segment.id }
-            updatedTracks[segment.trackType] = trackSegments
-            onTrackUpdate(updatedTracks)
-        }
-        showingSegmentEditor = false
-    }
-    
-    private func trackForSegment(_ segment: TimelineSegment) -> TrackType? {
-        return tracks.first { $0.value.contains(where: { $0.id == segment.id }) }?.key
-    }
-    
-    private func formatTime(_ seconds: Double) -> String {
-        let m = Int(seconds) / 60
-        let s = Int(seconds) % 60
-        return String(format: "%02d:%02d", m, s)
     }
 }
 
-struct TrackView: View {
-    let trackType: TrackType
+/// Storyline timeline: ruler, a single video lane with filmstrip clips, playhead and zoom.
+struct TimelineView: View {
     let segments: [TimelineSegment]
     let totalDuration: Double
-    let pixelsPerSecond: CGFloat
-    let horizontalOffset: Double
-    let onSegmentTap: (TimelineSegment) -> Void
-    let onSegmentDrag: (TimelineSegment, CGSize) -> Void
-    let onSegmentDragEnd: (TimelineSegment, CGSize) -> Void
-    
+    let currentTime: Double
+    let selectedSegmentID: UUID?
+    let canAddIntro: Bool
+    let canAddOutro: Bool
+    let sourceURL: (TimelineSegment) -> URL?
+    let onSeek: (Double) -> Void
+    let onSelect: (TimelineSegment?) -> Void
+    let onAddIntro: () -> Void
+    let onAddOutro: () -> Void
+
+    @State private var pixelsPerSecond: CGFloat = 20
+    @State private var pinchBase: CGFloat?
+    @State private var didFit = false
+
+    private let headerWidth: CGFloat = 64
+    private let leadingInset: CGFloat = 76
+    private let trailingInset: CGFloat = 140
+    private let rulerHeight: CGFloat = 26
+    private let clipHeight: CGFloat = 62
+    private let minPPS: CGFloat = 4
+    private let maxPPS: CGFloat = 240
+
+    private var safeDuration: Double { max(totalDuration, 0.1) }
+
     var body: some View {
+        GeometryReader { geometry in
+            VStack(spacing: 0) {
+                HStack(alignment: .top, spacing: 0) {
+                    trackHeaders
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        timelineContent
+                    }
+                    .simultaneousGesture(pinchGesture)
+                }
+                Spacer(minLength: 0)
+                zoomBar(width: geometry.size.width)
+            }
+            .onAppear {
+                guard !didFit else { return }
+                didFit = true
+                fit(width: geometry.size.width)
+            }
+            .onChange(of: totalDuration) { _ in
+                fit(width: geometry.size.width)
+            }
+        }
+        .background(EditorTheme.timelineBackground)
+    }
+
+    private var trackHeaders: some View {
+        VStack(spacing: 0) {
+            Color.clear.frame(height: rulerHeight + 10)
+            VStack(spacing: 4) {
+                Image(systemName: "film")
+                    .font(.system(size: 15, weight: .semibold))
+                Text("Vídeo")
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .foregroundStyle(.white.opacity(0.75))
+            .frame(width: headerWidth, height: clipHeight)
+            .background(EditorTheme.panelRaised, in: RoundedRectangle(cornerRadius: 8))
+            .padding(.leading, 6)
+        }
+        .frame(width: headerWidth + 6)
+    }
+
+    private var contentWidth: CGFloat {
+        leadingInset + CGFloat(safeDuration) * pixelsPerSecond + trailingInset
+    }
+
+    private func xPosition(for time: Double) -> CGFloat {
+        leadingInset + CGFloat(time) * pixelsPerSecond
+    }
+
+    private func time(at x: CGFloat) -> Double {
+        min(safeDuration, max(0, Double((x - leadingInset) / pixelsPerSecond)))
+    }
+
+    private var timelineContent: some View {
         ZStack(alignment: .topLeading) {
-            Rectangle()
-                .fill(trackColor.opacity(0.08))
-                .frame(height: 60)
-            
+            VStack(alignment: .leading, spacing: 10) {
+                ruler
+                lane
+            }
+            playhead
+        }
+        .frame(width: contentWidth, alignment: .topLeading)
+    }
+
+    private var ruler: some View {
+        let pps = pixelsPerSecond
+        let inset = leadingInset
+        let duration = safeDuration
+        let major = majorTickInterval(pps: pps)
+        let minorCount = major >= 1 ? 5 : 2
+        return Canvas { context, size in
+            let minor = major / Double(minorCount)
+            var tick = 0
+            var t = 0.0
+            while t <= duration + 0.0001 {
+                let x = inset + CGFloat(t) * pps
+                let isMajor = tick % minorCount == 0
+                let height: CGFloat = isMajor ? 10 : 5
+                let rect = CGRect(x: x, y: size.height - height, width: 1, height: height)
+                context.fill(Path(rect), with: .color(.white.opacity(isMajor ? 0.55 : 0.25)))
+                if isMajor {
+                    context.draw(
+                        Text(Self.rulerLabel(t)).font(.system(size: 9, weight: .medium).monospacedDigit()).foregroundColor(.white.opacity(0.6)),
+                        at: CGPoint(x: x + 3, y: 2),
+                        anchor: .topLeading
+                    )
+                }
+                tick += 1
+                t = Double(tick) * minor
+            }
+        }
+        .frame(width: contentWidth, height: rulerHeight)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in onSeek(time(at: value.location.x)) }
+        )
+    }
+
+    private var lane: some View {
+        ZStack(alignment: .topLeading) {
+            Color.clear
+                .frame(width: contentWidth, height: clipHeight)
+                .contentShape(Rectangle())
+                .onTapGesture { onSelect(nil) }
+
+            if canAddIntro {
+                addButton(title: "Intro", systemImage: "plus", action: onAddIntro)
+                    .offset(x: 8)
+            }
+
             ForEach(segments) { segment in
-                SegmentView(
+                let width = max(8, CGFloat(segment.duration) * pixelsPerSecond)
+                TimelineClipView(
                     segment: segment,
-                    trackType: trackType,
-                    pixelsPerSecond: pixelsPerSecond,
-                    onTap: { onSegmentTap(segment) },
-                    onDrag: { translation in onSegmentDrag(segment, translation) },
-                    onDragEnd: { translation in onSegmentDragEnd(segment, translation) }
+                    width: width,
+                    height: clipHeight,
+                    isSelected: segment.id == selectedSegmentID,
+                    sourceURL: sourceURL(segment)
                 )
+                .offset(x: xPosition(for: segment.startTime))
+                .onTapGesture { onSelect(segment) }
             }
-            
-            if segments.isEmpty {
-                Text(trackType.rawValue)
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.leading, 12)
-                    .padding(.top, 8)
+
+            if canAddOutro {
+                addButton(title: "Final", systemImage: "plus", action: onAddOutro)
+                    .offset(x: xPosition(for: safeDuration) + 10)
             }
         }
-        .frame(height: 60)
-        .overlay(alignment: .leading) {
-            Rectangle()
-                .fill(trackColor)
-                .frame(width: 3)
+        .frame(width: contentWidth, height: clipHeight, alignment: .topLeading)
+    }
+
+    private func addButton(title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 16, weight: .bold))
+                Text(title)
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .foregroundStyle(.black)
+            .frame(width: 58, height: clipHeight)
+            .background(Color.white.opacity(0.9), in: RoundedRectangle(cornerRadius: 8))
         }
-        .overlay(alignment: .bottom) {
+        .buttonStyle(.plain)
+    }
+
+    private var playhead: some View {
+        let x = xPosition(for: min(max(currentTime, 0), safeDuration))
+        let height = rulerHeight + 10 + clipHeight + 6
+        return ZStack(alignment: .top) {
             Rectangle()
-                .fill(Color(uiColor: .separator))
-                .frame(height: 0.5)
+                .fill(Color.white)
+                .frame(width: 2, height: height)
+            Circle()
+                .fill(Color.white)
+                .frame(width: 10, height: 10)
+                .offset(y: -3)
+        }
+        .shadow(color: .black.opacity(0.6), radius: 2)
+        .offset(x: x - 5)
+        .frame(width: 10, alignment: .top)
+        .allowsHitTesting(false)
+    }
+
+    private func zoomBar(width: CGFloat) -> some View {
+        HStack(spacing: 10) {
+            Text("\(Self.rulerLabel(currentTime)) / \(Self.rulerLabel(totalDuration))")
+                .font(.system(size: 11, weight: .medium).monospacedDigit())
+                .foregroundStyle(.white.opacity(0.6))
+            Spacer()
+            Button { zoom(by: 1 / 1.5) } label: { Image(systemName: "minus.magnifyingglass") }
+            Slider(
+                value: Binding(
+                    get: { Double(log(pixelsPerSecond)) },
+                    set: { pixelsPerSecond = CGFloat(exp($0)) }
+                ),
+                in: Double(log(minPPS))...Double(log(maxPPS))
+            )
+            .frame(maxWidth: 160)
+            Button { zoom(by: 1.5) } label: { Image(systemName: "plus.magnifyingglass") }
+            Button { fit(width: width) } label: { Image(systemName: "arrow.left.and.right.square") }
+        }
+        .font(.system(size: 15))
+        .foregroundStyle(.white.opacity(0.8))
+        .tint(EditorTheme.accent)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+    }
+
+    private var pinchGesture: some Gesture {
+        MagnificationGesture()
+            .onChanged { scale in
+                let base = pinchBase ?? pixelsPerSecond
+                pinchBase = base
+                pixelsPerSecond = clamp(base * scale)
+            }
+            .onEnded { _ in pinchBase = nil }
+    }
+
+    private func zoom(by factor: CGFloat) {
+        withAnimation(.easeOut(duration: 0.15)) {
+            pixelsPerSecond = clamp(pixelsPerSecond * factor)
         }
     }
-    
-    private var trackColor: Color {
-        switch trackType {
-        case .intro: return .purple
-        case .recap: return .orange
-        case .main: return .blue
-        case .outro: return .green
-        case .audio: return .pink
-        case .overlay: return .cyan
-        }
+
+    private func fit(width: CGFloat) {
+        let available = width - headerWidth - leadingInset - trailingInset
+        pixelsPerSecond = clamp(max(available, 120) / CGFloat(safeDuration))
+    }
+
+    private func clamp(_ value: CGFloat) -> CGFloat {
+        min(maxPPS, max(minPPS, value))
+    }
+
+    private func majorTickInterval(pps: CGFloat) -> Double {
+        let candidates: [Double] = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600]
+        return candidates.first { CGFloat($0) * pps >= 64 } ?? 600
+    }
+
+    static func rulerLabel(_ seconds: Double) -> String {
+        guard seconds.isFinite else { return "00:00" }
+        let total = max(0, Int(seconds.rounded(.down)))
+        return String(format: "%02d:%02d", total / 60, total % 60)
     }
 }
 
-struct SegmentView: View {
+struct TimelineClipView: View {
     let segment: TimelineSegment
-    let trackType: TrackType
-    let pixelsPerSecond: CGFloat
-    let onTap: () -> Void
-    let onDrag: (CGSize) -> Void
-    let onDragEnd: (CGSize) -> Void
-    
+    let width: CGFloat
+    let height: CGFloat
+    let isSelected: Bool
+    let sourceURL: URL?
+
     var body: some View {
-        let x = segment.startTime * pixelsPerSecond
-        let width = max(20, segment.duration * pixelsPerSecond)
-        
-        ZStack(alignment: .leading) {
-            RoundedRectangle(cornerRadius: 4)
-                .fill(trackColor.opacity(segment.isEnabled ? 0.8 : 0.3))
-                .frame(width: width, height: 40)
-            
-            if width > 50 {
-                Text(segmentLabel)
-                    .font(.caption2.bold())
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 6)
-                    .lineLimit(1)
+        let color = segment.trackType.color
+        ZStack(alignment: .topLeading) {
+            FilmstripView(
+                url: sourceURL,
+                sourceStart: segment.sourceStartTime,
+                sourceDuration: max(segment.sourceDuration, 0.1),
+                width: width,
+                height: height,
+                tint: color
+            )
+            LinearGradient(
+                colors: [.black.opacity(0.65), .clear],
+                startPoint: .top,
+                endPoint: .center
+            )
+            if width > 44 {
+                HStack(spacing: 4) {
+                    Text(segment.trackType.shortLabel)
+                        .font(.system(size: 9, weight: .heavy))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(color, in: RoundedRectangle(cornerRadius: 3))
+                    if width > 110 {
+                        Text(TimelineView.rulerLabel(segment.duration))
+                            .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                    }
+                }
+                .foregroundStyle(.white)
+                .padding(5)
+            }
+            if !segment.isEnabled {
+                Color.black.opacity(0.55)
+                Image(systemName: "eye.slash")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .frame(width: width, height: height)
             }
         }
-        .position(x: x + width / 2, y: 30)
-        .gesture(
-            TapGesture().onEnded { onTap() }
+        .frame(width: width, height: height)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(isSelected ? Color.white : color.opacity(0.9), lineWidth: isSelected ? 3 : 1.5)
         )
-        .gesture(
-            DragGesture()
-                .onChanged { onDrag($0.translation) }
-                .onEnded { onDragEnd($0.translation) }
-        )
-        .contextMenu {
-            Button("Editar") { onTap() }
-            Button("Duplicar") { /* duplicate */ }
-            Button("Excluir", role: .destructive) { /* delete */ }
-        }
-    }
-    
-    private var trackColor: Color {
-        switch trackType {
-        case .intro: return .purple
-        case .recap: return .orange
-        case .main: return .blue
-        case .outro: return .green
-        case .audio: return .pink
-        case .overlay: return .cyan
-        }
-    }
-    
-    private var segmentLabel: String {
-        let sourceLabel: String
-        switch segment.sourceType {
-        case .mainVideo: sourceLabel = "Principal"
-        case .introAsset: sourceLabel = "Intro"
-        case .outroAsset: sourceLabel = "Outro"
-        case .recapAsset: sourceLabel = "Recap"
-        case .audioAsset: sourceLabel = "Áudio"
-        case .imageAsset: sourceLabel = "Imagem"
-        }
-        return "\(sourceLabel) \(formatTime(segment.sourceStartTime))–\(formatTime(segment.sourceEndTime))"
-    }
-    
-    private func formatTime(_ seconds: Double) -> String {
-        let m = Int(seconds) / 60
-        let s = Int(seconds) % 60
-        return String(format: "%02d:%02d", m, s)
+        .contentShape(Rectangle())
     }
 }
 
-struct Triangle: Shape {
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        path.move(to: CGPoint(x: rect.midX, y: rect.minY))
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
-        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
-        path.closeSubpath()
-        return path
+struct FilmstripView: View {
+    let url: URL?
+    let sourceStart: Double
+    let sourceDuration: Double
+    let width: CGFloat
+    let height: CGFloat
+    let tint: Color
+
+    @State private var frames: [Int: UIImage] = [:]
+
+    private var frameCount: Int {
+        max(1, min(40, Int((width / (height * 16 / 9)).rounded(.up))))
+    }
+
+    var body: some View {
+        let count = frameCount
+        let frameWidth = width / CGFloat(count)
+        HStack(spacing: 0) {
+            ForEach(0..<count, id: \.self) { index in
+                ZStack {
+                    tint.opacity(0.35)
+                    if let image = frames[index] {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                    }
+                }
+                .frame(width: frameWidth, height: height)
+                .clipped()
+            }
+        }
+        .frame(width: width, height: height, alignment: .leading)
+        .task(id: taskKey(count: count)) {
+            await loadFrames(count: count)
+        }
+    }
+
+    private func taskKey(count: Int) -> String {
+        "\(url?.path ?? "")|\(sourceStart)|\(sourceDuration)|\(count)"
+    }
+
+    @MainActor
+    private func loadFrames(count: Int) async {
+        frames = [:]
+        guard let url else { return }
+        for index in 0..<count {
+            if Task.isCancelled { return }
+            let time = sourceStart + sourceDuration * (Double(index) + 0.5) / Double(count)
+            if let image = await ThumbnailProvider.shared.thumbnail(url: url, time: time) {
+                frames[index] = image
+            }
+        }
+    }
+}
+
+actor ThumbnailProvider {
+    static let shared = ThumbnailProvider()
+
+    private var cache: [String: UIImage] = [:]
+    private var generators: [URL: AVAssetImageGenerator] = [:]
+
+    func thumbnail(url: URL, time: Double) -> UIImage? {
+        let key = "\(url.path)#\(Int((time * 4).rounded()))"
+        if let cached = cache[key] { return cached }
+        let generator: AVAssetImageGenerator
+        if let existing = generators[url] {
+            generator = existing
+        } else {
+            generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: 200, height: 200)
+            let tolerance = CMTime(seconds: 0.25, preferredTimescale: 600)
+            generator.requestedTimeToleranceBefore = tolerance
+            generator.requestedTimeToleranceAfter = tolerance
+            generators[url] = generator
+        }
+        guard let cgImage = try? generator.copyCGImage(
+            at: CMTime(seconds: max(0, time), preferredTimescale: 600),
+            actualTime: nil
+        ) else { return nil }
+        let image = UIImage(cgImage: cgImage)
+        if cache.count > 600 { cache.removeAll() }
+        cache[key] = image
+        return image
     }
 }
 

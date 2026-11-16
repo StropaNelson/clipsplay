@@ -110,24 +110,45 @@ actor VideoProcessor {
         resolution: ExportResolution,
         fitMode: FitMode
     ) async throws -> CompositionBuildResult {
-        let asset = AVURLAsset(url: sourceURL)
+        // AVAssetTrack only holds a weak reference to its AVAsset. Every asset must stay
+        // alive while its tracks are inserted, otherwise AVFoundation fails with
+        // "The operation could not be completed" (-11800).
+        var retainedAssets: [URL: AVURLAsset] = [:]
+        func loadAsset(_ url: URL) throws -> AVURLAsset {
+            if let cached = retainedAssets[url] { return cached }
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                throw ProcessorError.missingAssetFile(url.lastPathComponent)
+            }
+            let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
+            retainedAssets[url] = asset
+            return asset
+        }
+
+        let asset = try loadAsset(sourceURL)
         let sourceVideoTracks = try await asset.loadTracks(withMediaType: .video)
         guard let sourceVideo = sourceVideoTracks.first else { throw ProcessorError.noVideoTrack }
         let sourceAudioTracks = try await asset.loadTracks(withMediaType: .audio)
         let sourceAudio = sourceAudioTracks.first
         let sourceSize = try await sourceVideo.load(.naturalSize)
         let sourceTransform = try await sourceVideo.load(.preferredTransform)
-        
+
         let composition = AVMutableComposition()
-        guard let videoTrackA = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
-              let videoTrackB = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
-              let audioTrackA = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid),
-              let audioTrackB = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
-            throw ProcessorError.cannotCreateTrack
+        var videoLanes: [(track: AVMutableCompositionTrack, end: CMTime)] = []
+        var audioLanes: [AVMutableCompositionTrack] = []
+
+        func lane(startingAt start: CMTime) throws -> Int {
+            if let index = videoLanes.firstIndex(where: { CMTimeCompare($0.end, start) <= 0 }) {
+                return index
+            }
+            guard let video = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
+                  let audio = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+                throw ProcessorError.cannotCreateTrack
+            }
+            videoLanes.append((video, .zero))
+            audioLanes.append(audio)
+            return videoLanes.count - 1
         }
 
-        let videoTracks = [videoTrackA, videoTrackB]
-        let audioTracks = [audioTrackA, audioTrackB]
         let transitionLimit = 0.35
         var cursor = CMTime.zero
         var previousDuration: CMTime?
@@ -135,15 +156,28 @@ actor VideoProcessor {
         var audioLayouts: [(start: CMTime, end: CMTime, track: AVMutableCompositionTrack, hasAudio: Bool)] = []
 
         for segment in segments where segment.timeRange.duration.seconds > 0 {
-            let source = try await getTrackForSegment(
-                segment,
-                sourceVideo: sourceVideo,
-                sourceAudio: sourceAudio,
-                additionalAssets: additionalAssets
-            )
+            let source: (video: AVAssetTrack, audio: AVAssetTrack?)
+            switch segment.sourceType {
+            case .mainVideo:
+                source = (sourceVideo, sourceAudio)
+            case .introAsset, .outroAsset, .recapAsset, .audioAsset:
+                guard let assetID = segment.assetID, let url = additionalAssets[assetID] else {
+                    throw ProcessorError.missingAsset
+                }
+                let segmentAsset = try loadAsset(url)
+                guard let video = try await segmentAsset.loadTracks(withMediaType: .video).first else {
+                    throw ProcessorError.noVideoTrack
+                }
+                let audio = try await segmentAsset.loadTracks(withMediaType: .audio).first
+                source = (video, audio)
+            case .imageAsset:
+                throw ProcessorError.unsupportedOperation
+            }
+
+            let availableVideoRange = try await source.video.load(.timeRange)
             guard let sourceTimeRange = intersection(
                 of: segment.timeRange,
-                with: source.video.timeRange
+                with: availableVideoRange
             ), CMTimeCompare(sourceTimeRange.duration, .zero) > 0 else {
                 throw ProcessorError.invalidTimeRange
             }
@@ -156,16 +190,15 @@ actor VideoProcessor {
                 overlapDuration = .zero
             }
 
-            let start = segment.timelineStartTime.map {
+            var start = segment.timelineStartTime.map {
                 CMTime(seconds: $0, preferredTimescale: 600)
             } ?? CMTimeSubtract(cursor, overlapDuration)
-            guard start.seconds.isFinite, start.seconds >= 0 else {
-                throw ProcessorError.invalidTimeRange
-            }
+            if !start.seconds.isFinite || start.seconds < 0 { start = .zero }
             let end = CMTimeAdd(start, duration)
-            let lane = clipLayouts.count % 2
-            let compositionVideoTrack = videoTracks[lane]
+            let laneIndex = try lane(startingAt: start)
+            let compositionVideoTrack = videoLanes[laneIndex].track
             try compositionVideoTrack.insertTimeRange(sourceTimeRange, of: source.video, at: start)
+            videoLanes[laneIndex].end = end
 
             let naturalSize = try await source.video.load(.naturalSize)
             let transform = try await source.video.load(.preferredTransform)
@@ -177,14 +210,16 @@ actor VideoProcessor {
                 preferredTransform: transform
             ))
 
-            let compositionAudioTrack = audioTracks[lane]
-            if let sourceAudio = source.audio,
-               let audioTimeRange = intersection(of: sourceTimeRange, with: sourceAudio.timeRange),
-               CMTimeCompare(audioTimeRange.duration, .zero) > 0 {
-                let audioStart = CMTimeAdd(start, CMTimeSubtract(audioTimeRange.start, sourceTimeRange.start))
-                let audioEnd = CMTimeAdd(audioStart, audioTimeRange.duration)
-                try compositionAudioTrack.insertTimeRange(audioTimeRange, of: sourceAudio, at: audioStart)
-                audioLayouts.append((audioStart, audioEnd, compositionAudioTrack, true))
+            let compositionAudioTrack = audioLanes[laneIndex]
+            if let sourceAudio = source.audio {
+                let availableAudioRange = try await sourceAudio.load(.timeRange)
+                if let audioTimeRange = intersection(of: sourceTimeRange, with: availableAudioRange),
+                   CMTimeCompare(audioTimeRange.duration, .zero) > 0 {
+                    let audioStart = CMTimeAdd(start, CMTimeSubtract(audioTimeRange.start, sourceTimeRange.start))
+                    let audioEnd = CMTimeAdd(audioStart, audioTimeRange.duration)
+                    try compositionAudioTrack.insertTimeRange(audioTimeRange, of: sourceAudio, at: audioStart)
+                    audioLayouts.append((audioStart, audioEnd, compositionAudioTrack, true))
+                }
             }
 
             cursor = CMTimeCompare(cursor, end) > 0 ? cursor : end
@@ -192,6 +227,10 @@ actor VideoProcessor {
         }
 
         guard !clipLayouts.isEmpty else { throw ProcessorError.invalidTimeRange }
+
+        for audioTrack in audioLanes where audioTrack.segments.isEmpty {
+            composition.removeTrack(audioTrack)
+        }
 
         let renderSize = calculateRenderSize(
             aspect: aspect,
@@ -203,13 +242,14 @@ actor VideoProcessor {
             clips: clipLayouts,
             renderSize: renderSize,
             fitMode: fitMode,
-            duration: cursor
+            duration: composition.duration
         )
         let audioMix = makeCrossfadeAudioMix(layouts: audioLayouts)
         return CompositionBuildResult(
             composition: composition,
             videoComposition: videoComposition,
-            audioMix: audioMix
+            audioMix: audioMix,
+            sourceAssets: retainedAssets.values.map { $0 as AVAsset }
         )
     }
     
@@ -399,14 +439,15 @@ actor VideoProcessor {
     
     nonisolated func calculateRenderSize(aspect: AspectRatio, resolution: ExportResolution, naturalSize: CGSize, transform: CGAffineTransform) -> CGSize {
         let rect = CGRect(origin: .zero, size: naturalSize).applying(transform)
-        let sourceW = abs(rect.width)
-        let sourceH = abs(rect.height)
-        
-        guard let ratio = aspect.ratio else { return CGSize(width: sourceW, height: sourceH) }
-        guard let longSide = resolution.longSide else { return CGSize(width: sourceW, height: sourceH) }
-        
-        if ratio >= 1 { return CGSize(width: longSide, height: longSide/ratio) }
-        return CGSize(width: longSide*ratio, height: longSide)
+        let sourceW = max(abs(rect.width), 2)
+        let sourceH = max(abs(rect.height), 2)
+        let ratio = aspect.ratio ?? (sourceW / sourceH)
+        let longSide = resolution.longSide ?? max(sourceW, sourceH)
+        let size = ratio >= 1
+            ? CGSize(width: longSide, height: longSide / ratio)
+            : CGSize(width: longSide * ratio, height: longSide)
+        func even(_ value: CGFloat) -> CGFloat { max(2, (value / 2).rounded() * 2) }
+        return CGSize(width: even(size.width), height: even(size.height))
     }
     
     func generateCover(for project: Project, episode: Episode, episodeNumber: Int, settings: CoverSettings) async throws -> Data {
@@ -463,25 +504,6 @@ actor VideoProcessor {
         return image.jpegData(compressionQuality: 0.9) ?? Data()
     }
     
-    private func getTrackForSegment(_ segment: CompositionSegment, sourceVideo: AVAssetTrack, sourceAudio: AVAssetTrack?, additionalAssets: [UUID: URL]) async throws -> (video: AVAssetTrack, audio: AVAssetTrack?) {
-        switch segment.sourceType {
-        case .mainVideo:
-            return (sourceVideo, sourceAudio)
-        case .introAsset, .outroAsset, .recapAsset, .audioAsset:
-            guard let assetID = segment.assetID,
-                  let url = additionalAssets[assetID] else {
-                throw ProcessorError.missingAsset
-            }
-            let asset = AVURLAsset(url: url)
-            let videoTracks = try await asset.loadTracks(withMediaType: .video)
-            let audioTracks = try await asset.loadTracks(withMediaType: .audio)
-            guard let videoTrack = videoTracks.first else { throw ProcessorError.noVideoTrack }
-            return (videoTrack, audioTracks.first)
-        case .imageAsset:
-            throw ProcessorError.unsupportedOperation
-        }
-    }
-    
     private func runExport(_ exporterBox: ExportSessionBox) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             exporterBox.session.exportAsynchronously {
@@ -530,6 +552,7 @@ struct CompositionBuildResult {
     let composition: AVMutableComposition
     let videoComposition: AVVideoComposition
     let audioMix: AVAudioMix?
+    let sourceAssets: [AVAsset]
 }
 
 private struct CompositionClipLayout {
@@ -550,6 +573,7 @@ enum ProcessorError: LocalizedError {
     case missingAsset
     case unsupportedOperation
     case invalidTimeRange
+    case missingAssetFile(String)
     
     var errorDescription: String? {
         switch self {
@@ -562,6 +586,7 @@ enum ProcessorError: LocalizedError {
         case .missingAsset: return "Asset referenciado não encontrado."
         case .unsupportedOperation: return "Operação não suportada para este tipo de segmento."
         case .invalidTimeRange: return "Intervalo de tempo inválido."
+        case .missingAssetFile(let name): return "Arquivo de mídia não encontrado: \(name). Importe-o novamente."
         }
     }
 }

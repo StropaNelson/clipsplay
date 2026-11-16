@@ -48,7 +48,7 @@ struct Project: Codable, Identifiable {
     }
     
     var sourceVideoFileURL: URL {
-        URL(fileURLWithPath: sourceVideoURL)
+        StoredFileLocator.resolve(sourceVideoURL)
     }
     
     mutating func updateTimestamp() {
@@ -178,6 +178,17 @@ struct Episode: Codable, Identifiable {
     }
     
     var mainDuration: Double { mainEnd - mainStart }
+
+    var title: String { "Episódio \(index + 1)" }
+
+    /// Drops fixed timeline positions so clips flow sequentially (intro → recap → main → outro).
+    mutating func clearTimelinePins() {
+        mainTimelineStartTime = nil
+        introSegment?.timelineStartTime = nil
+        outroSegment?.timelineStartTime = nil
+        for index in recapSegments.indices { recapSegments[index].timelineStartTime = nil }
+        for index in customRecapSegments.indices { customRecapSegments[index].timelineStartTime = nil }
+    }
     var totalDuration: Double {
         var cursor = 0.0
         var timelineEnd = 0.0
@@ -248,6 +259,7 @@ struct VideoSegment: Codable, Identifiable, Hashable {
     var timelineStartTime: Double?
     
     init(
+        id: UUID = UUID(),
         startTime: Double,
         endTime: Double,
         sourceType: SourceType,
@@ -256,7 +268,7 @@ struct VideoSegment: Codable, Identifiable, Hashable {
         isEnabled: Bool = true,
         timelineStartTime: Double? = nil
     ) {
-        self.id = UUID()
+        self.id = id
         self.startTime = startTime
         self.endTime = endTime
         self.sourceType = sourceType
@@ -380,8 +392,8 @@ struct MediaAsset: Codable, Identifiable, Hashable {
         self.thumbnailURL = thumbnailURL?.path
     }
     
-    var url: URL { URL(fileURLWithPath: fileURL) }
-    var thumbnailFileURL: URL? { thumbnailURL.map { URL(fileURLWithPath: $0) } }
+    var url: URL { StoredFileLocator.resolve(fileURL) }
+    var thumbnailFileURL: URL? { thumbnailURL.map { StoredFileLocator.resolve($0) } }
 
     static func == (lhs: MediaAsset, rhs: MediaAsset) -> Bool {
         lhs.id == rhs.id
@@ -436,5 +448,25 @@ struct CGAffineTransformCodable: Codable, Equatable {
 extension Project {
     static func sample() -> Project {
         Project(name: "Projeto Exemplo", sourceVideoURL: URL(fileURLWithPath: "/tmp/sample.mov"), sourceVideoDuration: 600, naturalSize: CGSize(width: 1920, height: 1080), transform: .identity)
+    }
+}
+
+/// Projects store absolute paths, but the app container path can change between runs
+/// (e.g. when Swift Playgrounds reinstalls the app). Falls back to the app's media folders.
+enum StoredFileLocator {
+    private static let folders = ["ClipStudio_Media", "ClipStudio_Thumbnails"]
+
+    static func resolve(_ path: String) -> URL {
+        let url = URL(fileURLWithPath: path)
+        let fileManager = FileManager.default
+        if fileManager.fileExists(atPath: url.path) { return url }
+        guard let docs = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else { return url }
+        for folder in folders {
+            let candidate = docs
+                .appendingPathComponent(folder, isDirectory: true)
+                .appendingPathComponent(url.lastPathComponent)
+            if fileManager.fileExists(atPath: candidate.path) { return candidate }
+        }
+        return url
     }
 }

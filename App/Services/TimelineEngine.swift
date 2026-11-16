@@ -147,7 +147,7 @@ actor TimelineEngine {
         
         let mainStartTime = nextStart(episode.mainTimelineStartTime, duration: episode.mainDuration)
         tracks[.main]?.append(TimelineSegment(
-            id: UUID(),
+            id: episode.id,
             trackType: .main,
             startTime: mainStartTime,
             duration: episode.mainDuration,

@@ -131,13 +131,13 @@ struct MediaLibraryView: View {
     }
 }
 
-private struct AssetTrimRequest: Identifiable {
+struct AssetTrimRequest: Identifiable {
     let id = UUID()
     let asset: MediaAsset
     let track: TrackType
 }
 
-private struct AssetTrimSheet: View {
+struct AssetTrimSheet: View {
     let asset: MediaAsset
     let track: TrackType
     let onAssign: (Double, Double) -> Void
