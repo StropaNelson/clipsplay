@@ -169,7 +169,7 @@ struct StoryItem {
     /// Seconds this clip overlaps the previous one (its incoming transition).
     let overlap: Double
 
-    var end: Double { start + segment.duration }
+    var end: Double { start + segment.timelineDuration }
 }
 
 extension VideoSegment {
@@ -192,6 +192,17 @@ extension VideoSegment {
         get { narrationVolume ?? 1 }
         set { narrationVolume = newValue }
     }
+
+    var playbackSpeed: Double {
+        get { max(0.001, speed ?? 1) }
+        set { speed = newValue == 1 ? nil : newValue }
+    }
+
+    /// Length on the timeline after applying the playback speed.
+    var timelineDuration: Double { duration / playbackSpeed }
+
+    /// Freeze frames are one-frame source ranges stretched over the timeline.
+    var isFreezeFrame: Bool { playbackSpeed < 0.2 }
 }
 
 extension Episode {
@@ -240,12 +251,12 @@ extension Episode {
             let (segment, track) = entry
             var overlap = 0.0
             if index > 0, segment.transition != .none {
-                overlap = max(0, min(segment.transitionDuration, previousDuration / 2, segment.duration / 2))
+                overlap = max(0, min(segment.transitionDuration, previousDuration / 2, segment.timelineDuration / 2))
             }
             let start = max(0, cursor - overlap)
             items.append(StoryItem(segment: segment, track: track, start: start, overlap: overlap))
-            cursor = start + segment.duration
-            previousDuration = segment.duration
+            cursor = start + segment.timelineDuration
+            previousDuration = segment.timelineDuration
         }
         return items
     }

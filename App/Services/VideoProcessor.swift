@@ -162,12 +162,14 @@ actor VideoProcessor {
             at start: CMTime,
             volume: Float,
             fadeIn: Double,
-            fadeOut: Double
+            fadeOut: Double,
+            speed: Double = 1
         ) async throws {
             let available = try await track.load(.timeRange)
             guard let range = intersection(of: sourceRange, with: available) else { return }
-            let placedStart = CMTimeAdd(start, CMTimeSubtract(range.start, sourceRange.start))
-            let end = CMTimeAdd(placedStart, range.duration)
+            let placedStart = CMTimeAdd(start, CMTimeMultiplyByFloat64(CMTimeSubtract(range.start, sourceRange.start), multiplier: 1 / speed))
+            let placedDuration = speed == 1 ? range.duration : CMTimeMultiplyByFloat64(range.duration, multiplier: 1 / speed)
+            let end = CMTimeAdd(placedStart, placedDuration)
             let index: Int
             if let free = audioLanes.firstIndex(where: { CMTimeCompare($0.end, placedStart) <= 0 }) {
                 index = free
@@ -179,6 +181,9 @@ actor VideoProcessor {
                 index = audioLanes.count - 1
             }
             try audioLanes[index].track.insertTimeRange(range, of: track, at: placedStart)
+            if speed != 1 {
+                audioLanes[index].track.scaleTimeRange(CMTimeRange(start: placedStart, duration: range.duration), toDuration: placedDuration)
+            }
             audioLanes[index].end = end
             audioPlacements.append(AudioPlacement(
                 track: audioLanes[index].track,
@@ -218,10 +223,15 @@ actor VideoProcessor {
             }
             var start = CMTime(seconds: segment.timelineStartTime, preferredTimescale: 600)
             if !start.seconds.isFinite || start.seconds < 0 { start = .zero }
-            let end = CMTimeAdd(start, sourceTimeRange.duration)
+            let speed = segment.speed > 0 ? segment.speed : 1
+            let timelineDuration = speed == 1 ? sourceTimeRange.duration : CMTimeMultiplyByFloat64(sourceTimeRange.duration, multiplier: 1 / speed)
+            let end = CMTimeAdd(start, timelineDuration)
             let laneIndex = try videoLane(startingAt: start)
             let compositionVideoTrack = videoLanes[laneIndex].track
             try compositionVideoTrack.insertTimeRange(sourceTimeRange, of: source.video, at: start)
+            if speed != 1 {
+                compositionVideoTrack.scaleTimeRange(CMTimeRange(start: start, duration: sourceTimeRange.duration), toDuration: timelineDuration)
+            }
             videoLanes[laneIndex].end = end
 
             let naturalSize = try await source.video.load(.naturalSize)
@@ -236,21 +246,22 @@ actor VideoProcessor {
             ))
 
             let fadeOut = index + 1 < playable.count ? playable[index + 1].overlapIn : 0
-            if let sourceAudio = source.audio {
+            if let sourceAudio = source.audio, speed >= 0.2 {
                 try await placeAudio(
                     sourceAudio,
                     sourceRange: sourceTimeRange,
                     at: start,
                     volume: segment.clipVolume,
                     fadeIn: segment.overlapIn,
-                    fadeOut: fadeOut
+                    fadeOut: fadeOut,
+                    speed: speed
                 )
             }
             if let narrationID = segment.narrationAssetID,
                let narration = try await audioTrack(ofAsset: narrationID) {
                 let narrationRange = CMTimeRange(
                     start: CMTime(seconds: max(0, segment.narrationOffset), preferredTimescale: 600),
-                    duration: sourceTimeRange.duration
+                    duration: timelineDuration
                 )
                 try await placeAudio(
                     narration,
@@ -449,6 +460,7 @@ actor VideoProcessor {
         guard let exporter = AVAssetExportSession(asset: composition, presetName: preset) else {
             throw ProcessorError.exportSessionUnavailable
         }
+        exporter.audioTimePitchAlgorithm = .spectral
         
         exporter.outputURL = outputURL
         exporter.outputFileType = .mp4
@@ -816,6 +828,7 @@ struct CompositionSegment {
     let narrationAssetID: UUID?
     let narrationVolume: Float
     let narrationOffset: Double
+    var speed: Double = 1
 }
 
 struct CompositionAudioClip {

@@ -544,6 +544,30 @@ struct EditorView: View {
                     Divider().frame(height: 30).overlay(EditorTheme.divider)
                     if segment.trackType == .main {
                         toolButton("Dividir", icon: "scissors") { viewModel.splitAtPlayhead() }
+                        toolButton("Congelar", icon: "snowflake") { viewModel.freezeFrame() }
+                    }
+                    Menu {
+                        ForEach([0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4], id: \.self) { value in
+                            Button {
+                                viewModel.setSpeed(value)
+                            } label: {
+                                if abs(segment.speed - value) < 0.001 {
+                                    Label(Self.speedLabel(value), systemImage: "checkmark")
+                                } else {
+                                    Text(Self.speedLabel(value))
+                                }
+                            }
+                        }
+                    } label: {
+                        VStack(spacing: 4) {
+                            Image(systemName: "speedometer")
+                                .font(.system(size: 19))
+                            Text(segment.isFreeze ? "Congelado" : Self.speedLabel(segment.speed))
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        .foregroundStyle(Color.white.opacity(0.85))
+                        .frame(minWidth: 64, minHeight: 52)
+                        .contentShape(Rectangle())
                     }
                     toolButton("Editar", icon: "slider.horizontal.3") { editingSegment = segment }
                     toolButton("Transição", icon: "square.on.square") { transitionSegment = segment }
@@ -687,6 +711,11 @@ struct EditorView: View {
                     }
                 )
             }
+    }
+
+    static func speedLabel(_ value: Double) -> String {
+        let text = value == value.rounded() ? String(format: "%.0f", value) : String(format: "%g", value)
+        return text.replacingOccurrences(of: ".", with: ",") + "×"
     }
 
     private func toolButton(_ title: String, icon: String, role: ButtonRole? = nil, action: @escaping () -> Void) -> some View {
@@ -1175,7 +1204,7 @@ class EditorViewModel: ObservableObject {
         var updated = segment
         updated.sourceStartTime = start
         updated.sourceEndTime = end
-        updated.duration = end - start
+        updated.duration = (end - start) / segment.speed
         updateSegment(updated)
     }
 
@@ -1192,6 +1221,7 @@ class EditorViewModel: ObservableObject {
             video.clipVolume = segment.clipVolume
             video.narrationAssetID = segment.narrationAssetID
             video.narrationLevel = segment.narrationVolume
+            video.playbackSpeed = segment.speed
         }
         let global = applyToAllEpisodes ?? (segment.trackType != .main)
         guard global, segment.trackType != .main else {
@@ -1285,7 +1315,7 @@ class EditorViewModel: ObservableObject {
             errorMessage = "Posicione o cursor sobre o conteúdo principal (a pelo menos 0,1s das bordas) para dividir."
             return
         }
-        let cut = item.segment.startTime + (time - item.start)
+        let cut = item.segment.startTime + (time - item.start) * item.segment.playbackSpeed
         var newID = UUID()
         mutateSelectedEpisode { episode in
             var clips = episode.mainClips
@@ -1303,12 +1333,71 @@ class EditorViewModel: ObservableObject {
             )
             // The second half keeps playing the narration from where the first half stops.
             second.narrationVolume = first.narrationVolume
-            second.narrationOffset = (first.narrationOffset ?? 0) + first.duration
+            second.narrationOffset = (first.narrationOffset ?? 0) + first.timelineDuration
+            second.speed = first.speed
             newID = second.id
             clips.replaceSubrange(index...index, with: [first, second])
             episode.mainClips = clips
         }
         selectedSegmentID = newID
+    }
+
+    func setSpeed(_ speed: Double) {
+        guard var segment = selectedSegment else { return }
+        segment.speed = speed
+        segment.duration = segment.sourceDuration / speed
+        updateSegment(segment)
+    }
+
+    /// Splits the main clip at the playhead and inserts the current frame held for `seconds`.
+    func freezeFrame(seconds: Double = 2) {
+        guard let episode = selectedEpisode else { return }
+        let time = currentTime
+        guard let item = episode.storyline().first(where: {
+            $0.track == .main && time >= $0.start && time < $0.end
+        }) else {
+            errorMessage = "Posicione o cursor sobre o conteúdo principal para congelar o quadro."
+            return
+        }
+        let frame = 1.0 / 30
+        let cut = min(item.segment.endTime - frame, item.segment.startTime + (time - item.start) * item.segment.playbackSpeed)
+        var freezeID = UUID()
+        mutateSelectedEpisode { episode in
+            var clips = episode.mainClips
+            guard let index = clips.firstIndex(where: { $0.id == item.segment.id }) else { return }
+            let original = clips[index]
+            var freeze = VideoSegment(
+                startTime: cut,
+                endTime: cut + frame,
+                sourceType: original.sourceType,
+                assetID: original.assetID,
+                transitionStyle: TransitionStyle.none
+            )
+            freeze.playbackSpeed = frame / seconds
+            freezeID = freeze.id
+            var replacement: [VideoSegment] = []
+            if cut - original.startTime > 0.05 {
+                var first = original
+                first.endTime = cut
+                replacement.append(first)
+            }
+            replacement.append(freeze)
+            if original.endTime - cut > 0.05 {
+                var second = VideoSegment(
+                    startTime: cut,
+                    endTime: original.endTime,
+                    sourceType: original.sourceType,
+                    assetID: original.assetID,
+                    transitionStyle: TransitionStyle.none,
+                    volume: original.volume
+                )
+                second.speed = original.speed
+                replacement.append(second)
+            }
+            clips.replaceSubrange(index...index, with: replacement)
+            episode.mainClips = clips
+        }
+        selectedSegmentID = freezeID
     }
 
     func duplicateSelected() {
@@ -1328,6 +1417,7 @@ class EditorViewModel: ObservableObject {
                 )
                 copy.narrationVolume = original.narrationVolume
                 copy.narrationOffset = original.narrationOffset
+                copy.speed = original.speed
                 clips.insert(copy, at: index + 1)
                 episode.mainClips = clips
             }
@@ -1849,6 +1939,7 @@ class EditorViewModel: ObservableObject {
                 )
                 guard generation == self.previewGeneration, !Task.isCancelled else { return }
                 let playerItem = AVPlayerItem(asset: output.composition)
+                playerItem.audioTimePitchAlgorithm = .spectral
                 playerItem.videoComposition = output.videoComposition
                 playerItem.audioMix = output.audioMix
                 let player = AVPlayer(playerItem: playerItem)

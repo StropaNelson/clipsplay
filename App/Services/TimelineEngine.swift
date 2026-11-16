@@ -25,7 +25,8 @@ actor TimelineEngine {
                 clipVolume: item.segment.clipVolume,
                 narrationAssetID: item.segment.narrationAssetID,
                 narrationVolume: item.segment.narrationLevel,
-                narrationOffset: item.segment.narrationOffset ?? 0
+                narrationOffset: item.segment.narrationOffset ?? 0,
+                speed: item.segment.playbackSpeed
             )
         }
         let audioClips = episode.resolvedAudioClips(global: project.globalAudioClips).map { clip in
@@ -87,7 +88,7 @@ actor TimelineEngine {
                 id: segment.id,
                 trackType: item.track,
                 startTime: item.start,
-                duration: segment.duration,
+                duration: segment.timelineDuration,
                 sourceStartTime: segment.startTime,
                 sourceEndTime: segment.endTime,
                 sourceType: segment.sourceType,
@@ -98,7 +99,8 @@ actor TimelineEngine {
                 transitionDuration: segment.transitionDuration,
                 clipVolume: segment.clipVolume,
                 narrationAssetID: segment.narrationAssetID,
-                narrationVolume: segment.narrationLevel
+                narrationVolume: segment.narrationLevel,
+                speed: segment.playbackSpeed
             ))
         }
         return TrackType.allCases.compactMap { type in
@@ -184,9 +186,11 @@ struct TimelineSegment: Identifiable {
     var clipVolume: Float = 1
     var narrationAssetID: UUID?
     var narrationVolume: Float = 1
+    var speed: Double = 1
     
     var endTime: Double { startTime + duration }
     var sourceDuration: Double { sourceEndTime - sourceStartTime }
+    var isFreeze: Bool { speed < 0.2 }
 }
 
 struct TrackSegments: Identifiable {

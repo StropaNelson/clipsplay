@@ -340,7 +340,7 @@ struct TimelineView: View {
         let maxSource = max(maxSourceTime(segment), segment.sourceEndTime)
         result.sourceStartTime = min(max(0, segment.sourceStartTime + left), segment.sourceEndTime - 0.1)
         result.sourceEndTime = min(maxSource, max(result.sourceStartTime + 0.1, segment.sourceEndTime + right))
-        result.duration = result.sourceEndTime - result.sourceStartTime
+        result.duration = (result.sourceEndTime - result.sourceStartTime) / segment.speed
         return result
     }
 
