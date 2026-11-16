@@ -95,6 +95,14 @@ struct TextOverlay: Codable, Identifiable, Hashable {
     func isVisible(at time: Double) -> Bool {
         time >= startTime && time < endTime
     }
+
+    static let highlightColor = Color(red: 1, green: 0.84, blue: 0.04)
+
+    /// Word timings, only while they still match the text (editing the text drops the highlight).
+    var highlightWords: [TranscriptWord]? {
+        guard let words, !words.isEmpty, words.map(\.text).joined(separator: " ") == text else { return nil }
+        return words
+    }
 }
 
 enum AudioClipKind: String, Codable, CaseIterable, Identifiable {

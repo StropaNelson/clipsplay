@@ -435,8 +435,57 @@ actor VideoProcessor {
         }
         container.addSublayer(text)
 
+        if let words = overlay.highlightWords {
+            let color = overlay.color.uiColor.cgColor
+            let highlight = UIColor(TextOverlay.highlightColor).cgColor
+            let ctFont = CTFontCreateWithName(font.fontName as CFString, fontSize, nil)
+            text.string = Self.captionString(words, highlighted: nil, font: ctFont, base: color, highlight: highlight)
+            for (index, word) in words.enumerated() {
+                let layer = CATextLayer()
+                layer.string = Self.captionString(words, highlighted: index, font: ctFont, base: UIColor.clear.cgColor, highlight: highlight)
+                layer.alignmentMode = .center
+                layer.isWrapped = true
+                layer.contentsScale = 2
+                layer.frame = text.frame
+                let end = index + 1 < words.count ? words[index + 1].start : overlay.duration
+                Self.addWindow(to: layer, start: overlay.startTime + word.start, duration: max(0.01, end - word.start))
+                container.addSublayer(layer)
+            }
+        }
+
         addVisibility(to: container, start: overlay.startTime, duration: overlay.duration)
         return container
+    }
+
+    private static func captionString(_ words: [TranscriptWord], highlighted: Int?, font: CTFont, base: CGColor, highlight: CGColor) -> NSAttributedString {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        let result = NSMutableAttributedString()
+        for (index, word) in words.enumerated() {
+            let color = index == highlighted ? highlight : base
+            result.append(NSAttributedString(
+                string: (index == 0 ? "" : " ") + word.text,
+                attributes: [
+                    NSAttributedString.Key(kCTFontAttributeName as String): font,
+                    NSAttributedString.Key(kCTForegroundColorAttributeName as String): color,
+                    .paragraphStyle: paragraph
+                ]
+            ))
+        }
+        return result
+    }
+
+    /// Shows a layer only between `start` and `start + duration`, with no fade.
+    private static func addWindow(to layer: CALayer, start: Double, duration: Double) {
+        layer.opacity = 0
+        let animation = CABasicAnimation(keyPath: "opacity")
+        animation.fromValue = 1
+        animation.toValue = 1
+        animation.beginTime = start <= 0 ? AVCoreAnimationBeginTimeAtZero : start
+        animation.duration = duration
+        animation.fillMode = .removed
+        animation.isRemovedOnCompletion = false
+        layer.add(animation, forKey: "window")
     }
 
     private static func addVisibility(to layer: CALayer, start: Double, duration: Double, opacity: Double = 1) {

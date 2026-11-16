@@ -4,13 +4,13 @@ import UniformTypeIdentifiers
 struct TranscriptionView: View {
     let project: Project
     let onTranscriptChange: (String) -> Void
-    let onApplyCaptions: ([TranscriptCue]) -> Void
+    let onApplyCaptions: ([TranscriptCue], Bool) -> Void
     let onWords: ([TranscriptWord]) -> Void
 
     init(
         project: Project,
         onTranscriptChange: @escaping (String) -> Void,
-        onApplyCaptions: @escaping ([TranscriptCue]) -> Void,
+        onApplyCaptions: @escaping ([TranscriptCue], Bool) -> Void,
         onWords: @escaping ([TranscriptWord]) -> Void = { _ in }
     ) {
         self.project = project
@@ -28,6 +28,7 @@ struct TranscriptionView: View {
     @State private var errorMessage: String?
     @State private var localeIdentifier = "pt-BR"
     @State private var allowServer = false
+    @State private var dynamicCaptions = false
 
     private let languages: [(id: String, name: String)] = [
         ("pt-BR", "Português (Brasil)"),
@@ -78,6 +79,10 @@ struct TranscriptionView: View {
             }
             .safeAreaInset(edge: .bottom) {
                 if !transcript.isEmpty && !isTranscribing {
+                  VStack(spacing: 8) {
+                    Toggle("Legendas dinâmicas (poucas palavras, destaca a palavra falada)", isOn: $dynamicCaptions)
+                        .font(.footnote)
+                        .padding(.horizontal)
                     Button {
                         applyCaptions()
                     } label: {
@@ -86,7 +91,9 @@ struct TranscriptionView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
-                    .padding()
+                    .padding(.horizontal)
+                  }
+                  .padding(.vertical)
                 }
             }
             .padding()
@@ -163,7 +170,9 @@ struct TranscriptionView: View {
                 }
             }
             let contents = try String(contentsOf: url, encoding: .utf8)
-            transcript = SubtitleFile.srt(from: try SubtitleFile.parse(contents))
+            let cues = try SubtitleFile.parse(contents)
+            transcript = SubtitleFile.srt(from: cues)
+            onWords(cues.flatMap { TranscriptWord.spread($0.text, from: $0.startTime, to: $0.endTime) })
             errorMessage = nil
         } catch {
             if (error as NSError).code != NSUserCancelledError {
@@ -175,7 +184,7 @@ struct TranscriptionView: View {
     private func applyCaptions() {
         do {
             let cues = try SubtitleFile.parse(transcript)
-            onApplyCaptions(cues)
+            onApplyCaptions(cues, dynamicCaptions)
             dismiss()
         } catch {
             errorMessage = "Não foi possível ler as legendas: \(error.localizedDescription)"

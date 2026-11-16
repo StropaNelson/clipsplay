@@ -47,6 +47,7 @@ struct EditorView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var showingTranscription = false
+    @State private var showingTranscriptEditor = false
     @State private var sidePanel: EditorPanel? = .media
     @State private var sheetPanel: EditorPanel?
     @State private var clipPickRequest: ClipPickRequest?
@@ -130,11 +131,16 @@ struct EditorView: View {
         .sheet(isPresented: $viewModel.showExportProgress) {
             ExportProgressView(viewModel: viewModel)
         }
+        .sheet(isPresented: $showingTranscriptEditor) {
+            TranscriptEditorView(words: viewModel.editableTranscriptWords) { ranges in
+                viewModel.removeSourceRanges(ranges)
+            }
+        }
         .sheet(isPresented: $showingTranscription) {
             TranscriptionView(
                 project: viewModel.currentProject,
                 onTranscriptChange: { viewModel.saveTranscript($0) },
-                onApplyCaptions: { viewModel.applyCaptions($0) },
+                onApplyCaptions: { viewModel.applyCaptions($0, dynamic: $1) },
                 onWords: { viewModel.saveTranscriptWords($0) }
             )
         }
@@ -421,6 +427,7 @@ struct EditorView: View {
                     )
                     TextOverlayLayer(
                         overlays: viewModel.visibleOverlays,
+                        currentTime: viewModel.currentTime,
                         selectedID: viewModel.selectedSegmentID,
                         onSelect: { viewModel.selectedSegmentID = $0 },
                         onMove: { id, x, y, finished in viewModel.moveOverlay(id, x: x, y: y, finished: finished) }
@@ -640,6 +647,13 @@ struct EditorView: View {
                     toolButton("Encerramento", icon: "flag.checkered") { clipPickRequest = ClipPickRequest(track: .outro) }
                     Divider().frame(height: 30).overlay(EditorTheme.divider)
                     toolButton("Legendas", icon: "captions.bubble") { showingTranscription = true }
+                    toolButton("Editar fala", icon: "text.badge.minus") {
+                        if viewModel.editableTranscriptWords.isEmpty {
+                            viewModel.errorMessage = "Gere a transcrição primeiro em Legendas."
+                        } else {
+                            showingTranscriptEditor = true
+                        }
+                    }
                     toolButton("Importar", icon: "plus.rectangle.on.folder") { viewModel.showImportAsset = true }
                 }
             }
@@ -1528,6 +1542,13 @@ class EditorViewModel: ObservableObject {
 
     // MARK: Captions
 
+    /// Word timings for text-based editing; estimated from the subtitle text when none were recognized.
+    var editableTranscriptWords: [TranscriptWord] {
+        if let words = project.transcriptWords, !words.isEmpty { return words }
+        guard let srt = project.transcriptSRT, let cues = try? SubtitleFile.parse(srt) else { return [] }
+        return cues.flatMap { TranscriptWord.spread($0.text, from: $0.startTime, to: $0.endTime) }
+    }
+
     func saveTranscriptWords(_ words: [TranscriptWord]) {
         project.transcriptWords = words
         Task { await persistProjectChanges(reloadPreview: false) }
@@ -1545,39 +1566,96 @@ class EditorViewModel: ObservableObject {
 
     /// Converts transcript cues (timed against the source video) into caption overlays in every
     /// episode, following each main clip's position on that episode's timeline.
-    func applyCaptions(_ cues: [TranscriptCue]) {
-        checkpoint()
+    func applyCaptions(_ cues: [TranscriptCue], dynamic: Bool = false, recordUndo: Bool = true) {
+        if recordUndo { checkpoint() }
+        let words = project.transcriptWords ?? []
         var total = 0
         for index in episodes.indices {
             var overlays = episodes[index].textOverlays.filter { $0.isCaption != true }
             for item in episodes[index].storyline() where item.track == .main && item.segment.sourceType == .mainVideo {
                 let clip = item.segment
+                let speed = clip.playbackSpeed
+                func timeline(_ source: Double) -> Double { item.start + (source - clip.startTime) / speed }
                 for cue in cues where cue.endTime > clip.startTime && cue.startTime < clip.endTime {
                     let start = max(cue.startTime, clip.startTime)
                     let end = min(cue.endTime, clip.endTime)
                     guard end - start >= 0.2 else { continue }
-                    let speed = clip.playbackSpeed
-                    overlays.append(TextOverlay(
-                        text: cue.text,
-                        startTime: item.start + (start - clip.startTime) / speed,
-                        duration: (end - start) / speed,
-                        positionX: 0.5,
-                        positionY: 0.86,
-                        fontScale: 0.05,
-                        color: .white,
-                        style: .box,
-                        isBold: false,
-                        isCaption: true
-                    ))
-                    total += 1
+                    if dynamic {
+                        var cueWords = words.filter { word in
+                            let middle = (word.start + word.end) / 2
+                            return middle >= cue.startTime && middle < cue.endTime
+                        }
+                        if cueWords.isEmpty {
+                            cueWords = TranscriptWord.spread(cue.text, from: cue.startTime, to: cue.endTime)
+                        }
+                        cueWords = cueWords.filter { word in
+                            let middle = (word.start + word.end) / 2
+                            return middle >= clip.startTime && middle < clip.endTime
+                        }
+                        for group in Self.captionGroups(cueWords) {
+                            let groupStart = max(group[0].start, clip.startTime)
+                            let groupEnd = min(group[group.count - 1].end, clip.endTime)
+                            guard groupEnd > groupStart else { continue }
+                            var overlay = Self.captionOverlay(
+                                text: group.map(\.text).joined(separator: " "),
+                                start: timeline(groupStart),
+                                duration: max(0.2, (groupEnd - groupStart) / speed)
+                            )
+                            overlay.words = group.map { word in
+                                TranscriptWord(
+                                    text: word.text,
+                                    start: (max(word.start, groupStart) - groupStart) / speed,
+                                    end: (min(word.end, groupEnd) - groupStart) / speed
+                                )
+                            }
+                            overlays.append(overlay)
+                            total += 1
+                        }
+                    } else {
+                        overlays.append(Self.captionOverlay(text: cue.text, start: timeline(start), duration: (end - start) / speed))
+                        total += 1
+                    }
                 }
             }
             episodes[index].textOverlays = overlays
         }
+        if let index = selectedEpisodeIndex { selectedEpisode = episodes[index] }
         if total == 0 {
             errorMessage = "Nenhuma legenda caiu dentro do conteúdo principal dos episódios."
         }
         Task { await persistProjectChanges(reloadPreview: false) }
+    }
+
+    /// Short punchy groups for dynamic captions: up to 3 words, split on pauses and sentence ends.
+    static func captionGroups(_ words: [TranscriptWord]) -> [[TranscriptWord]] {
+        var groups: [[TranscriptWord]] = []
+        var current: [TranscriptWord] = []
+        for word in words {
+            if let last = current.last,
+               current.count >= 3 || word.start - last.end > 0.5
+                || last.text.rangeOfCharacter(from: CharacterSet(charactersIn: ".!?,")) != nil {
+                groups.append(current)
+                current = []
+            }
+            current.append(word)
+        }
+        if !current.isEmpty { groups.append(current) }
+        return groups
+    }
+
+    private static func captionOverlay(text: String, start: Double, duration: Double) -> TextOverlay {
+        TextOverlay(
+            text: text,
+            startTime: start,
+            duration: duration,
+            positionX: 0.5,
+            positionY: 0.86,
+            fontScale: 0.05,
+            color: .white,
+            style: .box,
+            isBold: false,
+            isCaption: true
+        )
     }
 
     // MARK: Audio
@@ -2052,7 +2130,6 @@ class EditorViewModel: ObservableObject {
     func rippleDeleteBetweenMarkers() {
         guard let range = rippleRange, let episode = selectedEpisode else { return }
         let items = episode.storyline().filter { $0.track == .main }
-        let removed = range.upperBound - range.lowerBound
         var touched = false
         var emptied = false
         mutateSelectedEpisode { episode in
@@ -2080,6 +2157,22 @@ class EditorViewModel: ObservableObject {
                 return
             }
             episode.mainClips = result
+            Self.closeGaps(in: &episode, removing: [range])
+        }
+        if !touched {
+            errorMessage = "Não há conteúdo principal entre os marcadores."
+        } else if emptied {
+            errorMessage = "Não é possível remover todo o conteúdo principal do episódio."
+        } else {
+            seek(to: range.lowerBound)
+        }
+    }
+
+    /// Shifts episode text, audio, PiP and markers left over removed timeline intervals,
+    /// dropping the items that fell inside them.
+    static func closeGaps(in episode: inout Episode, removing intervals: [ClosedRange<Double>]) {
+        for range in intervals.sorted(by: { $0.lowerBound > $1.lowerBound }) {
+            let removed = range.upperBound - range.lowerBound
             func shifted(_ start: Double, _ duration: Double) -> Double? {
                 if start + duration <= range.lowerBound + 0.001 { return start }
                 if start >= range.upperBound - 0.001 { return start - removed }
@@ -2104,20 +2197,87 @@ class EditorViewModel: ObservableObject {
                 return moved
             }
             episode.markers = episode.markers.compactMap { marker in
-                if marker.time <= range.lowerBound + 0.001 { return marker }
-                if marker.time < range.upperBound - 0.001 { return nil }
+                guard let time = shifted(marker.time, 0) else { return nil }
                 var moved = marker
-                moved.time -= removed
+                moved.time = time
                 return moved
             }
         }
-        if !touched {
-            errorMessage = "Não há conteúdo principal entre os marcadores."
-        } else if emptied {
-            errorMessage = "Não é possível remover todo o conteúdo principal do episódio."
-        } else {
-            seek(to: range.lowerBound)
+    }
+
+    /// Cuts source-video time ranges (from the transcript) out of every episode's main content.
+    func removeSourceRanges(_ ranges: [ClosedRange<Double>]) {
+        let merged = Self.merge(ranges)
+        guard !merged.isEmpty else { return }
+        checkpoint()
+        let hadCaptions = episodes.contains { $0.textOverlays.contains { $0.isCaption == true } }
+        var changed = 0
+        for index in episodes.indices {
+            var episode = episodes[index]
+            let items = episode.storyline()
+            var removedTimeline: [ClosedRange<Double>] = []
+            var clips: [VideoSegment] = []
+            for clip in episode.mainClips {
+                guard clip.sourceType == .mainVideo, !clip.isFreezeFrame,
+                      let item = items.first(where: { $0.segment.id == clip.id }) else {
+                    clips.append(clip)
+                    continue
+                }
+                let speed = clip.playbackSpeed
+                var cursor = clip.startTime
+                var touched = false
+                var pieces: [VideoSegment] = []
+                for range in merged where range.upperBound > clip.startTime && range.lowerBound < clip.endTime {
+                    let lower = max(range.lowerBound, clip.startTime)
+                    let upper = min(range.upperBound, clip.endTime)
+                    if lower - cursor > 0.05 {
+                        var piece = cursor == clip.startTime ? clip : clip.continuation(from: cursor)
+                        piece.endTime = lower
+                        pieces.append(piece)
+                    }
+                    removedTimeline.append((item.start + (lower - clip.startTime) / speed)...(item.start + (upper - clip.startTime) / speed))
+                    cursor = upper
+                    touched = true
+                }
+                guard touched else {
+                    clips.append(clip)
+                    continue
+                }
+                if clip.endTime - cursor > 0.05 { pieces.append(clip.continuation(from: cursor)) }
+                clips.append(contentsOf: pieces)
+            }
+            guard !removedTimeline.isEmpty, !clips.isEmpty else { continue }
+            episode.mainClips = clips
+            Self.closeGaps(in: &episode, removing: removedTimeline)
+            episode.clearTimelinePins()
+            episodes[index] = episode
+            changed += 1
         }
+        guard changed > 0 else {
+            errorMessage = "Os trechos escolhidos não estão no conteúdo principal dos episódios."
+            return
+        }
+        if let index = selectedEpisodeIndex { selectedEpisode = episodes[index] }
+        if hadCaptions, let srt = project.transcriptSRT, let cues = try? SubtitleFile.parse(srt) {
+            applyCaptions(cues, dynamic: captionsAreDynamic, recordUndo: false)
+        }
+        Task { await persistProjectChanges() }
+    }
+
+    static func merge(_ ranges: [ClosedRange<Double>]) -> [ClosedRange<Double>] {
+        var result: [ClosedRange<Double>] = []
+        for range in ranges.sorted(by: { $0.lowerBound < $1.lowerBound }) where range.upperBound > range.lowerBound {
+            if let last = result.last, range.lowerBound <= last.upperBound + 0.02 {
+                result[result.count - 1] = last.lowerBound...max(last.upperBound, range.upperBound)
+            } else {
+                result.append(range)
+            }
+        }
+        return result
+    }
+
+    private var captionsAreDynamic: Bool {
+        episodes.contains { $0.textOverlays.contains { $0.isCaption == true && $0.words != nil } }
     }
 
     func stepFrame(by frames: Int) {

@@ -275,6 +275,7 @@ struct TextOverlayEditorSheet: View {
 /// Draws text overlays over the preview with the same geometry used for export.
 struct TextOverlayLayer: View {
     let overlays: [TextOverlay]
+    var currentTime: Double = 0
     let selectedID: UUID?
     let onSelect: (UUID) -> Void
     let onMove: (UUID, Double, Double, Bool) -> Void
@@ -284,7 +285,7 @@ struct TextOverlayLayer: View {
             let size = geometry.size
             ZStack {
                 ForEach(overlays) { overlay in
-                    TextOverlayLabel(overlay: overlay, canvasSize: size, isSelected: overlay.id == selectedID)
+                    TextOverlayLabel(overlay: overlay, canvasSize: size, isSelected: overlay.id == selectedID, time: currentTime)
                         .position(x: overlay.positionX * size.width, y: overlay.positionY * size.height)
                         .onTapGesture { onSelect(overlay.id) }
                         .gesture(
@@ -312,10 +313,21 @@ struct TextOverlayLabel: View {
     let overlay: TextOverlay
     let canvasSize: CGSize
     let isSelected: Bool
+    var time: Double = 0
+
+    private var label: Text {
+        guard let words = overlay.highlightWords else { return Text(overlay.text) }
+        let local = time - overlay.startTime
+        return words.enumerated().reduce(Text("")) { result, entry in
+            let spoken = local >= entry.element.start && local < entry.element.end
+            let word = Text((entry.offset == 0 ? "" : " ") + entry.element.text)
+            return result + (spoken ? word.foregroundColor(TextOverlay.highlightColor) : word)
+        }
+    }
 
     var body: some View {
         let fontSize = max(6, CGFloat(overlay.fontScale) * canvasSize.height)
-        Text(overlay.text)
+        label
             .font(.system(size: fontSize, weight: overlay.isBold ? .bold : .regular))
             .foregroundStyle(overlay.color.color)
             .multilineTextAlignment(.center)
