@@ -99,6 +99,7 @@ struct TimelineView: View {
     var body: some View {
         GeometryReader { geometry in
             VStack(spacing: 0) {
+                scrubber
                 ScrollView(.vertical, showsIndicators: false) {
                     HStack(alignment: .top, spacing: 0) {
                         trackHeaders
@@ -186,6 +187,7 @@ struct TimelineView: View {
             playhead
         }
         .frame(width: contentWidth, height: contentHeight, alignment: .topLeading)
+        .coordinateSpace(name: "timelineContent")
         .onDrop(of: [UTType.plainText], isTargeted: nil) { providers, location in
             handleDrop(providers, at: location)
         }
@@ -657,15 +659,70 @@ struct TimelineView: View {
             Rectangle()
                 .fill(Color.white)
                 .frame(width: 2, height: contentHeight)
-            Circle()
+                .allowsHitTesting(false)
+            // Grab handle on the ruler: drag it to move the playhead.
+            RoundedRectangle(cornerRadius: 3)
                 .fill(Color.white)
-                .frame(width: 10, height: 10)
-                .offset(y: -3)
+                .frame(width: 14, height: 18)
+                .frame(width: 36, height: rulerHeight + 4)
+                .contentShape(Rectangle())
+                .highPriorityGesture(
+                    DragGesture(minimumDistance: 0, coordinateSpace: .named("timelineContent"))
+                        .onChanged { value in onSeek(time(at: value.location.x)) }
+                )
         }
         .shadow(color: .black.opacity(0.6), radius: 2)
-        .offset(x: x - 5)
-        .frame(width: 10, alignment: .top)
-        .allowsHitTesting(false)
+        .frame(width: 36, alignment: .top)
+        .offset(x: x - 18)
+    }
+
+    /// Always-visible seconds ruler for the whole episode; drag anywhere on it to scrub.
+    private var scrubber: some View {
+        GeometryReader { proxy in
+            let inset: CGFloat = 12
+            let width = max(proxy.size.width - inset * 2, 1)
+            let duration = safeDuration
+            let step = majorTickInterval(pps: width / CGFloat(duration) * 1.2)
+            let markerTimes = markers
+            let now = min(max(currentTime, 0), duration)
+            ZStack(alignment: .topLeading) {
+                Canvas { context, size in
+                    var t = 0.0
+                    while t <= duration + 0.0001 {
+                        let x = inset + CGFloat(t / duration) * width
+                        context.fill(Path(CGRect(x: x, y: size.height - 8, width: 1, height: 8)), with: .color(.white.opacity(0.4)))
+                        context.draw(
+                            Text(Self.rulerLabel(t)).font(.system(size: 9, weight: .medium).monospacedDigit()).foregroundColor(.white.opacity(0.55)),
+                            at: CGPoint(x: x + 3, y: 3),
+                            anchor: .topLeading
+                        )
+                        let half = t + step / 2
+                        if half < duration {
+                            let hx = inset + CGFloat(half / duration) * width
+                            context.fill(Path(CGRect(x: hx, y: size.height - 4, width: 1, height: 4)), with: .color(.white.opacity(0.25)))
+                        }
+                        t += step
+                    }
+                    for marker in markerTimes {
+                        let x = inset + CGFloat(marker / duration) * width
+                        context.fill(Path(CGRect(x: x - 1, y: 0, width: 2, height: size.height)), with: .color(.orange.opacity(0.8)))
+                    }
+                    let px = inset + CGFloat(now / duration) * width
+                    context.fill(Path(CGRect(x: inset, y: size.height - 2, width: px - inset, height: 2)), with: .color(EditorTheme.accent))
+                    context.fill(Path(roundedRect: CGRect(x: px - 2, y: 0, width: 4, height: size.height), cornerRadius: 2), with: .color(.white))
+                }
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        let fraction = min(max((value.location.x - inset) / width, 0), 1)
+                        onSeek(Double(fraction) * duration)
+                    }
+            )
+        }
+        .frame(height: 26)
+        .background(EditorTheme.panelRaised.opacity(0.6))
     }
 
     private func zoomBar(width: CGFloat) -> some View {
