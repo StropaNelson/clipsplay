@@ -111,8 +111,8 @@ actor VideoProcessor {
         fitMode: FitMode
     ) async throws -> CompositionBuildResult {
         let asset = AVURLAsset(url: sourceURL)
-        let videoTracks = try await asset.loadTracks(withMediaType: .video)
-        guard let sourceVideo = videoTracks.first else { throw ProcessorError.noVideoTrack }
+        let sourceVideoTracks = try await asset.loadTracks(withMediaType: .video)
+        guard let sourceVideo = sourceVideoTracks.first else { throw ProcessorError.noVideoTrack }
         let sourceAudioTracks = try await asset.loadTracks(withMediaType: .audio)
         let sourceAudio = sourceAudioTracks.first
         let sourceSize = try await sourceVideo.load(.naturalSize)

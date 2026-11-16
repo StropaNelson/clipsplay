@@ -456,7 +456,7 @@ class EditorViewModel: ObservableObject {
     
     func updateTimelineTracks(_ tracks: [TrackType: [TimelineSegment]]) {
         timelineTracks = tracks
-        guard let selectedEpisode,
+        guard let selectedEpisode = self.selectedEpisode,
               let episodeIndex = episodes.firstIndex(where: { $0.id == selectedEpisode.id }) else { return }
 
         var updatedEpisode = episodes[episodeIndex]
