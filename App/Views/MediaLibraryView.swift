@@ -517,14 +517,19 @@ struct AssetImportSheet: View {
             }
             do {
                 guard let data = try await item.loadTransferable(type: Data.self),
-                      let image = UIImage(data: data),
-                      let jpeg = image.jpegData(compressionQuality: 0.92) else {
+                      let image = UIImage(data: data) else {
+                    errorMessage = "Não foi possível ler a imagem selecionada."
+                    return
+                }
+                let alpha = image.cgImage?.alphaInfo ?? .none
+                let hasAlpha = ![.none, .noneSkipFirst, .noneSkipLast].contains(alpha)
+                guard let encoded = hasAlpha ? image.pngData() : image.jpegData(compressionQuality: 0.92) else {
                     errorMessage = "Não foi possível ler a imagem selecionada."
                     return
                 }
                 let url = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("imagem_\(UUID().uuidString).jpg")
-                try jpeg.write(to: url, options: .atomic)
+                    .appendingPathComponent("imagem_\(UUID().uuidString).\(hasAlpha ? "png" : "jpg")")
+                try encoded.write(to: url, options: .atomic)
                 defer { try? FileManager.default.removeItem(at: url) }
                 let asset = try await importer.importMediaAsset(from: url, type: .image)
                 onComplete(asset)
