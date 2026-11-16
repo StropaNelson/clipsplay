@@ -69,6 +69,7 @@ struct TimelineView: View {
     let onAddOverlay: () -> Void
     let onMoveMediaOverlay: (UUID, Double, Double, Double) -> Void
     let onDropAsset: (UUID, TrackType, Double) -> Void
+    let onReorderMain: (UUID, Double) -> Void
 
     private struct LaneDrag {
         let id: UUID
@@ -81,6 +82,7 @@ struct TimelineView: View {
     @State private var pinchBase: CGFloat?
     @State private var didFit = false
     @State private var laneDrag: LaneDrag?
+    @State private var reorderDrag: (id: UUID, offset: CGFloat)?
 
     private let headerWidth: CGFloat = 64
     private let leadingInset: CGFloat = 76
@@ -273,9 +275,13 @@ struct TimelineView: View {
 
             ForEach(ordered) { segment in
                 let drag = laneDrag?.id == segment.id ? laneDrag : nil
-                let display = trimmed(segment, left: drag?.left ?? 0, right: drag?.right ?? 0)
+                let display = (drag?.move ?? 0) != 0
+                    ? slipped(segment, by: drag?.move ?? 0)
+                    : trimmed(segment, left: drag?.left ?? 0, right: drag?.right ?? 0)
                 let width = max(8, CGFloat(display.duration) * pixelsPerSecond)
                 let isSelected = segment.id == selectedID
+                let isMainPiece = segment.sourceType == .mainVideo || segment.sourceType == .clipAsset
+                let reorderOffset = reorderDrag?.id == segment.id ? reorderDrag?.offset ?? 0 : 0
                 TimelineClipView(
                     segment: display,
                     width: width,
@@ -283,6 +289,14 @@ struct TimelineView: View {
                     isSelected: isSelected,
                     sourceURL: sourceURL(segment)
                 )
+                .onTapGesture { onSelect(segment.id) }
+                // Selected clip: drag the body to slip (change which part of the source is used).
+                .highPriorityGesture(isSelected ? laneGesture(id: segment.id, part: .move) { move, _, _ in
+                    let result = slipped(segment, by: move)
+                    onTrimSegment(segment, result.sourceStartTime, result.sourceEndTime)
+                } : nil)
+                // Main pieces: long-press then drag to reorder.
+                .gesture(isMainPiece && !isSelected ? reorderGesture(for: segment) : nil)
                 .overlay(alignment: .leading) {
                     if isSelected {
                         edgeHandle(height: clipHeight)
@@ -299,8 +313,10 @@ struct TimelineView: View {
                             })
                     }
                 }
-                .offset(x: xPosition(for: segment.startTime))
-                .onTapGesture { onSelect(segment.id) }
+                .scaleEffect(reorderOffset != 0 ? 1.04 : 1)
+                .shadow(color: .black.opacity(reorderOffset != 0 ? 0.6 : 0), radius: 6)
+                .offset(x: xPosition(for: segment.startTime) + reorderOffset)
+                .zIndex(reorderOffset != 0 ? 1 : 0)
             }
 
             ForEach(Array(ordered.enumerated()).filter { $0.offset > 0 }, id: \.element.id) { _, segment in
@@ -326,6 +342,32 @@ struct TimelineView: View {
         result.sourceEndTime = min(maxSource, max(result.sourceStartTime + 0.1, segment.sourceEndTime + right))
         result.duration = result.sourceEndTime - result.sourceStartTime
         return result
+    }
+
+    private func slipped(_ segment: TimelineSegment, by seconds: Double) -> TimelineSegment {
+        var result = segment
+        let maxSource = max(maxSourceTime(segment), segment.sourceEndTime)
+        let length = segment.sourceEndTime - segment.sourceStartTime
+        let start = min(max(0, segment.sourceStartTime - seconds), max(0, maxSource - length))
+        result.sourceStartTime = start
+        result.sourceEndTime = start + length
+        return result
+    }
+
+    private func reorderGesture(for segment: TimelineSegment) -> some Gesture {
+        LongPressGesture(minimumDuration: 0.35)
+            .sequenced(before: DragGesture(minimumDistance: 0))
+            .onChanged { value in
+                if case .second(true, let drag) = value {
+                    reorderDrag = (segment.id, drag?.translation.width ?? 0)
+                }
+            }
+            .onEnded { value in
+                defer { reorderDrag = nil }
+                guard case .second(true, let drag) = value, let drag else { return }
+                let center = segment.startTime + segment.duration / 2 + Double(drag.translation.width / pixelsPerSecond)
+                onReorderMain(segment.id, center)
+            }
     }
 
     private func commitTrim(_ segment: TimelineSegment, left: Double, right: Double) {

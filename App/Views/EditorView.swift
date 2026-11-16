@@ -102,7 +102,8 @@ struct EditorView: View {
                     onMoveAudio: { viewModel.updateAudioClip($0) },
                     onAddOverlay: { showingAddOverlay = true },
                     onMoveMediaOverlay: { viewModel.retimeMediaOverlay($0, move: $1, left: $2, right: $3) },
-                    onDropAsset: { viewModel.dropAsset($0, on: $1, at: $2) }
+                    onDropAsset: { viewModel.dropAsset($0, on: $1, at: $2) },
+                    onReorderMain: { viewModel.reorderMainClip($0, toTime: $1) }
                 )
                 .frame(maxHeight: .infinity)
                 Divider().overlay(EditorTheme.divider)
@@ -1247,6 +1248,18 @@ class EditorViewModel: ObservableObject {
             clips.swapAt(index, target)
             episode.mainClips = clips
         }
+    }
+
+    /// Places a main piece among the others according to where it was dropped on the timeline.
+    func reorderMainClip(_ id: UUID, toTime time: Double) {
+        let midpoints = Dictionary(orderedSegments.map { ($0.id, $0.startTime + $0.duration / 2) }, uniquingKeysWith: { first, _ in first })
+        guard let clips = selectedEpisode?.mainClips, let index = clips.firstIndex(where: { $0.id == id }) else { return }
+        var others = clips
+        let clip = others.remove(at: index)
+        let target = others.filter { (midpoints[$0.id] ?? 0) < time }.count
+        guard target != index else { return }
+        others.insert(clip, at: target)
+        mutateSelectedEpisode { $0.mainClips = others }
     }
 
     func canMoveMainClip(_ id: UUID, by offset: Int) -> Bool {
