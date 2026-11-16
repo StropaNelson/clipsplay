@@ -127,6 +127,16 @@ struct AudioClip: Codable, Identifiable, Hashable {
 }
 
 /// Picture-in-picture image or video placed above the main video.
+/// User framing of a clip on top of the fit/fill layout. Offsets are fractions of the frame.
+struct ClipTransform: Codable, Hashable {
+    var scale: Double = 1
+    var rotation: Double = 0
+    var offsetX: Double = 0
+    var offsetY: Double = 0
+
+    static let identity = ClipTransform()
+}
+
 struct TimelineMarker: Codable, Identifiable, Hashable {
     var id = UUID()
     var time: Double
@@ -146,6 +156,18 @@ struct MediaOverlay: Codable, Identifiable, Hashable {
     /// Width as a fraction of the video width.
     var widthFraction: Double = 0.4
     var volume: Float = 0
+    var storedOpacity: Double?
+    var storedRotation: Double?
+
+    var opacity: Double {
+        get { storedOpacity ?? 1 }
+        set { storedOpacity = newValue }
+    }
+
+    var rotation: Double {
+        get { storedRotation ?? 0 }
+        set { storedRotation = newValue }
+    }
 
     var endTime: Double { startTime + duration }
 
@@ -200,6 +222,23 @@ extension VideoSegment {
 
     /// Length on the timeline after applying the playback speed.
     var timelineDuration: Double { duration / playbackSpeed }
+
+    var clipTransform: ClipTransform {
+        get {
+            ClipTransform(
+                scale: transformScale ?? 1,
+                rotation: transformRotation ?? 0,
+                offsetX: transformOffsetX ?? 0,
+                offsetY: transformOffsetY ?? 0
+            )
+        }
+        set {
+            transformScale = newValue.scale == 1 ? nil : newValue.scale
+            transformRotation = newValue.rotation == 0 ? nil : newValue.rotation
+            transformOffsetX = newValue.offsetX == 0 ? nil : newValue.offsetX
+            transformOffsetY = newValue.offsetY == 0 ? nil : newValue.offsetY
+        }
+    }
 
     /// Freeze frames are one-frame source ranges stretched over the timeline.
     var isFreezeFrame: Bool { playbackSpeed < 0.2 }

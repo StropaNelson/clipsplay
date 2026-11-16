@@ -242,7 +242,8 @@ actor VideoProcessor {
                 end: end,
                 naturalSize: naturalSize,
                 preferredTransform: preferredTransform,
-                transition: segment.transition
+                transition: segment.transition,
+                transform: segment.transform
             ))
 
             let fadeOut = index + 1 < playable.count ? playable[index + 1].overlapIn : 0
@@ -325,7 +326,9 @@ actor VideoProcessor {
                 preferredTransform: overlayTransform,
                 centerX: overlay.centerX,
                 centerY: overlay.centerY,
-                widthFraction: overlay.widthFraction
+                widthFraction: overlay.widthFraction,
+                opacity: overlay.opacity,
+                rotation: overlay.rotation
             ))
             if overlay.volume > 0, let audio = try await overlayAsset.loadTracks(withMediaType: .audio).first {
                 try await placeAudio(audio, sourceRange: range, at: start, volume: overlay.volume, fadeIn: 0, fadeOut: 0)
@@ -381,6 +384,8 @@ actor VideoProcessor {
             layer.position = CGPoint(x: overlay.centerX * size.width, y: overlay.centerY * size.height)
             layer.contents = render.image
             layer.contentsGravity = .resizeAspect
+            layer.opacity = Float(overlay.opacity)
+            layer.setAffineTransform(CGAffineTransform(rotationAngle: CGFloat(overlay.rotation * .pi / 180)))
             Self.addVisibility(to: layer, start: overlay.startTime, duration: overlay.duration)
             parent.addSublayer(layer)
         }
@@ -503,6 +508,7 @@ actor VideoProcessor {
                 .map { overlay -> AVMutableVideoCompositionLayerInstruction in
                     let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: overlay.track)
                     layer.setTransform(overlayTransform(for: overlay, renderSize: renderSize), at: start)
+                    layer.setOpacity(Float(overlay.opacity), at: start)
                     return layer
                 }
             guard !activeClips.isEmpty else {
@@ -555,9 +561,11 @@ actor VideoProcessor {
         return overlay.preferredTransform
             .concatenating(CGAffineTransform(translationX: -rect.minX, y: -rect.minY))
             .concatenating(CGAffineTransform(scaleX: scale, y: scale))
+            .concatenating(CGAffineTransform(translationX: -orientedWidth * scale / 2, y: -orientedHeight * scale / 2))
+            .concatenating(CGAffineTransform(rotationAngle: CGFloat(overlay.rotation * .pi / 180)))
             .concatenating(CGAffineTransform(
-                translationX: CGFloat(overlay.centerX) * renderSize.width - orientedWidth * scale / 2,
-                y: CGFloat(overlay.centerY) * renderSize.height - orientedHeight * scale / 2
+                translationX: CGFloat(overlay.centerX) * renderSize.width,
+                y: CGFloat(overlay.centerY) * renderSize.height
             ))
     }
 
@@ -670,6 +678,18 @@ actor VideoProcessor {
                 y: (renderSize.height - orientedHeight * scale) / 2
             )
         )
+        let user = clip.transform
+        if user != .identity {
+            let center = CGPoint(x: renderSize.width / 2, y: renderSize.height / 2)
+            transform = transform
+                .concatenating(CGAffineTransform(translationX: -center.x, y: -center.y))
+                .concatenating(CGAffineTransform(scaleX: CGFloat(user.scale), y: CGFloat(user.scale)))
+                .concatenating(CGAffineTransform(rotationAngle: CGFloat(user.rotation * .pi / 180)))
+                .concatenating(CGAffineTransform(
+                    translationX: center.x + CGFloat(user.offsetX) * renderSize.width,
+                    y: center.y + CGFloat(user.offsetY) * renderSize.height
+                ))
+        }
         return transform
     }
 
@@ -829,6 +849,7 @@ struct CompositionSegment {
     let narrationVolume: Float
     let narrationOffset: Double
     var speed: Double = 1
+    var transform = ClipTransform.identity
 }
 
 struct CompositionAudioClip {
@@ -850,6 +871,8 @@ struct CompositionOverlayVideo {
     let centerY: Double
     let widthFraction: Double
     let volume: Float
+    var opacity: Double = 1
+    var rotation: Double = 0
 }
 
 struct ImageOverlayRender {
@@ -866,6 +889,8 @@ private struct OverlayLayout {
     let centerX: Double
     let centerY: Double
     let widthFraction: Double
+    var opacity: Double = 1
+    var rotation: Double = 0
 }
 
 struct CompositionBuildResult {
@@ -882,6 +907,7 @@ private struct CompositionClipLayout {
     let naturalSize: CGSize
     let preferredTransform: CGAffineTransform
     let transition: TransitionStyle
+    var transform = ClipTransform.identity
 }
 
 private struct AudioPlacement {

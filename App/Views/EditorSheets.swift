@@ -686,6 +686,16 @@ struct MediaOverlayEditorSheet: View {
                         Slider(value: $overlay.widthFraction, in: 0.1...1)
                         Text("\(Int(overlay.widthFraction * 100))%").monospacedDigit().frame(width: 48)
                     }
+                    HStack {
+                        Text("Opacidade")
+                        Slider(value: $overlay.opacity, in: 0.05...1)
+                        Text("\(Int(overlay.opacity * 100))%").monospacedDigit().frame(width: 48)
+                    }
+                    HStack {
+                        Text("Rotação")
+                        Slider(value: $overlay.rotation, in: -180...180, step: 1)
+                        Text("\(Int(overlay.rotation))°").monospacedDigit().frame(width: 48)
+                    }
                     if overlay.isVideo {
                         HStack {
                             Image(systemName: overlay.volume == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill")
@@ -784,6 +794,8 @@ struct MediaOverlayLayer: View {
                         }
                     }
                     .frame(width: width, height: height)
+                    .opacity(overlay.opacity)
+                    .rotationEffect(.degrees(overlay.rotation))
                     .overlay(
                         Rectangle()
                             .stroke(Color.white, style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
@@ -809,5 +821,61 @@ struct MediaOverlayLayer: View {
 
     private func clamp(_ value: CGFloat) -> Double {
         Double(min(0.98, max(0.02, value)))
+    }
+}
+
+
+// MARK: - Clip framing
+
+struct ClipTransformSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var transform: ClipTransform
+    let onChange: (ClipTransform) -> Void
+
+    init(transform: ClipTransform, onChange: @escaping (ClipTransform) -> Void) {
+        _transform = State(initialValue: transform)
+        self.onChange = onChange
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Enquadramento") {
+                    row("Zoom", value: $transform.scale, range: 0.3...4, label: String(format: "%.2f×", transform.scale))
+                    row("Rotação", value: $transform.rotation, range: -180...180, step: 1, label: "\(Int(transform.rotation))°")
+                    row("Horizontal", value: $transform.offsetX, range: -1...1, label: "\(Int(transform.offsetX * 100))%")
+                    row("Vertical", value: $transform.offsetY, range: -1...1, label: "\(Int(transform.offsetY * 100))%")
+                }
+                Section {
+                    HStack {
+                        Button("Girar 90°") { transform.rotation = (transform.rotation + 90).truncatingRemainder(dividingBy: 360) }
+                        Spacer()
+                        Button("Redefinir", role: .destructive) { transform = .identity }
+                    }
+                }
+            }
+            .navigationTitle("Ajustar clipe")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("OK") {
+                        onChange(transform)
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancelar") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func row(_ title: String, value: Binding<Double>, range: ClosedRange<Double>, step: Double = 0.01, label: String) -> some View {
+        HStack {
+            Text(title).frame(width: 90, alignment: .leading)
+            Slider(value: value, in: range, step: step)
+            Text(label).monospacedDigit().frame(width: 56, alignment: .trailing)
+        }
     }
 }

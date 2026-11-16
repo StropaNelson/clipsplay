@@ -53,6 +53,7 @@ struct EditorView: View {
     @State private var editingSegment: TimelineSegment?
     @State private var textEditRequest: TextEditRequest?
     @State private var transitionSegment: TimelineSegment?
+    @State private var framingSegment: TimelineSegment?
     @State private var editingAudio: AudioClip?
     @State private var showingAddAudio = false
     @State private var narrationRequest: NarrationRequest?
@@ -571,6 +572,7 @@ struct EditorView: View {
                     }
                     toolButton("Editar", icon: "slider.horizontal.3") { editingSegment = segment }
                     toolButton("Transição", icon: "square.on.square") { transitionSegment = segment }
+                    toolButton("Ajustar", icon: "crop.rotate") { framingSegment = segment }
                     toolButton("Narração", icon: "mic.badge.plus") { narrationRequest = NarrationRequest(segment: segment) }
                     if segment.trackType == .main {
                         if viewModel.canMoveMainClip(segment.id, by: -1) {
@@ -652,6 +654,13 @@ struct EditorView: View {
                     onSave: { viewModel.saveOverlay($0) },
                     onDelete: { viewModel.removeOverlay(request.overlay.id) }
                 )
+            }
+            .sheet(item: $framingSegment) { segment in
+                ClipTransformSheet(transform: segment.transform) { transform in
+                    var updated = segment
+                    updated.transform = transform
+                    viewModel.updateSegment(updated)
+                }
             }
             .sheet(item: $transitionSegment) { segment in
                 TransitionPickerSheet(segment: segment) { style, duration, applyToAll in
@@ -1222,6 +1231,7 @@ class EditorViewModel: ObservableObject {
             video.narrationAssetID = segment.narrationAssetID
             video.narrationLevel = segment.narrationVolume
             video.playbackSpeed = segment.speed
+            video.clipTransform = segment.transform
         }
         let global = applyToAllEpisodes ?? (segment.trackType != .main)
         guard global, segment.trackType != .main else {

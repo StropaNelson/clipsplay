@@ -257,6 +257,10 @@ struct VideoSegment: Codable, Identifiable, Hashable {
     var narrationVolume: Float?
     var narrationOffset: Double?
     var speed: Double?
+    var transformScale: Double?
+    var transformRotation: Double?
+    var transformOffsetX: Double?
+    var transformOffsetY: Double?
     
     init(
         id: UUID = UUID(),
