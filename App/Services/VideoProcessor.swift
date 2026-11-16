@@ -472,7 +472,7 @@ actor VideoProcessor {
         }
 
         addVisibility(to: container, start: overlay.startTime, duration: overlay.duration)
-        if (overlay.animation ?? .none) != .none || (overlay.exitAnimation ?? .none) != .none {
+        if (overlay.animation ?? TextAnimationStyle.none) != TextAnimationStyle.none || (overlay.exitAnimation ?? TextAnimationStyle.none) != TextAnimationStyle.none {
             // Animate a wrapper so the container's visibility window still hides it after the end.
             let wrapper = CALayer()
             wrapper.frame = CGRect(origin: .zero, size: size)

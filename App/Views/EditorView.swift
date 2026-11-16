@@ -406,7 +406,10 @@ struct EditorView: View {
             return
         }
         sheetPanel = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: action)
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            action()
+        }
     }
 
     private func open(_ panel: EditorPanel) {
@@ -2268,7 +2271,7 @@ class EditorViewModel: ObservableObject {
     }
 
     func saveTextTemplate(_ template: TextStyleTemplate) {
-        currentProject.textTemplates = (currentProject.textTemplates ?? []) + [template]
+        project.textTemplates = (project.textTemplates ?? []) + [template]
         Task { @MainActor in await persistProjectChanges() }
     }
 

@@ -231,11 +231,11 @@ struct TextOverlayEditorSheet: View {
                     .pickerStyle(.segmented)
                     ColorPicker("Cor", selection: $color, supportsOpacity: false)
                     Toggle("Negrito", isOn: $overlay.isBold)
-                    Picker("Animação", selection: $overlay.animation) {
-                        ForEach(TextAnimationStyle.allCases) { Text($0.rawValue).tag(TextAnimationStyle?.some($0)) }
+                    Picker("Animação", selection: entranceAnimation) {
+                        ForEach(TextAnimationStyle.allCases) { Text($0.rawValue).tag($0) }
                     }
-                    Picker("Saída", selection: $overlay.exitAnimation) {
-                        ForEach(TextAnimationStyle.allCases) { Text($0.rawValue).tag(TextAnimationStyle?.some($0)) }
+                    Picker("Saída", selection: exitAnimation) {
+                        ForEach(TextAnimationStyle.allCases) { Text($0.rawValue).tag($0) }
                     }
                     HStack {
                         Text("Tamanho")
@@ -308,6 +308,21 @@ struct TextOverlayEditorSheet: View {
         .presentationDetents([.medium, .large])
     }
 
+    // `$overlay.animation` would resolve to `Binding.animation(_:)`, so build these explicitly.
+    private var entranceAnimation: Binding<TextAnimationStyle> {
+        Binding(
+            get: { overlay.animation ?? TextAnimationStyle.none },
+            set: { overlay.animation = $0 == TextAnimationStyle.none ? nil : $0 }
+        )
+    }
+
+    private var exitAnimation: Binding<TextAnimationStyle> {
+        Binding(
+            get: { overlay.exitAnimation ?? TextAnimationStyle.none },
+            set: { overlay.exitAnimation = $0 == TextAnimationStyle.none ? nil : $0 }
+        )
+    }
+
     private var templatePicker: Binding<UUID?> {
         Binding<UUID?>(
             get: { nil },
@@ -320,7 +335,7 @@ struct TextOverlayEditorSheet: View {
                 overlay.positionY = template.positionY
                 overlay.animation = template.animation
                 overlay.exitAnimation = template.exitAnimation
-                color = Color(template.color.color)
+                color = template.color.color
             }
         )
     }
