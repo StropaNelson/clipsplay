@@ -118,6 +118,7 @@ struct TimelineView: View {
         VStack(spacing: laneSpacing) {
             Color.clear.frame(height: rulerHeight + 4)
             header(icon: "film", title: "Vídeo", height: clipHeight)
+            header(icon: "waveform", title: "Som", height: laneHeight)
             header(icon: "textformat", title: "Texto", height: laneHeight, action: onAddText)
             header(icon: "music.note", title: "Áudio", height: laneHeight, action: onAddAudio)
         }
@@ -152,7 +153,7 @@ struct TimelineView: View {
     }
 
     private var contentHeight: CGFloat {
-        rulerHeight + 4 + clipHeight + laneHeight * 2 + laneSpacing * 3
+        rulerHeight + 4 + clipHeight + laneHeight * 3 + laneSpacing * 4
     }
 
     private func xPosition(for time: Double) -> CGFloat {
@@ -168,6 +169,7 @@ struct TimelineView: View {
             VStack(alignment: .leading, spacing: laneSpacing) {
                 ruler
                 videoLane
+                videoAudioLane
                 textLane
                 audioLane
             }
@@ -301,6 +303,38 @@ struct TimelineView: View {
                 .shadow(color: .black.opacity(0.5), radius: 2)
         }
         .buttonStyle(.plain)
+    }
+
+    /// Waveform of each clip's own audio, aligned under the clip and scaled by its volume.
+    private var videoAudioLane: some View {
+        ZStack(alignment: .topLeading) {
+            Color.white.opacity(0.03)
+                .frame(width: contentWidth, height: laneHeight)
+            ForEach(segments) { segment in
+                let drag = laneDrag?.id == segment.id ? laneDrag : nil
+                let display = trimmed(segment, left: drag?.left ?? 0, right: drag?.right ?? 0)
+                WaveformView(
+                    url: sourceURL(segment),
+                    sourceStart: display.sourceStartTime,
+                    sourceDuration: display.duration,
+                    color: segment.trackType.color.opacity(0.85),
+                    gain: segment.clipVolume
+                )
+                .frame(width: max(8, CGFloat(display.duration) * pixelsPerSecond), height: laneHeight - 4)
+                .background(segment.trackType.color.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
+                .overlay(alignment: .topTrailing) {
+                    if segment.narrationAssetID != nil {
+                        Image(systemName: "mic.fill")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(.orange)
+                            .padding(3)
+                    }
+                }
+                .offset(x: xPosition(for: segment.startTime), y: 2)
+                .allowsHitTesting(false)
+            }
+        }
+        .frame(width: contentWidth, height: laneHeight, alignment: .topLeading)
     }
 
     private var textLane: some View {
