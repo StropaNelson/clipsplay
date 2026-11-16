@@ -130,7 +130,15 @@ struct TimelineView: View {
             header(icon: "waveform", title: "Som", height: laneHeight)
             header(icon: "rectangle.on.rectangle", title: "PiP", height: laneHeight, action: onAddOverlay)
             header(icon: "textformat", title: "Texto", height: laneHeight, action: onAddText)
-            header(icon: "music.note", title: "Áudio", height: laneHeight, action: onAddAudio)
+            ForEach(audioRows.indices, id: \.self) { row in
+                let kind = audioRows[row].kind
+                header(
+                    icon: kind.icon,
+                    title: audioRows[row].index == 0 ? kind.rawValue : "",
+                    height: laneHeight,
+                    action: audioRows[row].index == 0 ? onAddAudio : nil
+                )
+            }
         }
         .padding(.leading, 6)
         .frame(width: headerWidth + 6)
@@ -163,7 +171,7 @@ struct TimelineView: View {
     }
 
     private var contentHeight: CGFloat {
-        rulerHeight + 4 + clipHeight + laneHeight * 4 + laneSpacing * 5
+        rulerHeight + 4 + clipHeight + laneHeight * CGFloat(3 + audioRows.count) + laneSpacing * CGFloat(4 + audioRows.count)
     }
 
     private func xPosition(for time: Double) -> CGFloat {
@@ -182,7 +190,9 @@ struct TimelineView: View {
                 videoAudioLane
                 overlayLane
                 textLane
-                audioLane
+                ForEach(audioRows.indices, id: \.self) { row in
+                    audioLaneRow(clips: audioRows[row].clips)
+                }
             }
             playhead
         }
@@ -480,13 +490,36 @@ struct TimelineView: View {
         .frame(width: contentWidth, height: laneHeight, alignment: .topLeading)
     }
 
-    private var audioLane: some View {
+    /// One row per audio kind, stacking overlapping clips of the same kind onto extra rows.
+    private var audioRows: [(kind: AudioClipKind, index: Int, clips: [AudioClip])] {
+        var rows: [(AudioClipKind, Int, [AudioClip])] = []
+        let ordered = AudioClipKind.allCases.flatMap { kind in
+            audioClips.filter { $0.kind == kind }.sorted { $0.timelineStart < $1.timelineStart }
+        } + audioClips.filter { !AudioClipKind.allCases.contains($0.kind) }
+        for clip in ordered {
+            if let rowIndex = rows.indices.first(where: { row in
+                rows[row].0 == clip.kind && rows[row].2.allSatisfy { other in
+                    clip.timelineStart >= other.timelineStart + other.duration - 0.01
+                        || clip.timelineStart + clip.duration <= other.timelineStart + 0.01
+                }
+            }) {
+                rows[rowIndex].2.append(clip)
+            } else {
+                let kindRows = rows.filter { $0.0 == clip.kind }.count
+                rows.append((clip.kind, kindRows, [clip]))
+            }
+        }
+        // Renumber rows per kind in order so headers know which row is first.
+        return rows.map { ($0.0, $0.1, $0.2) }
+    }
+
+    private func audioLaneRow(clips: [AudioClip]) -> some View {
         ZStack(alignment: .topLeading) {
             Color.white.opacity(0.03)
                 .frame(width: contentWidth, height: laneHeight)
                 .contentShape(Rectangle())
                 .onTapGesture { onSelect(nil) }
-            ForEach(audioClips.sorted { $0.duration > $1.duration }) { clip in
+            ForEach(clips.sorted { $0.duration > $1.duration }) { clip in
                 let drag = laneDrag?.id == clip.id ? laneDrag : nil
                 let edited = Self.adjusted(clip, move: drag?.move ?? 0, left: drag?.left ?? 0, right: drag?.right ?? 0, assetDuration: audioDuration(clip))
                 laneItem(
