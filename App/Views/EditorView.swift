@@ -683,7 +683,7 @@ struct EditorView: View {
                     episodeDuration: viewModel.timelineDuration,
                     onSave: { viewModel.saveOverlay($0) },
                     onDelete: { viewModel.removeOverlay(request.overlay.id) },
-                    templates: viewModel.project.textTemplates ?? [],
+                    templates: viewModel.currentProject.textTemplates ?? [],
                     onSaveTemplate: { _, template in viewModel.saveTextTemplate(template) }
                 )
             }
@@ -2268,8 +2268,8 @@ class EditorViewModel: ObservableObject {
     }
 
     func saveTextTemplate(_ template: TextStyleTemplate) {
-        project.textTemplates = (project.textTemplates ?? []) + [template]
-        Task { await persistProjectChanges() }
+        currentProject.textTemplates = (currentProject.textTemplates ?? []) + [template]
+        Task { @MainActor in await persistProjectChanges() }
     }
 
     /// Detaches the selected main clip's audio into its own "Som" track and mutes the clip.

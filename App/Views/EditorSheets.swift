@@ -320,7 +320,7 @@ struct TextOverlayEditorSheet: View {
                 overlay.positionY = template.positionY
                 overlay.animation = template.animation
                 overlay.exitAnimation = template.exitAnimation
-                color = template.color.color
+                color = Color(template.color.color)
             }
         )
     }
@@ -394,12 +394,12 @@ struct TextOverlayLabel: View {
     }
 
     private var entranceProgress: Double {
-        guard overlay.animation != nil, overlay.animation != .none else { return 1 }
+        guard let style = overlay.animation, style != .none else { return 1 }
         return min(max((time - overlay.startTime) / 0.4, 0), 1)
     }
 
     private var exitProgress: Double {
-        guard overlay.exitAnimation != nil, overlay.exitAnimation != .none else { return 1 }
+        guard let style = overlay.exitAnimation, style != .none else { return 1 }
         return min(max((overlay.endTime - time) / 0.35, 0), 1)
     }
 

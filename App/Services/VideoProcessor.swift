@@ -375,7 +375,11 @@ actor VideoProcessor {
         let visible = overlays.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.duration > 0 }
         guard !visible.isEmpty || !images.isEmpty else { return videoComposition }
         // Preserve the custom compositor + track metadata through the copy.
-        let mutable = FilterVideoComposition(propertiesOf: videoComposition)
+        let mutable = FilterVideoComposition()
+        mutable.renderSize = videoComposition.renderSize
+        mutable.frameDuration = videoComposition.frameDuration
+        mutable.instructions = videoComposition.instructions
+        mutable.customVideoCompositorClass = videoComposition.customVideoCompositorClass
         if let source = videoComposition as? FilterVideoComposition {
             mutable.trackRenders = source.trackRenders
             mutable.fitMode = source.fitMode
@@ -621,7 +625,7 @@ actor VideoProcessor {
         renderSize: CGSize,
         fitMode: FitMode,
         duration: CMTime
-    ) -> AVMutableVideoComposition {
+    ) -> FilterVideoComposition {
         let edges = clips.flatMap { [$0.start, $0.end] } + overlays.flatMap { [$0.start, $0.end] }
         let boundaries = ([CMTime.zero, duration] + edges.filter { CMTimeCompare($0, duration) <= 0 })
             .sorted { CMTimeCompare($0, $1) < 0 }
