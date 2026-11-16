@@ -47,8 +47,19 @@ actor ProjectStorage {
     
     func loadProject(id: UUID) async throws -> Project {
         let file = projectsDirectory.appendingPathComponent("\(id.uuidString).json")
-        let data = try Data(contentsOf: file)
-        return try decoder.decode(Project.self, from: data)
+        do {
+            let data = try Data(contentsOf: file)
+            return try decoder.decode(Project.self, from: data)
+        } catch {
+            // Recover from the last good copy if the main file is missing or damaged.
+            guard let backup = try? Data(contentsOf: backupURL(for: id)),
+                  let project = try? decoder.decode(Project.self, from: backup) else { throw error }
+            return project
+        }
+    }
+
+    private func backupURL(for id: UUID) -> URL {
+        projectsDirectory.appendingPathComponent("\(id.uuidString).backup")
     }
     
     func loadProject(url: URL) async throws -> Project {
@@ -61,6 +72,10 @@ actor ProjectStorage {
         project.updateTimestamp()
         let file = projectsDirectory.appendingPathComponent("\(project.id.uuidString).json")
         let data = try encoder.encode(project)
+        if let previous = try? Data(contentsOf: file),
+           (try? decoder.decode(Project.self, from: previous)) != nil {
+            try? previous.write(to: backupURL(for: project.id), options: .atomic)
+        }
         try data.write(to: file, options: .atomic)
     }
     
@@ -83,6 +98,7 @@ actor ProjectStorage {
     func deleteProject(id: UUID) async throws {
         let file = projectsDirectory.appendingPathComponent("\(id.uuidString).json")
         try fileManager.removeItem(at: file)
+        try? fileManager.removeItem(at: backupURL(for: id))
     }
     
     func exportProject(_ project: Project, to url: URL) async throws {

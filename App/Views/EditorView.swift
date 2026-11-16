@@ -518,6 +518,11 @@ struct EditorView: View {
             Button { viewModel.jumpToMarker(forward: true) } label: {
                 Image(systemName: "arrow.right.to.line")
             }
+            Button { viewModel.rippleDeleteBetweenMarkers() } label: {
+                Image(systemName: "scissors.badge.ellipsis")
+                    .foregroundStyle(viewModel.rippleRange == nil ? Color.white.opacity(0.3) : Color.red)
+            }
+            .disabled(viewModel.rippleRange == nil)
             Spacer()
             Text(viewModel.canvasLabel)
                 .font(.system(size: 11, weight: .semibold))
@@ -2045,6 +2050,67 @@ class EditorViewModel: ObservableObject {
         if let target { seek(to: target) }
     }
 
+    /// Markers surrounding the playhead; the main content between them can be ripple-deleted.
+    var rippleRange: ClosedRange<Double>? {
+        let times = selectedEpisode?.markers.map(\.time) ?? []
+        guard let lower = times.last(where: { $0 <= currentTime + 0.05 }),
+              let upper = times.first(where: { $0 > currentTime + 0.05 }),
+              upper - lower > 0.1 else { return nil }
+        return lower...upper
+    }
+
+    /// Removes the main content between the markers around the playhead and closes the gap.
+    func rippleDeleteBetweenMarkers() {
+        guard let range = rippleRange, let episode = selectedEpisode else { return }
+        let items = episode.storyline().filter { $0.track == .main }
+        let removed = range.upperBound - range.lowerBound
+        var touched = false
+        mutateSelectedEpisode { episode in
+            var result: [VideoSegment] = []
+            for clip in episode.mainClips {
+                guard let item = items.first(where: { $0.segment.id == clip.id }),
+                      item.end > range.lowerBound, item.start < range.upperBound else {
+                    result.append(clip)
+                    continue
+                }
+                touched = true
+                let speed = clip.playbackSpeed
+                if range.lowerBound - item.start > 0.05 {
+                    var left = clip
+                    left.endTime = clip.startTime + (range.lowerBound - item.start) * speed
+                    result.append(left)
+                }
+                if item.end - range.upperBound > 0.05 {
+                    var right = VideoSegment(
+                        startTime: clip.startTime + (range.upperBound - item.start) * speed,
+                        endTime: clip.endTime,
+                        sourceType: clip.sourceType,
+                        assetID: clip.assetID,
+                        transitionStyle: TransitionStyle.none,
+                        volume: clip.volume
+                    )
+                    right.speed = clip.speed
+                    right.clipTransform = clip.clipTransform
+                    result.append(right)
+                }
+            }
+            guard touched else { return }
+            episode.mainClips = result
+            episode.markers = episode.markers.compactMap { marker in
+                if marker.time <= range.lowerBound + 0.001 { return marker }
+                if marker.time < range.upperBound - 0.001 { return nil }
+                var moved = marker
+                moved.time -= removed
+                return moved
+            }
+        }
+        if touched {
+            seek(to: range.lowerBound)
+        } else {
+            errorMessage = "Não há conteúdo principal entre os marcadores."
+        }
+    }
+
     func stepFrame(by frames: Int) {
         previewPlayer?.pause()
         isPlaying = false
@@ -2054,6 +2120,20 @@ class EditorViewModel: ObservableObject {
     // MARK: Export
 
     func exportEpisodes(selection: Set<Int>?) async {
+        let seconds = currentProject.episodes
+            .filter { selection?.contains($0.index + 1) ?? true }
+            .map { $0.storyline().map(\.end).max() ?? 0 }
+            .reduce(0, +)
+        // Roughly 1.5 MB per second at 1080p, doubled for the temporary render.
+        let needed = Int64(max(200, seconds * 3) * 1_000_000)
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        if let available = try? directory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            .volumeAvailableCapacityForImportantUsage,
+           available < needed {
+            let formatter = ByteCountFormatter()
+            errorMessage = "Espaço insuficiente para exportar: são necessários cerca de \(formatter.string(fromByteCount: needed)) e há \(formatter.string(fromByteCount: available)) livres."
+            return
+        }
         showExportProgress = true
         exportProgress = nil
 
