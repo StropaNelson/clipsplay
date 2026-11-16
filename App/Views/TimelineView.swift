@@ -338,8 +338,8 @@ struct TimelineView: View {
     private func trimmed(_ segment: TimelineSegment, left: Double, right: Double) -> TimelineSegment {
         var result = segment
         let maxSource = max(maxSourceTime(segment), segment.sourceEndTime)
-        result.sourceStartTime = min(max(0, segment.sourceStartTime + left), segment.sourceEndTime - 0.1)
-        result.sourceEndTime = min(maxSource, max(result.sourceStartTime + 0.1, segment.sourceEndTime + right))
+        result.sourceStartTime = min(max(0, segment.sourceStartTime + left * segment.speed), segment.sourceEndTime - 0.1)
+        result.sourceEndTime = min(maxSource, max(result.sourceStartTime + 0.1, segment.sourceEndTime + right * segment.speed))
         result.duration = (result.sourceEndTime - result.sourceStartTime) / segment.speed
         return result
     }
@@ -348,7 +348,7 @@ struct TimelineView: View {
         var result = segment
         let maxSource = max(maxSourceTime(segment), segment.sourceEndTime)
         let length = segment.sourceEndTime - segment.sourceStartTime
-        let start = min(max(0, segment.sourceStartTime - seconds), max(0, maxSource - length))
+        let start = min(max(0, segment.sourceStartTime - seconds * segment.speed), max(0, maxSource - length))
         result.sourceStartTime = start
         result.sourceEndTime = start + length
         return result
