@@ -24,6 +24,8 @@ struct Project: Codable, Identifiable {
     var recapSettings: RecapSettings
     var coverSettings: CoverSettings
     var transcriptSRT: String?
+    /// Word timings of the transcript, against the source video.
+    var transcriptWords: [TranscriptWord]?
     var storedGlobalOverlays: [TextOverlay]?
     var storedGlobalAudioClips: [AudioClip]?
 

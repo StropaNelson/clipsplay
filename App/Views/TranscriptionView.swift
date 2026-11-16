@@ -5,11 +5,18 @@ struct TranscriptionView: View {
     let project: Project
     let onTranscriptChange: (String) -> Void
     let onApplyCaptions: ([TranscriptCue]) -> Void
+    let onWords: ([TranscriptWord]) -> Void
 
-    init(project: Project, onTranscriptChange: @escaping (String) -> Void, onApplyCaptions: @escaping ([TranscriptCue]) -> Void) {
+    init(
+        project: Project,
+        onTranscriptChange: @escaping (String) -> Void,
+        onApplyCaptions: @escaping ([TranscriptCue]) -> Void,
+        onWords: @escaping ([TranscriptWord]) -> Void = { _ in }
+    ) {
         self.project = project
         self.onTranscriptChange = onTranscriptChange
         self.onApplyCaptions = onApplyCaptions
+        self.onWords = onWords
         self._transcript = State(initialValue: project.transcriptSRT ?? "")
     }
 
@@ -134,6 +141,7 @@ struct TranscriptionView: View {
                 allowServer: allowServer
             )
             transcript = SubtitleFile.srt(from: cues)
+            onWords(cues.flatMap(\.words))
         } catch {
             errorMessage = "Falha na transcrição: \(error.localizedDescription)"
         }

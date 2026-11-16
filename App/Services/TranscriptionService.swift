@@ -7,6 +7,7 @@ struct TranscriptCue: Identifiable {
     let startTime: Double
     let endTime: Double
     let text: String
+    var words: [TranscriptWord] = []
 }
 
 actor TranscriptionService {
@@ -76,7 +77,8 @@ actor TranscriptionService {
                 TranscriptCue(
                     startTime: $0.startTime + chunkStart,
                     endTime: $0.endTime + chunkStart,
-                    text: $0.text
+                    text: $0.text,
+                    words: $0.words.map { TranscriptWord(text: $0.text, start: $0.start + chunkStart, end: $0.end + chunkStart) }
                 )
             })
             chunkStart += chunkDuration
@@ -154,10 +156,11 @@ actor TranscriptionService {
         // Partial results can lack timings; spread the words over the chunk in that case.
         if segments.allSatisfy({ $0.timestamp == 0 && $0.duration == 0 }) {
             let text = segments.map(\.substring).joined(separator: " ")
-            return [TranscriptCue(startTime: 0, endTime: chunkDuration, text: text)]
+            return [TranscriptCue(startTime: 0, endTime: chunkDuration, text: text, words: TranscriptWord.spread(text, from: 0, to: chunkDuration))]
         }
         var cues: [TranscriptCue] = []
         var words: [String] = []
+        var timed: [TranscriptWord] = []
         var cueStart: Double?
         var cueEnd = 0.0
 
@@ -167,17 +170,19 @@ actor TranscriptionService {
             }
             words.append(segment.substring)
             cueEnd = segment.timestamp + segment.duration
+            timed.append(TranscriptWord(text: segment.substring, start: segment.timestamp, end: cueEnd))
 
             let endsSentence = segment.substring.rangeOfCharacter(from: CharacterSet(charactersIn: ".!?")) != nil
             if cueEnd - (cueStart ?? cueEnd) >= 4 || endsSentence {
-                cues.append(TranscriptCue(startTime: cueStart ?? segment.timestamp, endTime: cueEnd, text: words.joined(separator: " ")))
+                cues.append(TranscriptCue(startTime: cueStart ?? segment.timestamp, endTime: cueEnd, text: words.joined(separator: " "), words: timed))
                 words = []
+                timed = []
                 cueStart = nil
             }
         }
 
         if let cueStart, !words.isEmpty {
-            cues.append(TranscriptCue(startTime: cueStart, endTime: cueEnd, text: words.joined(separator: " ")))
+            cues.append(TranscriptCue(startTime: cueStart, endTime: cueEnd, text: words.joined(separator: " "), words: timed))
         }
         return cues
     }
@@ -333,5 +338,20 @@ enum SubtitleFile {
         let wholeSeconds = (milliseconds % 60_000) / 1000
         let remainder = milliseconds % 1000
         return String(format: "%02d:%02d:%02d,%03d", hours, minutes, wholeSeconds, remainder)
+    }
+}
+
+extension TranscriptWord {
+    /// Estimated timings: spreads the words of `text` over a range in proportion to their length.
+    static func spread(_ text: String, from start: Double, to end: Double) -> [TranscriptWord] {
+        let tokens = text.split(whereSeparator: \.isWhitespace).map(String.init)
+        let total = Double(tokens.reduce(0) { $0 + $1.count + 1 })
+        guard total > 0, end > start else { return [] }
+        var cursor = start
+        return tokens.map { token in
+            let length = (end - start) * Double(token.count + 1) / total
+            defer { cursor += length }
+            return TranscriptWord(text: token, start: cursor, end: cursor + length)
+        }
     }
 }

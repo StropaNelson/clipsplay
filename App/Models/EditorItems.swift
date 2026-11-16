@@ -87,6 +87,8 @@ struct TextOverlay: Codable, Identifiable, Hashable {
     var isBold: Bool = true
     var isCaption: Bool?
     var anchor: ClipAnchor?
+    /// Word timings relative to `startTime`; captions with words highlight the spoken word.
+    var words: [TranscriptWord]?
 
     var endTime: Double { startTime + duration }
 
@@ -127,6 +129,13 @@ struct AudioClip: Codable, Identifiable, Hashable {
 }
 
 /// Picture-in-picture image or video placed above the main video.
+/// A recognized word, timed in seconds.
+struct TranscriptWord: Codable, Hashable {
+    var text: String
+    var start: Double
+    var end: Double
+}
+
 /// User framing of a clip on top of the fit/fill layout. Offsets are fractions of the frame.
 struct ClipTransform: Codable, Hashable {
     var scale: Double = 1

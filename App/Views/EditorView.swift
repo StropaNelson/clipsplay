@@ -134,7 +134,8 @@ struct EditorView: View {
             TranscriptionView(
                 project: viewModel.currentProject,
                 onTranscriptChange: { viewModel.saveTranscript($0) },
-                onApplyCaptions: { viewModel.applyCaptions($0) }
+                onApplyCaptions: { viewModel.applyCaptions($0) },
+                onWords: { viewModel.saveTranscriptWords($0) }
             )
         }
         .sheet(item: $sheetPanel) { panel in
@@ -1526,6 +1527,11 @@ class EditorViewModel: ObservableObject {
     }
 
     // MARK: Captions
+
+    func saveTranscriptWords(_ words: [TranscriptWord]) {
+        project.transcriptWords = words
+        Task { await persistProjectChanges(reloadPreview: false) }
+    }
 
     func saveTranscript(_ text: String) {
         project.transcriptSRT = text
