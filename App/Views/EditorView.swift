@@ -568,7 +568,7 @@ struct EditorView: View {
                     if segment.trackType == .main {
                         toolButton("Dividir", icon: "scissors") { viewModel.splitAtPlayhead() }
                         toolButton("Congelar", icon: "snowflake") { viewModel.freezeFrame() }
-                        toolButton("Áudio", icon: "waveform") { viewModel.detachAudio() }
+                        toolButton("Áudio", icon: "waveform") { Task { await viewModel.detachAudio() } }
                     }
                     Menu {
                         ForEach([0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4], id: \.self) { value in
@@ -2261,11 +2261,20 @@ class EditorViewModel: ObservableObject {
     }
 
     /// Detaches the selected main clip's audio into its own "Som" track and mutes the clip.
-    func detachAudio() {
+    func detachAudio() async {
         guard let segment = selectedSegment, segment.trackType == .main,
               segment.sourceType == .mainVideo, segment.sourceEndTime > segment.sourceStartTime else { return }
-        // Reuse (or register) a media asset that points at the source video file.
+        guard abs(segment.speed - 1) < 0.001 else {
+            errorMessage = "Separe o áudio antes de mudar a velocidade do clipe (ou volte a velocidade para 1x)."
+            return
+        }
         let fileURL = project.sourceVideoFileURL
+        let audioTrack = try? await AVURLAsset(url: fileURL).loadTracks(withMediaType: .audio).first
+        guard audioTrack != nil else {
+            errorMessage = "Este vídeo não tem faixa de áudio para separar."
+            return
+        }
+        // Reuse (or register) a media asset that points at the source video file.
         let asset: MediaAsset
         if let existing = mediaAssets.first(where: { $0.fileURL == fileURL.path || $0.name == "__source__" }) {
             asset = existing
@@ -2281,23 +2290,23 @@ class EditorViewModel: ObservableObject {
             )
             mediaAssets.append(asset)
         }
-        let clip = AudioClip(
-            assetID: asset.id,
-            name: "Som do vídeo",
-            kind: .videoSound,
-            timelineStart: segment.startTime,
-            sourceStart: segment.sourceStartTime,
-            sourceEnd: segment.sourceEndTime,
-            volume: 1
-        )
         mutateSelectedEpisode { episode in
             var clips = episode.mainClips
             guard let index = clips.firstIndex(where: { $0.id == segment.id }) else { return }
+            let clip = AudioClip(
+                assetID: asset.id,
+                name: "Som do vídeo",
+                kind: .videoSound,
+                timelineStart: segment.startTime,
+                sourceStart: segment.sourceStartTime,
+                sourceEnd: segment.sourceEndTime,
+                volume: clips[index].clipVolume
+            )
             clips[index].clipVolume = 0
             episode.mainClips = clips
             episode.audioClips.append(clip)
+            selectedSegmentID = clip.id
         }
-        selectedSegmentID = clip.id
     }
 
     /// Positions the playhead where a source-video time lands in the selected episode.
