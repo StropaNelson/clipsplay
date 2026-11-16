@@ -585,6 +585,7 @@ struct EditorView: View {
             .sheet(item: $editingAudio) { clip in
                 AudioClipEditorSheet(
                     clip: clip,
+                    assetURL: viewModel.mediaAssets.first { $0.id == clip.assetID }?.url,
                     assetDuration: viewModel.mediaAssets.first { $0.id == clip.assetID }?.duration ?? clip.sourceEnd,
                     episodeDuration: viewModel.timelineDuration,
                     onSave: { viewModel.updateAudioClip($0) },

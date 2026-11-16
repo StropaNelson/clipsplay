@@ -476,6 +476,7 @@ struct AddAudioSheet: View {
 }
 
 struct AudioClipEditorSheet: View {
+    let assetURL: URL?
     let assetDuration: Double
     let episodeDuration: Double
     let onSave: (AudioClip) -> Void
@@ -484,8 +485,9 @@ struct AudioClipEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var clip: AudioClip
 
-    init(clip: AudioClip, assetDuration: Double, episodeDuration: Double, onSave: @escaping (AudioClip) -> Void, onDelete: @escaping () -> Void) {
+    init(clip: AudioClip, assetURL: URL?, assetDuration: Double, episodeDuration: Double, onSave: @escaping (AudioClip) -> Void, onDelete: @escaping () -> Void) {
         self._clip = State(initialValue: clip)
+        self.assetURL = assetURL
         self.assetDuration = max(assetDuration, clip.sourceEnd, 0.2)
         self.episodeDuration = max(episodeDuration, 0.2)
         self.onSave = onSave
@@ -513,19 +515,15 @@ struct AudioClipEditorSheet: View {
                     }
                 }
                 Section("Trecho do áudio") {
-                    HStack {
-                        Text("Início")
-                        Slider(value: $clip.sourceStart, in: 0...max(assetDuration - 0.1, 0.1))
-                        Text(TimelineView.rulerLabel(clip.sourceStart)).monospacedDigit()
-                    }
-                    .onChange(of: clip.sourceStart) { newValue in
-                        clip.sourceEnd = max(clip.sourceEnd, min(newValue + 0.1, assetDuration))
-                    }
-                    HStack {
-                        Text("Fim")
-                        Slider(value: $clip.sourceEnd, in: min(clip.sourceStart + 0.1, assetDuration)...assetDuration)
-                        Text(TimelineView.rulerLabel(clip.sourceEnd)).monospacedDigit()
-                    }
+                    TrimRangeView(
+                        url: assetURL,
+                        duration: assetDuration,
+                        start: $clip.sourceStart,
+                        end: $clip.sourceEnd,
+                        isAudio: true,
+                        tint: .green
+                    )
+                    .padding(.vertical, 4)
                 }
                 Section("Fade") {
                     HStack {

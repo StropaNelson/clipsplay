@@ -1,4 +1,5 @@
 import SwiftUI
+import AVKit
 import AVFoundation
 import CoreMedia
 import UIKit
@@ -574,6 +575,7 @@ struct SegmentEditorView: View {
     @State private var clipVolume: Float
     @State private var narrationVolume: Float
     @State private var keepNarration: Bool
+    @State private var previewPlayer = AVPlayer()
 
     init(segment: TimelineSegment, trackType: TrackType, project: Project, onSave: @escaping (TimelineSegment) -> Void, onDelete: (() -> Void)?) {
         self.segment = segment
@@ -592,6 +594,21 @@ struct SegmentEditorView: View {
         _clipVolume = State(initialValue: segment.clipVolume)
         _narrationVolume = State(initialValue: segment.narrationVolume)
         _keepNarration = State(initialValue: segment.narrationAssetID != nil)
+    }
+
+    private var sourceURL: URL? {
+        sourceType == .mainVideo ? project.sourceVideoFileURL : selectedAsset?.url
+    }
+
+    private func loadPreview() {
+        guard let sourceURL else { return }
+        previewPlayer.replaceCurrentItem(with: AVPlayerItem(url: sourceURL))
+        scrub(to: sourceStartTime)
+    }
+
+    private func scrub(to time: Double) {
+        previewPlayer.pause()
+        previewPlayer.seek(to: CMTime(seconds: time, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
     private var maxSourceTime: Double {
@@ -625,23 +642,26 @@ struct SegmentEditorView: View {
                 }
 
                 Section("Corte (trecho usado)") {
-                    HStack {
-                        Text("Início")
-                        Slider(value: $sourceStartTime, in: 0...max(maxSourceTime - 0.1, 0.1))
-                        Text(TimelineView.rulerLabel(sourceStartTime)).monospacedDigit()
+                    VideoPlayer(player: previewPlayer)
+                        .frame(height: 200)
+                    TrimRangeView(
+                        url: sourceURL,
+                        duration: maxSourceTime,
+                        start: $sourceStartTime,
+                        end: $sourceEndTime
+                    ) { scrub(to: $0) }
+                    .padding(.vertical, 4)
+                    Button {
+                        previewPlayer.seek(to: CMTime(seconds: sourceStartTime, preferredTimescale: 600))
+                        previewPlayer.currentItem?.forwardPlaybackEndTime = CMTime(seconds: sourceEndTime, preferredTimescale: 600)
+                        previewPlayer.play()
+                    } label: {
+                        Label("Tocar trecho", systemImage: "play.fill")
                     }
-                    .onChange(of: sourceStartTime) { newValue in
-                        sourceEndTime = max(sourceEndTime, min(newValue + 0.1, maxSourceTime))
-                    }
-                    HStack {
-                        Text("Fim")
-                        Slider(value: $sourceEndTime, in: min(sourceStartTime + 0.1, maxSourceTime)...max(maxSourceTime, 0.2))
-                        Text(TimelineView.rulerLabel(sourceEndTime)).monospacedDigit()
-                    }
-                    Text("Duração: \(String(format: "%.1f", max(0, sourceEndTime - sourceStartTime)))s")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
                 }
+                .onAppear { loadPreview() }
+                .onChange(of: selectedAsset) { _ in loadPreview() }
+                .onChange(of: sourceType) { _ in loadPreview() }
 
                 Section("Transição de entrada") {
                     Picker("Estilo", selection: $transition) {

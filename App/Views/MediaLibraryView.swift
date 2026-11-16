@@ -167,28 +167,21 @@ struct AssetTrimSheet: View {
                     VideoPlayer(player: player)
                         .frame(height: 220)
 
-                    HStack {
-                        Text("Início")
-                        Slider(
-                            value: $startTime,
-                            in: 0...max(asset.duration - minimumDuration, minimumDuration)
+                    TrimRangeView(
+                        url: asset.url,
+                        duration: asset.duration,
+                        start: $startTime,
+                        end: $endTime,
+                        minimumDuration: minimumDuration
+                    ) { time in
+                        player.pause()
+                        player.seek(
+                            to: CMTime(seconds: time, preferredTimescale: 600),
+                            toleranceBefore: .zero,
+                            toleranceAfter: .zero
                         )
-                        Text(formatTime(startTime))
-                            .monospacedDigit()
                     }
-                    .onChange(of: startTime) { newStart in
-                        endTime = max(endTime, min(newStart + minimumDuration, asset.duration))
-                    }
-
-                    HStack {
-                        Text("Fim")
-                        Slider(
-                            value: $endTime,
-                            in: min(startTime + minimumDuration, asset.duration)...asset.duration
-                        )
-                        Text(formatTime(endTime))
-                            .monospacedDigit()
-                    }
+                    .padding(.vertical, 4)
 
                     Button {
                         player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
