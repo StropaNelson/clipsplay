@@ -166,6 +166,7 @@ struct Episode: Codable, Identifiable {
     var storedTextOverlays: [TextOverlay]?
     var storedAudioClips: [AudioClip]?
     var storedMediaOverlays: [MediaOverlay]?
+    var storedMarkers: [TimelineMarker]?
     
     init(index: Int, mainStart: Double, mainEnd: Double, introTemplate: SegmentTemplate?, outroTemplate: SegmentTemplate?, recapSettings: RecapSettings) {
         self.id = UUID()

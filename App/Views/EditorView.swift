@@ -80,6 +80,7 @@ struct EditorView: View {
                     overlays: viewModel.resolvedOverlays,
                     audioClips: viewModel.resolvedAudioClips,
                     mediaOverlays: viewModel.selectedEpisode?.mediaOverlays ?? [],
+                    markers: viewModel.selectedEpisode?.markers.map(\.time) ?? [],
                     totalDuration: viewModel.timelineDuration,
                     currentTime: viewModel.currentTime,
                     selectedID: viewModel.selectedSegmentID,
@@ -503,6 +504,17 @@ struct EditorView: View {
             }
             Button { viewModel.seek(to: viewModel.timelineDuration) } label: {
                 Image(systemName: "forward.end.fill")
+            }
+            Divider().frame(height: 20).overlay(EditorTheme.divider)
+            Button { viewModel.jumpToMarker(forward: false) } label: {
+                Image(systemName: "arrow.left.to.line")
+            }
+            Button { viewModel.toggleMarker() } label: {
+                Image(systemName: viewModel.isOnMarker ? "bookmark.fill" : "bookmark")
+                    .foregroundStyle(viewModel.isOnMarker ? Color.orange : Color.white)
+            }
+            Button { viewModel.jumpToMarker(forward: true) } label: {
+                Image(systemName: "arrow.right.to.line")
             }
             Spacer()
             Text(viewModel.canvasLabel)
@@ -1892,6 +1904,31 @@ class EditorViewModel: ObservableObject {
             toleranceBefore: .zero,
             toleranceAfter: .zero
         )
+    }
+
+    // MARK: Markers
+
+    private var markerAtPlayhead: TimelineMarker? {
+        selectedEpisode?.markers.first { abs($0.time - currentTime) < 0.25 }
+    }
+
+    var isOnMarker: Bool { markerAtPlayhead != nil }
+
+    func toggleMarker() {
+        let time = currentTime
+        if let marker = markerAtPlayhead {
+            mutateSelectedEpisode(reloadPreview: false) { $0.markers.removeAll { $0.id == marker.id } }
+        } else {
+            mutateSelectedEpisode(reloadPreview: false) { $0.markers.append(TimelineMarker(time: time)) }
+        }
+    }
+
+    func jumpToMarker(forward: Bool) {
+        let times = selectedEpisode?.markers.map(\.time) ?? []
+        let target = forward
+            ? times.first { $0 > currentTime + 0.05 }
+            : times.last { $0 < currentTime - 0.05 }
+        if let target { seek(to: target) }
     }
 
     func stepFrame(by frames: Int) {

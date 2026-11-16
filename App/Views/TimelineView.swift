@@ -46,6 +46,7 @@ struct TimelineView: View {
     let overlays: [TextOverlay]
     let audioClips: [AudioClip]
     let mediaOverlays: [MediaOverlay]
+    let markers: [Double]
     let totalDuration: Double
     let currentTime: Double
     let selectedID: UUID?
@@ -217,7 +218,18 @@ struct TimelineView: View {
         let duration = safeDuration
         let major = majorTickInterval(pps: pps)
         let minorCount = major >= 1 ? 5 : 2
+        let markerTimes = markers
         return Canvas { context, size in
+            for marker in markerTimes {
+                let x = inset + CGFloat(marker) * pps
+                var flag = Path()
+                flag.move(to: CGPoint(x: x - 5, y: 0))
+                flag.addLine(to: CGPoint(x: x + 5, y: 0))
+                flag.addLine(to: CGPoint(x: x, y: 8))
+                flag.closeSubpath()
+                context.fill(flag, with: .color(.orange))
+                context.fill(Path(CGRect(x: x - 0.5, y: 0, width: 1, height: size.height)), with: .color(.orange.opacity(0.6)))
+            }
             let minor = major / Double(minorCount)
             var tick = 0
             var t = 0.0
@@ -282,7 +294,7 @@ struct TimelineView: View {
                 .overlay(alignment: .trailing) {
                     if isSelected {
                         edgeHandle(height: clipHeight)
-                            .gesture(laneGesture(id: segment.id, part: .right) { _, left, right in
+                            .gesture(laneGesture(id: segment.id, part: .right, edges: (segment.startTime, segment.startTime + segment.duration)) { _, left, right in
                                 commitTrim(segment, left: left, right: right)
                             })
                     }
@@ -472,6 +484,11 @@ struct TimelineView: View {
         onCommit: @escaping (Double, Double, Double) -> Void
     ) -> some View {
         let width = max(10, CGFloat(duration) * pixelsPerSecond)
+        let activeDrag = laneDrag?.id == id ? laneDrag : nil
+        let edges = (
+            start - (activeDrag?.move ?? 0) - (activeDrag?.left ?? 0),
+            start + duration - (activeDrag?.move ?? 0) - (activeDrag?.right ?? 0)
+        )
         return ZStack(alignment: .leading) {
             color.opacity(0.55)
             if let waveform {
@@ -496,27 +513,64 @@ struct TimelineView: View {
         .contentShape(Rectangle())
         .onTapGesture { onSelect(id) }
         // Attached before the handle overlays so the handles' own drags aren't overridden.
-        .highPriorityGesture(isSelected ? laneGesture(id: id, part: .move, onCommit: onCommit) : nil)
+        .highPriorityGesture(isSelected ? laneGesture(id: id, part: .move, edges: edges, onCommit: onCommit) : nil)
         .overlay(
             RoundedRectangle(cornerRadius: 5)
                 .stroke(isSelected ? Color.white : color, lineWidth: isSelected ? 2.5 : 1)
                 .allowsHitTesting(false)
         )
         .overlay(alignment: .leading) {
-            if isSelected { edgeHandle(height: laneHeight - 4).gesture(laneGesture(id: id, part: .left, onCommit: onCommit)) }
+            if isSelected { edgeHandle(height: laneHeight - 4).gesture(laneGesture(id: id, part: .left, edges: edges, onCommit: onCommit)) }
         }
         .overlay(alignment: .trailing) {
-            if isSelected { edgeHandle(height: laneHeight - 4).gesture(laneGesture(id: id, part: .right, onCommit: onCommit)) }
+            if isSelected { edgeHandle(height: laneHeight - 4).gesture(laneGesture(id: id, part: .right, edges: edges, onCommit: onCommit)) }
         }
         .offset(x: xPosition(for: start), y: 2)
     }
 
     private enum DragPart { case move, left, right }
 
-    private func laneGesture(id: UUID, part: DragPart, onCommit: @escaping (Double, Double, Double) -> Void) -> some Gesture {
+    /// Playhead, clip boundaries and markers that dragged edges stick to.
+    private var snapPoints: [Double] {
+        var points = [0, currentTime] + markers
+        for segment in segments {
+            points.append(segment.startTime)
+            points.append(segment.startTime + segment.duration)
+        }
+        return points
+    }
+
+    private func snapped(_ seconds: Double, part: DragPart, edges: (Double, Double)?) -> Double {
+        guard let edges else { return seconds }
+        let tolerance = Double(10 / pixelsPerSecond)
+        let candidates: [Double]
+        switch part {
+        case .move: candidates = [edges.0, edges.1]
+        case .left: candidates = [edges.0]
+        case .right: candidates = [edges.1]
+        }
+        var best: Double?
+        for edge in candidates {
+            let moved = edge + seconds
+            for point in snapPoints where abs(point - edge) > 0.001 {
+                let delta = point - moved
+                if abs(delta) < tolerance, abs(delta) < abs(best ?? .infinity) {
+                    best = delta
+                }
+            }
+        }
+        return seconds + (best ?? 0)
+    }
+
+    private func laneGesture(
+        id: UUID,
+        part: DragPart,
+        edges: (Double, Double)? = nil,
+        onCommit: @escaping (Double, Double, Double) -> Void
+    ) -> some Gesture {
         DragGesture(minimumDistance: 2)
             .onChanged { value in
-                let seconds = Double(value.translation.width / pixelsPerSecond)
+                let seconds = snapped(Double(value.translation.width / pixelsPerSecond), part: part, edges: edges)
                 switch part {
                 case .move: laneDrag = LaneDrag(id: id, move: seconds, left: 0, right: 0)
                 case .left: laneDrag = LaneDrag(id: id, move: 0, left: seconds, right: 0)

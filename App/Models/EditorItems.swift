@@ -127,6 +127,11 @@ struct AudioClip: Codable, Identifiable, Hashable {
 }
 
 /// Picture-in-picture image or video placed above the main video.
+struct TimelineMarker: Codable, Identifiable, Hashable {
+    var id = UUID()
+    var time: Double
+}
+
 struct MediaOverlay: Codable, Identifiable, Hashable {
     var id = UUID()
     var assetID: UUID
@@ -212,6 +217,11 @@ extension Episode {
     var mediaOverlays: [MediaOverlay] {
         get { storedMediaOverlays ?? [] }
         set { storedMediaOverlays = newValue }
+    }
+
+    var markers: [TimelineMarker] {
+        get { storedMarkers ?? [] }
+        set { storedMarkers = newValue.sorted { $0.time < $1.time } }
     }
 
     /// Sequential layout of every video clip: intro → recaps → main pieces → outro.
