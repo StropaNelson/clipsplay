@@ -428,11 +428,8 @@ struct AssetImportSheet: View {
                 
                 Section {
                     Button {
-                        switch selectedType {
-                        case .video: showingVideoImporter = true
-                        case .audio: showingAudioImporter = true
-                        case .image: showingImagePicker = true
-                        }
+                        fileImportType = selectedType
+                        showingVideoImporter = true
                     } label: {
                         HStack {
                             Image(systemName: selectedType.icon)
@@ -441,6 +438,18 @@ struct AssetImportSheet: View {
                         .frame(maxWidth: .infinity)
                     }
                     .disabled(isImporting)
+                    if selectedType == .image {
+                        Button {
+                            showingImagePicker = true
+                        } label: {
+                            Label("Escolher da galeria de Fotos", systemImage: "photo.on.rectangle")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .disabled(isImporting)
+                    }
+                    if isImporting {
+                        ProgressView("Importando…")
+                    }
                 }
                 
                 if let error = errorMessage {
@@ -466,29 +475,64 @@ struct AssetImportSheet: View {
                     Button("Fechar") { dismiss() }
                 }
             }
+            // A single file importer: SwiftUI only honours one `.fileImporter` per view.
             .fileImporter(
                 isPresented: $showingVideoImporter,
-                allowedContentTypes: VideoImporter.supportedVideoTypes,
+                allowedContentTypes: allowedTypes(for: fileImportType),
                 allowsMultipleSelection: false
             ) { result in
-                handleImport(result, type: .video)
-            }
-            .fileImporter(
-                isPresented: $showingAudioImporter,
-                allowedContentTypes: VideoImporter.supportedAudioTypes,
-                allowsMultipleSelection: false
-            ) { result in
-                handleImport(result, type: .audio)
+                handleImport(result, type: fileImportType)
             }
             .photosPicker(
                 isPresented: $showingImagePicker,
                 selection: $imageSelection,
                 matching: .images
             )
+            .onChange(of: imageSelection) { item in
+                guard let item else { return }
+                importPhoto(item)
+            }
         }
     }
     
     @State private var imageSelection: PhotosPickerItem?
+    @State private var fileImportType: AssetType = .video
+
+    private func allowedTypes(for type: AssetType) -> [UTType] {
+        switch type {
+        case .video: return VideoImporter.supportedVideoTypes
+        case .audio: return VideoImporter.supportedAudioTypes
+        case .image: return VideoImporter.supportedImageTypes
+        }
+    }
+
+    private func importPhoto(_ item: PhotosPickerItem) {
+        Task {
+            isImporting = true
+            errorMessage = nil
+            defer {
+                isImporting = false
+                imageSelection = nil
+            }
+            do {
+                guard let data = try await item.loadTransferable(type: Data.self),
+                      let image = UIImage(data: data),
+                      let jpeg = image.jpegData(compressionQuality: 0.92) else {
+                    errorMessage = "Não foi possível ler a imagem selecionada."
+                    return
+                }
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("imagem_\(UUID().uuidString).jpg")
+                try jpeg.write(to: url, options: .atomic)
+                defer { try? FileManager.default.removeItem(at: url) }
+                let asset = try await importer.importMediaAsset(from: url, type: .image)
+                onComplete(asset)
+                dismiss()
+            } catch {
+                errorMessage = "Erro ao importar imagem: \(error.localizedDescription)"
+            }
+        }
+    }
     
     private func handleImport(_ result: Result<[URL], Error>, type: AssetType) {
         Task {
