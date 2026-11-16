@@ -229,7 +229,7 @@ private final class RecognitionState: @unchecked Sendable {
         // spoken later have a different start time and are kept.
         let text = Self.text(segments)
         let start = segments.first?.timestamp ?? 0
-        let isDuplicate = text == lastCommittedText && abs(start - lastCommittedStart) < 1.5
+        let isDuplicate = text == lastCommittedText && abs(start - lastCommittedStart) < 0.3
         if !segments.isEmpty, !isDuplicate {
             committed.append(contentsOf: segments)
             lastCommittedText = text
