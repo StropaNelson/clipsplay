@@ -171,7 +171,8 @@ enum SubtitleFile {
         let seconds = Double(String(parts[parts.count - 1])) ?? -1
         let minutes = Double(String(parts[parts.count - 2])) ?? -1
         let hours = parts.count == 3 ? (Double(String(parts[0])) ?? -1) : 0
-        guard hours >= 0, minutes >= 0, seconds >= 0, seconds < 60 else { return nil }
+        guard hours.isFinite, minutes.isFinite, seconds.isFinite,
+              hours >= 0, minutes >= 0, seconds >= 0, seconds < 60 else { return nil }
         return hours * 3600 + minutes * 60 + seconds
     }
 
