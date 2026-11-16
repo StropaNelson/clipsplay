@@ -5,9 +5,10 @@ struct HomeView: View {
     @StateObject private var viewModel = HomeViewModel()
     @State private var showingNewProject = false
     @State private var showingImport = false
+    @State private var showingVideoImport = false
     @State private var projectToEdit: ProjectSummary?
     @State private var newProjectName = ""
-    @State private var importURL: URL?
+    @State private var pendingProjectName: String?
     
     var body: some View {
         NavigationStack {
@@ -38,11 +39,32 @@ struct HomeView: View {
                     }
                 }
             }
-            .sheet(isPresented: $showingNewProject) {
+            .sheet(isPresented: $showingNewProject, onDismiss: {
+                if pendingProjectName != nil {
+                    showingVideoImport = true
+                }
+            }) {
                 NewProjectSheet(onCreate: { name in
-                    Task { await viewModel.createProject(name: name) }
+                    pendingProjectName = name
                     showingNewProject = false
                 })
+            }
+            .fileImporter(
+                isPresented: $showingVideoImport,
+                allowedContentTypes: VideoImporter.supportedVideoTypes,
+                allowsMultipleSelection: false
+            ) { result in
+                switch result {
+                case .success(let urls):
+                    guard let url = urls.first, let name = pendingProjectName else { return }
+                    pendingProjectName = nil
+                    Task { await viewModel.createProject(name: name, from: url) }
+                case .failure(let error):
+                    pendingProjectName = nil
+                    if (error as NSError).code != NSUserCancelledError {
+                        viewModel.errorMessage = "Erro ao selecionar vídeo: \(error.localizedDescription)"
+                    }
+                }
             }
             .fileImporter(
                 isPresented: $showingImport,
@@ -59,6 +81,9 @@ struct HomeView: View {
                 Button("OK") { viewModel.errorMessage = nil }
             } message: {
                 Text(viewModel.errorMessage ?? "")
+            }
+            .fullScreenCover(item: $viewModel.selectedProject) { project in
+                EditorView(project: project)
             }
             .refreshable {
                 await viewModel.loadProjects()
@@ -308,13 +333,20 @@ class HomeViewModel: ObservableObject {
         }
     }
     
-    func createProject(name: String) async {
+    func createProject(name: String, from videoURL: URL) async {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
         
         errorMessage = nil
-        // Project creation requires a video, so we'll prompt for import
-        // This is handled by the editor flow
+        do {
+            var project = try await importer.importVideo(from: videoURL, projectName: trimmed)
+            project.regenerateEpisodes()
+            try await storage.saveProject(project)
+            await loadProjects()
+            selectedProject = project
+        } catch {
+            errorMessage = "Erro ao criar projeto: \(error.localizedDescription)"
+        }
     }
     
     func selectProject(_ summary: ProjectSummary) {
