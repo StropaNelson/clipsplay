@@ -5,8 +5,8 @@ import UIKit
 /// A video composition that renders through ClipFilterCompositor, applying
 /// per-clip Core Image adjustments and chroma key on video overlays.
 final class FilterVideoComposition: AVMutableVideoComposition {
-    /// Per-track render info keyed by persistent track ID.
-    var trackRenders: [CMPersistentTrackID: TrackRenderInfo] = [:]
+    /// Render infos per track; tracks are reused by several non-overlapping clips.
+    var trackRenders: [CMPersistentTrackID: [TrackRenderInfo]] = [:]
     var fitMode: FitMode = .fit
 }
 
@@ -91,11 +91,12 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
         let time = request.compositionTime.seconds
         var clips: [(CMPersistentTrackID, TrackRenderInfo)] = []
         var overlays: [(CMPersistentTrackID, TrackRenderInfo)] = []
-        for (trackID, info) in composition.trackRenders {
-            guard time >= info.start, time < info.end else { continue }
-            switch info.kind {
-            case .clip: clips.append((trackID, info))
-            case .overlay: overlays.append((trackID, info))
+        for (trackID, infos) in composition.trackRenders {
+            for info in infos where time >= info.start && time < info.end {
+                switch info.kind {
+                case .clip: clips.append((trackID, info))
+                case .overlay: overlays.append((trackID, info))
+                }
             }
         }
         clips.sort { $0.1.start < $1.1.start }

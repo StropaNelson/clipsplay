@@ -644,9 +644,9 @@ actor VideoProcessor {
         videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
         videoComposition.instructions = instructions
         videoComposition.fitMode = fitMode
-        var renders: [CMPersistentTrackID: TrackRenderInfo] = [:]
+        var renders: [CMPersistentTrackID: [TrackRenderInfo]] = [:]
         for clip in clips {
-            renders[clip.track.trackID] = TrackRenderInfo(
+            renders[clip.track.trackID, default: []].append(TrackRenderInfo(
                 kind: .clip,
                 start: clip.start.seconds,
                 end: clip.end.seconds,
@@ -655,10 +655,10 @@ actor VideoProcessor {
                 transform: clip.transform,
                 transition: clip.transition,
                 adjustments: clip.adjustments
-            )
+            ))
         }
         for overlay in overlays {
-            renders[overlay.track.trackID] = TrackRenderInfo(
+            renders[overlay.track.trackID, default: []].append(TrackRenderInfo(
                 kind: .overlay,
                 start: overlay.start.seconds,
                 end: overlay.end.seconds,
@@ -670,7 +670,7 @@ actor VideoProcessor {
                 overlayOpacity: overlay.opacity,
                 overlayRotation: overlay.rotation,
                 chromaKey: overlay.chromaKey
-            )
+            ))
         }
         videoComposition.trackRenders = renders
         videoComposition.customVideoCompositorClass = ClipFilterCompositor.self

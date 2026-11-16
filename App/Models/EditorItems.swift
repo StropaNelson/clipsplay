@@ -316,6 +316,7 @@ extension VideoSegment {
         piece.narrationOffset = (narrationOffset ?? 0) + (sourceTime - startTime) / playbackSpeed
         piece.speed = speed
         piece.clipTransform = clipTransform
+        piece.adjustments = adjustments
         return piece
     }
 

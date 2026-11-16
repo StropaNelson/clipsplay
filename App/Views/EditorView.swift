@@ -1406,6 +1406,8 @@ class EditorViewModel: ObservableObject {
                 transitionStyle: TransitionStyle.none
             )
             freeze.playbackSpeed = frame / seconds
+            freeze.adjustments = original.adjustments
+            freeze.clipTransform = original.clipTransform
             freezeID = freeze.id
             var replacement: [VideoSegment] = []
             if cut - original.startTime > 0.05 {
@@ -1442,6 +1444,7 @@ class EditorViewModel: ObservableObject {
                 copy.narrationOffset = original.narrationOffset
                 copy.speed = original.speed
                 copy.clipTransform = original.clipTransform
+                copy.adjustments = original.adjustments
                 clips.insert(copy, at: index + 1)
                 episode.mainClips = clips
             }
