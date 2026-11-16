@@ -160,6 +160,7 @@ struct TextOverlayEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var overlay: TextOverlay
     @State private var color: Color
+    @FocusState private var isTextFocused: Bool
 
     init(request: TextEditRequest, episodeDuration: Double, onSave: @escaping (TextOverlay) -> Void, onDelete: @escaping () -> Void) {
         self.isNew = request.isNew
@@ -177,6 +178,11 @@ struct TextOverlayEditorSheet: View {
                     TextField("Digite o texto", text: $overlay.text, axis: .vertical)
                         .lineLimit(1...4)
                         .font(.title3)
+                        .focused($isTextFocused)
+                        .onAppear {
+                            guard isNew else { return }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { isTextFocused = true }
+                        }
                 }
 
                 Section("Estilo") {

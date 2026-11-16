@@ -104,10 +104,9 @@ struct EditorView: View {
                 )
                 .frame(maxHeight: .infinity)
                 Divider().overlay(EditorTheme.divider)
-                toolBar
+                featureSheets(on: toolBar)
             }
         }
-        .background(featureSheets)
         .background(EditorTheme.background.ignoresSafeArea())
         .preferredColorScheme(.dark)
         .sheet(isPresented: $viewModel.showDuplicateSheet) {
@@ -593,9 +592,10 @@ struct EditorView: View {
         .background(EditorTheme.panel)
     }
 
-    private var featureSheets: some View {
-        Color.clear
-            .frame(width: 0, height: 0)
+    /// Sheets hang off a real, visible view: presenting from a zero-size host can leave text
+    /// fields in the sheet unable to become first responder.
+    private func featureSheets<Content: View>(on content: Content) -> some View {
+        content
             .sheet(item: $textEditRequest) { request in
                 TextOverlayEditorSheet(
                     request: request,
