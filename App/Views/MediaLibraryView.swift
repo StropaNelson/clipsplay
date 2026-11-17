@@ -499,7 +499,7 @@ struct AssetImportSheet: View {
     @State private var gallerySelection: PhotosPickerItem?
     @State private var fileImportType: AssetType = .video
 
-    private var galleryPickerFilter: PhotosPickerFilter {
+    private var galleryPickerFilter: PHPickerFilter {
         if selectedType == .video { return .videos }
         return .images
     }

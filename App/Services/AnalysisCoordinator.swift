@@ -75,7 +75,7 @@ actor AnalysisCoordinator {
         var transcriptSRT = discardProjectTranscript ? nil : project.transcriptSRT
         var words = discardProjectTranscript ? [] : (project.transcriptWords ?? [])
         var transcriptionWasGenerated = false
-        var transcriptionLocale = cached?.transcriptionLocale
+        let transcriptionLocale = cached?.transcriptionLocale
         let cachedSceneCuts = cached?.sceneCuts ?? []
 
         progress(AnalysisProgress(stage: .preparing, message: "Verificando vídeo e índice anterior…", fraction: 0.05))
