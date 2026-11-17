@@ -485,7 +485,9 @@ actor VideoProcessor {
 
     /// Adds burned-in text for export. Core Animation layers can't be used with AVPlayerItem,
     /// so the editor draws the same overlays with SwiftUI during preview.
-    @MainActor
+    /// Adds burned-in text/image overlays for export by routing the frame through
+    /// ClipFilterCompositor, which draws them in Core Image alongside the clips.
+    /// (AVVideoCompositionCoreAnimationTool froze the video on this compositor setup.)
     func applyTextOverlays(
         _ overlays: [TextOverlay],
         images: [ImageOverlayRender] = [],
@@ -498,230 +500,18 @@ actor VideoProcessor {
         mutable.renderSize = videoComposition.renderSize
         mutable.frameDuration = videoComposition.frameDuration
         mutable.instructions = videoComposition.instructions
-        mutable.customVideoCompositorClass = videoComposition.customVideoCompositorClass
+        mutable.customVideoCompositorClass = ClipFilterCompositor.self
         if let source = videoComposition as? FilterVideoComposition {
             mutable.trackRenders = source.trackRenders
             mutable.fitMode = source.fitMode
             mutable.fadeEdges = source.fadeEdges
             mutable.contentDuration = source.contentDuration
         }
-        let size = mutable.renderSize
-        // CALayer trees must be built inside an explicit transaction — an implicit
-        // one on a background thread may never commit and can crash the exporter.
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        let parent = CALayer()
-        parent.frame = CGRect(origin: .zero, size: size)
-        parent.isGeometryFlipped = true
-        let videoLayer = CALayer()
-        videoLayer.frame = parent.frame
-        parent.addSublayer(videoLayer)
-        for render in images {
-            let overlay = render.overlay
-            let layer = CALayer()
-            let width = CGFloat(overlay.widthFraction) * size.width
-            let aspect = CGFloat(render.image.height) / CGFloat(max(render.image.width, 1))
-            layer.bounds = CGRect(x: 0, y: 0, width: width, height: width * aspect)
-            layer.position = CGPoint(x: overlay.centerX * size.width, y: overlay.centerY * size.height)
-            layer.contents = render.image
-            layer.contentsGravity = .resizeAspect
-            layer.setAffineTransform(CGAffineTransform(rotationAngle: CGFloat(overlay.rotation * .pi / 180)))
-            Self.addVisibility(to: layer, start: overlay.startTime, duration: overlay.duration, opacity: overlay.opacity)
-            parent.addSublayer(layer)
-        }
-        for overlay in visible {
-            parent.addSublayer(Self.textLayer(for: overlay, renderSize: size))
-        }
-        CATransaction.commit()
-        mutable.animationTool = AVVideoCompositionCoreAnimationTool(
-            postProcessingAsVideoLayer: videoLayer,
-            in: parent
-        )
+        mutable.textOverlays = visible
+        mutable.imageOverlays = images
         return mutable
     }
 
-    private static func textLayer(for overlay: TextOverlay, renderSize size: CGSize) -> CALayer {
-        let fontSize = max(8, CGFloat(overlay.fontScale) * size.height)
-        let font = UIFont.systemFont(ofSize: fontSize, weight: overlay.isBold ? .bold : .regular)
-        let maxWidth = size.width * 0.9
-        let bounds = (overlay.text as NSString).boundingRect(
-            with: CGSize(width: maxWidth, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: font],
-            context: nil
-        ).integral
-        let padding = overlay.style == .box ? fontSize * 0.35 : 0
-
-        let container = CALayer()
-        container.bounds = CGRect(x: 0, y: 0, width: bounds.width + padding * 2, height: bounds.height + padding * 2)
-        container.position = CGPoint(x: overlay.positionX * size.width, y: overlay.positionY * size.height)
-        if overlay.style == .box {
-            container.backgroundColor = overlay.color.isDark
-                ? UIColor.white.withAlphaComponent(0.85).cgColor
-                : UIColor.black.withAlphaComponent(0.6).cgColor
-            container.cornerRadius = fontSize * 0.25
-        }
-
-        let text = CATextLayer()
-        text.string = overlay.text
-        text.font = CTFontCreateWithName(font.fontName as CFString, fontSize, nil)
-        text.fontSize = fontSize
-        text.foregroundColor = overlay.color.uiColor.cgColor
-        text.alignmentMode = .center
-        text.isWrapped = true
-        text.contentsScale = 2
-        text.frame = CGRect(x: padding, y: padding, width: bounds.width, height: bounds.height)
-        if overlay.style == .shadow {
-            text.shadowColor = UIColor.black.cgColor
-            text.shadowOpacity = 0.85
-            text.shadowRadius = fontSize * 0.08
-            text.shadowOffset = .zero
-        }
-        container.addSublayer(text)
-
-        if let words = overlay.highlightWords {
-            let color = overlay.color.uiColor.cgColor
-            let highlight = UIColor(TextOverlay.highlightColor).cgColor
-            let ctFont = CTFontCreateWithName(font.fontName as CFString, fontSize, nil)
-            text.string = Self.captionString(words, highlighted: nil, font: ctFont, base: color, highlight: highlight)
-            for (index, word) in words.enumerated() {
-                let layer = CATextLayer()
-                layer.string = Self.captionString(words, highlighted: index, font: ctFont, base: UIColor.clear.cgColor, highlight: highlight)
-                layer.alignmentMode = .center
-                layer.isWrapped = true
-                layer.contentsScale = 2
-                layer.frame = text.frame
-                let end = index + 1 < words.count ? words[index + 1].start : overlay.duration
-                Self.addWindow(to: layer, start: overlay.startTime + word.start, duration: max(0.01, end - word.start))
-                container.addSublayer(layer)
-            }
-        }
-
-        addVisibility(to: container, start: overlay.startTime, duration: overlay.duration)
-        if (overlay.animation ?? TextAnimationStyle.none) != TextAnimationStyle.none || (overlay.exitAnimation ?? TextAnimationStyle.none) != TextAnimationStyle.none {
-            // Animate a wrapper so the container's visibility window still hides it after the end.
-            let wrapper = CALayer()
-            wrapper.frame = CGRect(origin: .zero, size: size)
-            wrapper.addSublayer(container)
-            if let animation = overlay.animation, animation != .none {
-                Self.addEntrance(animation, to: wrapper, at: overlay.startTime, size: size)
-            }
-            if let exit = overlay.exitAnimation, exit != .none {
-                Self.addExit(exit, to: wrapper, endingAt: overlay.startTime + overlay.duration, size: size)
-            }
-            return wrapper
-        }
-        return container
-    }
-
-    /// Entrance animation for exported text: 0.4s at overlay start.
-    private static func addEntrance(_ style: TextAnimationStyle, to layer: CALayer, at start: Double, size: CGSize) {
-        let begin = start <= 0 ? AVCoreAnimationBeginTimeAtZero : start
-        let duration = 0.4
-        func animate(_ keyPath: String, _ from: NSNumber, _ to: NSNumber) {
-            let a = CABasicAnimation(keyPath: keyPath)
-            a.fromValue = from
-            a.toValue = to
-            a.beginTime = begin
-            a.duration = duration
-            a.fillMode = .both
-            a.isRemovedOnCompletion = false
-            layer.add(a, forKey: keyPath)
-        }
-        switch style {
-        case .fade, .typewriter:
-            // Typewriter approximates the per-character reveal as a fade + slight slide.
-            animate("opacity", 0, 1)
-            if style == .typewriter {
-                animate("transform.translation.x", NSNumber(value: -size.width * 0.02), 0)
-            }
-        case .slide:
-            animate("transform.translation.y", NSNumber(value: size.height * 0.15), 0)
-            animate("opacity", 0, 1)
-        case .pop:
-            animate("transform.scale", 0.2, 1)
-            animate("opacity", 0, 1)
-        case .bounce:
-            animate("transform.translation.y", NSNumber(value: -size.height * 0.25), 0)
-            animate("opacity", 0, 1)
-        case .none:
-            break
-        }
-    }
-
-    /// Exit animation for exported text: 0.35s ending at `end`.
-    private static func addExit(_ style: TextAnimationStyle, to layer: CALayer, endingAt end: Double, size: CGSize) {
-        let begin = max(0, end - 0.35)
-        let duration = 0.35
-        func animate(_ keyPath: String, _ from: NSNumber, _ to: NSNumber) {
-            let a = CABasicAnimation(keyPath: keyPath)
-            a.fromValue = from
-            a.toValue = to
-            a.beginTime = begin <= 0 ? AVCoreAnimationBeginTimeAtZero : begin
-            a.duration = duration
-            a.fillMode = .both
-            a.isRemovedOnCompletion = false
-            layer.add(a, forKey: "exit-" + keyPath)
-        }
-        switch style {
-        case .slide:
-            animate("transform.translation.y", 0, NSNumber(value: size.height * 0.15))
-            animate("opacity", 1, 0)
-        case .pop:
-            animate("transform.scale", 1, 0.2)
-            animate("opacity", 1, 0)
-        case .bounce:
-            animate("transform.translation.y", 0, NSNumber(value: -size.height * 0.25))
-            animate("opacity", 1, 0)
-        case .fade, .typewriter, .none:
-            animate("opacity", 1, 0)
-        }
-    }
-
-    private static func captionString(_ words: [TranscriptWord], highlighted: Int?, font: CTFont, base: CGColor, highlight: CGColor) -> NSAttributedString {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        let result = NSMutableAttributedString()
-        for (index, word) in words.enumerated() {
-            let color = index == highlighted ? highlight : base
-            result.append(NSAttributedString(
-                string: (index == 0 ? "" : " ") + word.text,
-                attributes: [
-                    NSAttributedString.Key(kCTFontAttributeName as String): font,
-                    NSAttributedString.Key(kCTForegroundColorAttributeName as String): color,
-                    .paragraphStyle: paragraph
-                ]
-            ))
-        }
-        return result
-    }
-
-    /// Shows a layer only between `start` and `start + duration`, with no fade.
-    private static func addWindow(to layer: CALayer, start: Double, duration: Double) {
-        layer.opacity = 0
-        let animation = CABasicAnimation(keyPath: "opacity")
-        animation.fromValue = 1
-        animation.toValue = 1
-        animation.beginTime = start <= 0 ? AVCoreAnimationBeginTimeAtZero : start
-        animation.duration = duration
-        animation.fillMode = .removed
-        animation.isRemovedOnCompletion = false
-        layer.add(animation, forKey: "window")
-    }
-
-    private static func addVisibility(to layer: CALayer, start: Double, duration: Double, opacity: Double = 1) {
-        layer.opacity = 0
-        let fade = min(0.2 / max(duration, 0.01), 0.25)
-        let animation = CAKeyframeAnimation(keyPath: "opacity")
-        animation.values = [0, opacity, opacity, 0]
-        animation.keyTimes = [0, NSNumber(value: fade), NSNumber(value: 1 - fade), 1]
-        animation.beginTime = start <= 0 ? AVCoreAnimationBeginTimeAtZero : start
-        animation.duration = duration
-        animation.fillMode = .both
-        animation.isRemovedOnCompletion = false
-        layer.add(animation, forKey: "visibility")
-    }
-    
     func exportComposition(
         _ composition: AVComposition,
         to outputURL: URL,

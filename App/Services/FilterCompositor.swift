@@ -12,6 +12,35 @@ final class FilterVideoComposition: AVMutableVideoComposition, @unchecked Sendab
     /// When set, fades the whole frame to black at both ends of the content.
     var fadeEdges = false
     var contentDuration = 0.0
+    /// Burned-in text overlays (episode timeline time).
+    var textOverlays: [TextOverlay] = []
+    /// Burned-in image/video overlays already rasterized to CGImage.
+    var imageOverlays: [ImageOverlayRender] = []
+
+    private func copyProperties(to other: FilterVideoComposition) {
+        other.trackRenders = trackRenders
+        other.fitMode = fitMode
+        other.fadeEdges = fadeEdges
+        other.contentDuration = contentDuration
+        other.textOverlays = textOverlays
+        other.imageOverlays = imageOverlays
+    }
+
+    override func copy(with zone: NSZone? = nil) -> Any {
+        guard let copy = super.copy(with: zone) as? FilterVideoComposition else {
+            return super.copy(with: zone) as Any
+        }
+        copyProperties(to: copy)
+        return copy
+    }
+
+    override func mutableCopy(with zone: NSZone? = nil) -> Any {
+        guard let copy = super.mutableCopy(with: zone) as? FilterVideoComposition else {
+            return super.mutableCopy(with: zone) as Any
+        }
+        copyProperties(to: copy)
+        return copy
+    }
 }
 
 struct TrackRenderInfo {
@@ -190,7 +219,83 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
                 ])
             }
         }
+        for render in composition.imageOverlays where render.overlay.isVisible(at: time) {
+            result = compositeImageOverlay(render, over: result, time: time, renderSize: renderSize)
+        }
+        for overlay in composition.textOverlays where overlay.isVisible(at: time) {
+            result = compositeTextOverlay(overlay, over: result, time: time, renderSize: renderSize)
+        }
         return result
+    }
+
+    /// PiP-style image overlay: centered at normalized top-left-origin point,
+    /// width fraction of the render width, rotation negated for the y-flipped space.
+    private func compositeImageOverlay(_ render: ImageOverlayRender, over canvas: CIImage,
+                                       time: Double, renderSize: CGSize) -> CIImage {
+        let overlay = render.overlay
+        let elapsed = time - overlay.startTime
+        let opacity = Double(overlay.opacity) * OverlayMath.visibilityFade(elapsed: elapsed, duration: overlay.duration)
+        guard opacity > 0.001 else { return canvas }
+        var image = CIImage(cgImage: render.image)
+        let width = CGFloat(overlay.widthFraction) * renderSize.width
+        let scale = width / max(1, image.extent.width)
+        let center = OverlayMath.ciPoint(x: overlay.centerX, y: overlay.centerY,
+                                         width: Double(renderSize.width), height: Double(renderSize.height))
+        var transform = CGAffineTransform(translationX: -image.extent.midX, y: -image.extent.midY)
+        transform = transform.concatenating(CGAffineTransform(scaleX: scale, y: scale))
+        transform = transform.concatenating(CGAffineTransform(rotationAngle: CGFloat(-overlay.rotation * .pi / 180)))
+        transform = transform.concatenating(CGAffineTransform(translationX: CGFloat(center.x), y: CGFloat(center.y)))
+        image = image.transformed(by: transform)
+        if opacity < 0.999 {
+            image = image.applyingFilter("CIColorMatrix", parameters: [
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: opacity)
+            ])
+        }
+        return image.composited(over: canvas)
+    }
+
+    /// Burned-in text: rasterized on demand (cached per overlay + highlighted word),
+    /// then placed/animated exactly like the editor preview.
+    private func compositeTextOverlay(_ overlay: TextOverlay, over canvas: CIImage,
+                                      time: Double, renderSize: CGSize) -> CIImage {
+        let elapsed = time - overlay.startTime
+        let highlighted = highlightedWordIndex(for: overlay, elapsed: elapsed)
+        guard var image = TextOverlayRasterizer.shared.image(for: overlay, highlighted: highlighted,
+                                                             renderSize: renderSize) else { return canvas }
+        let visibility = OverlayMath.visibilityFade(elapsed: elapsed, duration: overlay.duration)
+        let state = OverlayMath.animationState(
+            entrance: overlay.animation,
+            exit: overlay.exitAnimation,
+            startTime: overlay.startTime,
+            duration: overlay.duration,
+            time: time,
+            renderHeight: Double(renderSize.height)
+        )
+        let opacity = visibility * state.opacity
+        guard opacity > 0.001 else { return canvas }
+        let center = OverlayMath.ciPoint(x: overlay.positionX, y: overlay.positionY,
+                                         width: Double(renderSize.width), height: Double(renderSize.height))
+        var transform = CGAffineTransform(translationX: -image.extent.midX, y: -image.extent.midY)
+        transform = transform.concatenating(CGAffineTransform(scaleX: CGFloat(state.scale), y: CGFloat(state.scale)))
+        transform = transform.concatenating(CGAffineTransform(
+            translationX: CGFloat(center.x), y: CGFloat(center.y + state.dy)
+        ))
+        image = image.transformed(by: transform)
+        if opacity < 0.999 {
+            image = image.applyingFilter("CIColorMatrix", parameters: [
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: opacity)
+            ])
+        }
+        return image.composited(over: canvas)
+    }
+
+    private func highlightedWordIndex(for overlay: TextOverlay, elapsed: Double) -> Int? {
+        guard let words = overlay.highlightWords else { return nil }
+        for (index, word) in words.enumerated() {
+            let end = index + 1 < words.count ? words[index + 1].start : overlay.duration
+            if elapsed >= word.start && elapsed < end { return index }
+        }
+        return words.isEmpty ? nil : words.count - 1
     }
 
     private func applyAdjustments(_ adjustments: ClipAdjustments, to input: CIImage) -> CIImage {
@@ -487,5 +592,121 @@ private final class AutoFramingTracker {
             x: extent.minX + box.midX * extent.width,
             y: extent.minY + (1 - (box.minY + box.height * verticalAnchor)) * extent.height
         )
+    }
+}
+
+/// Rasterizes TextOverlays into CGImages for the compositor, matching the
+/// SwiftUI preview look (font, padding, box/shadow/plain styles, caption
+/// word highlighting). Thread-safe: startRequest may run concurrently.
+final class TextOverlayRasterizer {
+    static let shared = TextOverlayRasterizer()
+
+    private let queue = DispatchQueue(label: "clipstudio.textrasterizer")
+    private var cache: [String: CIImage] = [:]
+    private let cacheLimit = 64
+
+    func image(for overlay: TextOverlay, highlighted: Int?, renderSize: CGSize) -> CIImage? {
+        // Content + size in the key: edited text or another export size must re-render.
+        let key = "\(overlay.hashValue):\(highlighted ?? -1):\(Int(renderSize.width))x\(Int(renderSize.height))"
+        return queue.sync {
+            if let cached = cache[key] { return cached }
+            guard let rendered = render(overlay, highlighted: highlighted, renderSize: renderSize) else {
+                return nil
+            }
+            if cache.count >= cacheLimit { cache.removeAll() }
+            cache[key] = rendered
+            return rendered
+        }
+    }
+
+    private func render(_ overlay: TextOverlay, highlighted: Int?, renderSize: CGSize) -> CIImage? {
+        let fontSize = max(8, CGFloat(overlay.fontScale) * renderSize.height)
+        let font = UIFont.systemFont(ofSize: fontSize, weight: overlay.isBold ? .bold : .regular)
+        let maxWidth = renderSize.width * 0.9
+        let attributed = attributedText(overlay, highlighted: highlighted, font: font)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        attributed.addAttribute(.paragraphStyle, value: paragraph,
+                                range: NSRange(location: 0, length: attributed.length))
+        let bounds = attributed.boundingRect(
+            with: CGSize(width: maxWidth, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            context: nil
+        ).integral
+        guard bounds.width > 0, bounds.height > 0 else { return nil }
+
+        let padding = overlay.style == .box ? fontSize * 0.35 : 0
+        // Shadow blur must not clip, so give the image extra margin.
+        let shadowMargin = overlay.style == .shadow ? fontSize * 0.16 + 4 : CGFloat(2)
+        let imageSize = CGSize(
+            width: bounds.width + (padding + shadowMargin) * 2,
+            height: bounds.height + (padding + shadowMargin) * 2
+        )
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = false
+        let uiImage = UIGraphicsImageRenderer(size: imageSize, format: format).image { context in
+            let cgContext = context.cgContext
+            let textRect = CGRect(
+                x: padding + shadowMargin,
+                y: padding + shadowMargin,
+                width: bounds.width,
+                height: bounds.height
+            )
+            if overlay.style == .box {
+                let boxColor = overlay.color.isDark
+                    ? UIColor.white.withAlphaComponent(0.85)
+                    : UIColor.black.withAlphaComponent(0.6)
+                cgContext.setFillColor(boxColor.cgColor)
+                let boxRect = CGRect(origin: .zero, size: imageSize)
+                    .insetBy(dx: shadowMargin, dy: shadowMargin)
+                cgContext.addPath(CGPath(
+                    roundedRect: boxRect,
+                    cornerWidth: fontSize * 0.25,
+                    cornerHeight: fontSize * 0.25,
+                    transform: nil
+                ))
+                cgContext.fillPath()
+            }
+            if overlay.style == .shadow {
+                cgContext.saveGState()
+                cgContext.setShadow(
+                    offset: .zero,
+                    blur: fontSize * 0.08,
+                    color: UIColor.black.withAlphaComponent(0.85).cgColor
+                )
+                attributed.draw(with: textRect, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+                cgContext.restoreGState()
+            } else {
+                attributed.draw(with: textRect, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+            }
+        }
+        guard let cgImage = uiImage.cgImage else { return nil }
+        return CIImage(cgImage: cgImage)
+    }
+
+    /// Text with the spoken word tinted when `highlighted` is set (dynamic captions).
+    private func attributedText(_ overlay: TextOverlay, highlighted: Int?, font: UIFont) -> NSMutableAttributedString {
+        let base = overlay.color.uiColor
+        guard let words = overlay.highlightWords else {
+            return NSMutableAttributedString(
+                string: overlay.text,
+                attributes: [.font: font, .foregroundColor: base]
+            )
+        }
+        let highlight = UIColor(TextOverlay.highlightColor)
+        let result = NSMutableAttributedString()
+        for (index, word) in words.enumerated() {
+            let piece = NSMutableAttributedString(
+                string: index == 0 ? word.text : " \(word.text)",
+                attributes: [
+                    .font: font,
+                    .foregroundColor: index == highlighted ? highlight : base
+                ]
+            )
+            result.append(piece)
+        }
+        return result
     }
 }
