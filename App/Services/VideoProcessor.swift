@@ -731,7 +731,7 @@ actor VideoProcessor {
         
         exporter.outputURL = outputURL
         exporter.outputFileType = .mp4
-        exporter.shouldOptimizeForNetworkUse = true
+        exporter.shouldOptimizeForNetworkUse = false
         exporter.videoComposition = videoComposition
         exporter.audioMix = audioMix
         
@@ -1200,7 +1200,7 @@ actor VideoProcessor {
 }
 
 /// Polls `session.progress` while an export runs and resumes the continuation exactly once.
-/// If progress stalls for two minutes the session is cancelled and reported as `exportStalled`.
+/// If progress stalls (4 min, or 15 min while finalizing the file) the session is cancelled and reported as `exportStalled`.
 private final class ExportMonitor: @unchecked Sendable {
     private let lock = NSLock()
     private let session: AVAssetExportSession
@@ -1245,8 +1245,9 @@ private final class ExportMonitor: @unchecked Sendable {
             lastProgress = current
             lastProgressChange = Date()
         }
+        let stallLimit: TimeInterval = lastProgress >= 0.97 ? 900 : 240
         let didStall = (status == .exporting || status == .waiting)
-            && Date().timeIntervalSince(lastProgressChange) > 120
+            && Date().timeIntervalSince(lastProgressChange) > stallLimit
         lock.unlock()
 
         progress?(Double(current))

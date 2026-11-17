@@ -63,10 +63,11 @@ actor ExportManager {
                     stage: .exporting,
                     episode: episodeNumber,
                     progress: 0.2 + fraction * 0.7,
-                    message: "Exportando vídeo... \(Int(fraction * 100))%"
+                    message: fraction >= 0.97 ? "Finalizando arquivo de vídeo..." : "Exportando vídeo... \(Int(fraction * 100))%"
                 ))
             }
         )
+        withExtendedLifetime(output.sourceAssets) {}
         
         progressHandler(ExportProgress(stage: .exporting, episode: episodeNumber, progress: 0.9, message: "Finalizando vídeo..."))
         
