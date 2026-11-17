@@ -141,6 +141,7 @@ struct AssetTrimRequest: Identifiable {
 struct AssetTrimSheet: View {
     let asset: MediaAsset
     let track: TrackType
+    let vocabulary: [String]
     let onAssign: (ClipSelection) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -150,15 +151,51 @@ struct AssetTrimSheet: View {
     @State private var narration: MediaAsset?
     @State private var clipVolume: Float = 1
     @State private var showingNarration = false
+    @State private var detectedWords: [TranscriptWord]?
+    @State private var hookProgress: Double?
+    @State private var hookError: String?
+    @State private var hookTask: Task<Void, Never>?
 
     private let minimumDuration = 0.1
 
-    init(asset: MediaAsset, track: TrackType, onAssign: @escaping (ClipSelection) -> Void) {
+    /// Words already transcribed for an asset (in-memory only), keyed by asset id.
+    static var hookWordCache: [UUID: [TranscriptWord]] = [:]
+
+    var isVinheta: Bool {
+        track == .intro || track == .outro || track == .recap
+    }
+
+    private var defaultEnd: Double {
+        isVinheta ? min(asset.duration, track == .recap ? 6 : 5) : asset.duration
+    }
+
+    private var suggestions: [HookSuggestion] {
+        guard isVinheta, let words = detectedWords else { return [] }
+        let purpose: HookPurpose = track == .outro ? .closing : .opening
+        return HookFinder.suggest(words: words, duration: asset.duration, purpose: purpose)
+    }
+
+    init(asset: MediaAsset, track: TrackType, words: [TranscriptWord]? = nil,
+         vocabulary: [String] = [], onAssign: @escaping (ClipSelection) -> Void) {
         self.asset = asset
         self.track = track
+        self.vocabulary = vocabulary
         self.onAssign = onAssign
-        self._endTime = State(initialValue: asset.duration)
+        let vinheta = track == .intro || track == .outro || track == .recap
+        let initial = words ?? AssetTrimSheet.hookWordCache[asset.id]
+        var end = vinheta ? min(asset.duration, track == .recap ? 6 : 5) : asset.duration
+        var start = 0.0
+        if vinheta, let words = initial {
+            let purpose: HookPurpose = track == .outro ? .closing : .opening
+            if let top = HookFinder.suggest(words: words, duration: asset.duration, purpose: purpose).first {
+                start = top.start
+                end = top.end
+            }
+        }
+        self._startTime = State(initialValue: start)
+        self._endTime = State(initialValue: end)
         self._player = State(initialValue: AVPlayer(url: asset.url))
+        self._detectedWords = State(initialValue: initial)
     }
 
     var body: some View {
@@ -167,6 +204,33 @@ struct AssetTrimSheet: View {
                 Section {
                     VideoPlayer(player: player)
                         .frame(height: 220)
+
+                    if isVinheta {
+                        Text("Trecho: \(String(format: "%.1f", endTime - startTime)) s (\(formatTime(startTime))–\(formatTime(endTime)))")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                        HStack(spacing: 8) {
+                            ForEach([3.0, 5, 8, 10, 15], id: \.self) { length in
+                                Button {
+                                    applyDuration(length)
+                                } label: {
+                                    Text("\(Int(length)) s")
+                                        .font(.caption.weight(.medium))
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 6)
+                                        .background(Color(uiColor: .tertiarySystemGroupedBackground), in: Capsule())
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                        }
+                        if endTime - startTime > 15 {
+                            Text(track == .recap
+                                 ? "Recaps curtos funcionam melhor."
+                                 : "Aberturas e encerramentos curtos (3–10 s) funcionam melhor.")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                    }
 
                     TrimRangeView(
                         url: asset.url,
@@ -195,6 +259,74 @@ struct AssetTrimSheet: View {
                     Text(asset.name)
                 } footer: {
                     Text("Selecione o trecho do vídeo que será usado como \(track.rawValue.lowercased()).")
+                }
+
+                if isVinheta {
+                    Section {
+                        if detectedWords != nil {
+                            ForEach(suggestions) { suggestion in
+                                Button {
+                                    startTime = suggestion.start
+                                    endTime = suggestion.end
+                                    playSelection()
+                                } label: {
+                                    HStack {
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text("\"\(suggestion.text)\"")
+                                                .font(.caption)
+                                                .lineLimit(2)
+                                            Text("\(formatTime(suggestion.start)) · \(String(format: "%.1f", suggestion.duration)) s")
+                                                .font(.caption2.monospacedDigit())
+                                                .foregroundStyle(.secondary)
+                                            if !suggestion.reasons.isEmpty {
+                                                HStack(spacing: 4) {
+                                                    ForEach(suggestion.reasons, id: \.self) { reason in
+                                                        Text(reason)
+                                                            .font(.caption2)
+                                                            .padding(.horizontal, 6)
+                                                            .padding(.vertical, 2)
+                                                            .background(Color.accentColor.opacity(0.15), in: Capsule())
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Spacer()
+                                        if abs(startTime - suggestion.start) < 0.05 && abs(endTime - suggestion.end) < 0.05 {
+                                            Image(systemName: "checkmark.circle.fill")
+                                                .foregroundStyle(Color.accentColor)
+                                        }
+                                    }
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        } else if hookProgress != nil {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                                Text("Ouvindo o vídeo… \(Int((hookProgress ?? 0) * 100))%")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        } else {
+                            Button {
+                                detectHooks()
+                            } label: {
+                                Label("Encontrar ganchos na fala", systemImage: "waveform")
+                            }
+                            if let hookError = hookError {
+                                Text(hookError)
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                            }
+                        }
+                    } header: {
+                        Text(track == .outro ? "Sugestões de encerramento" : "Sugestões de gancho")
+                    } footer: {
+                        Text(track == .outro
+                             ? "Dica: um convite curto para a próxima parte ou para seguir o canal."
+                             : "Dica: uma pergunta ou frase forte nos primeiros segundos prende quem está assistindo.")
+                    }
                 }
 
                 Section {
@@ -272,7 +404,7 @@ struct AssetTrimSheet: View {
                     }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Atribuir") {
+                    Button(isVinheta ? "Usar trecho" : "Atribuir") {
                         player.pause()
                         onAssign(ClipSelection(
                             startTime: startTime,
@@ -287,9 +419,77 @@ struct AssetTrimSheet: View {
             }
             .onDisappear {
                 player.pause()
+                hookTask?.cancel()
             }
         }
         .presentationDetents([.medium, .large])
+    }
+
+    private func applyDuration(_ length: Double) {
+        endTime = min(asset.duration, startTime + length)
+        if endTime - startTime < length {
+            startTime = max(0, endTime - length)
+        }
+    }
+
+    private func playSelection() {
+        player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+        player.currentItem?.forwardPlaybackEndTime = CMTime(seconds: endTime, preferredTimescale: 600)
+        player.play()
+    }
+
+    private func detectHooks() {
+        hookError = nil
+        hookProgress = 0
+        let url = asset.url
+        let vocabulary = vocabulary
+        hookTask = Task { @MainActor in
+            do {
+                let result = try await TranscriptionService.shared.transcribeVideo(
+                    at: url,
+                    localeIdentifier: "pt-BR",
+                    contextualStrings: vocabulary,
+                    onChunk: { seconds in
+                        Task { @MainActor in
+                            hookProgress = min(1, max(0, seconds / max(1, self.asset.duration)))
+                        }
+                    }
+                )
+                guard !Task.isCancelled else { return }
+                var words: [TranscriptWord] = []
+                for cue in result.cues {
+                    if !cue.words.isEmpty {
+                        words.append(contentsOf: cue.words)
+                    } else {
+                        let tokens = cue.text.split(whereSeparator: { $0 == " " }).map(String.init)
+                        let span = max(0.05, cue.endTime - cue.startTime)
+                        let step = span / Double(max(1, tokens.count))
+                        for (index, token) in tokens.enumerated() {
+                            words.append(TranscriptWord(
+                                text: token,
+                                start: cue.startTime + step * Double(index),
+                                end: cue.startTime + step * Double(index + 1)
+                            ))
+                        }
+                    }
+                }
+                if words.isEmpty {
+                    hookError = "Nenhuma fala encontrada neste vídeo. Ajuste o trecho manualmente."
+                } else {
+                    AssetTrimSheet.hookWordCache[asset.id] = words
+                    detectedWords = words
+                    if let top = suggestions.first {
+                        startTime = top.start
+                        endTime = top.end
+                    }
+                }
+                hookProgress = nil
+            } catch {
+                guard !Task.isCancelled else { return }
+                hookError = error.localizedDescription
+                hookProgress = nil
+            }
+        }
     }
 
     private func formatTime(_ seconds: Double) -> String {

@@ -1098,7 +1098,12 @@ struct ClipAssetPickerSheet: View {
                 }
             }
             .sheet(item: $trimRequest) { request in
-                AssetTrimSheet(asset: request.asset, track: request.track) { selection in
+                AssetTrimSheet(
+                    asset: request.asset,
+                    track: request.track,
+                    words: assetLocalWords(for: request.asset),
+                    vocabulary: project.transcriptionVocabulary ?? []
+                ) { selection in
                     onAssign(request.asset, selection)
                     dismiss()
                 }
@@ -1223,6 +1228,23 @@ struct ClipAssetPickerSheet: View {
                 .font(.caption.weight(.medium))
                 .lineLimit(1)
         }
+    }
+
+    /// Project-transcript words that fall inside this asset's source range, shifted to
+    /// asset-local time. Nil when the asset isn't a project source or the transcript is stale.
+    private func assetLocalWords(for asset: MediaAsset) -> [TranscriptWord]? {
+        guard let words = project.transcriptWords, !words.isEmpty,
+              let transcriptDuration = project.transcriptSequenceDuration,
+              abs(transcriptDuration - project.sequenceSourceDuration) <= 0.5 else { return nil }
+        guard let clip = project.sourceClips.first(where: {
+            $0.assetID == asset.id
+        }) else { return nil }
+        let lower = clip.sequenceStartTime + clip.startTime
+        let upper = clip.sequenceStartTime + clip.endTime
+        let local = words
+            .filter { $0.start >= lower && $0.end <= upper }
+            .map { TranscriptWord(text: $0.text, start: $0.start - clip.sequenceStartTime, end: $0.end - clip.sequenceStartTime) }
+        return local.isEmpty ? nil : local
     }
 
     private func importGalleryVideo(_ item: PhotosPickerItem) {

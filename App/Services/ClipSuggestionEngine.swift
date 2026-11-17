@@ -403,13 +403,13 @@ enum ClipSuggestionEngine {
         return chosen.sorted { $0.start < $1.start }
     }
 
-    private static func normalizedTokens(_ text: String) -> [String] {
+    static func normalizedTokens(_ text: String) -> [String] {
         text.lowercased()
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
             .filter { !$0.isEmpty }
     }
 
-    private static func occurrenceCount(of needle: String, in text: String) -> Int {
+    static func occurrenceCount(of needle: String, in text: String) -> Int {
         guard !needle.isEmpty else { return 0 }
         var count = 0
         var searchStart = text.startIndex
@@ -420,18 +420,18 @@ enum ClipSuggestionEngine {
         return count
     }
 
-    private static let danglingEndings: Set<String> = [
+    static let danglingEndings: Set<String> = [
         "e", "mas", "que", "de", "do", "da", "pra", "para", "então", "porque",
         "com", "o", "a", "os", "as", "um", "uma", "se", "né", "no", "na", "em"
     ]
 
-    private static let hookLexicon: Set<String> = [
+    static let hookLexicon: Set<String> = [
         "dica", "segredo", "importante", "atenção", "cuidado", "erro", "problema",
         "olha", "veja", "como", "por que", "você sabia", "nunca", "sempre",
         "melhor", "pior", "passo", "truque", "resultado", "diferença", "verdade"
     ]
 
-    private static let fillerWords: Set<String> = [
+    static let fillerWords: Set<String> = [
         "né", "tipo", "então", "aí", "tá", "ok", "hum", "hm", "uh", "ah", "éé", "eee",
         "assim", "basicamente", "literalmente", "na verdade", "quer dizer", "sabe"
     ]
