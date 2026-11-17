@@ -152,9 +152,9 @@ actor ExportManager {
                     progressHandler(BatchExportProgress(
                         currentEpisode: episodeNumber,
                         totalEpisodes: total,
-                        overallProgress: overall,
-                        currentStage: epProgress.stage,
-                        message: epProgress.message
+                        overallProgress: min(overall, 0.99),
+                        currentStage: epProgress.stage == .completed ? .exporting : epProgress.stage,
+                        message: epProgress.stage == .completed ? "Episódio \(episodeNumber) pronto" : epProgress.message
                     ))
                 }
                 results.append(result)
@@ -176,9 +176,9 @@ actor ExportManager {
         progressHandler(BatchExportProgress(
             currentEpisode: 0,
             totalEpisodes: total,
-            overallProgress: 1.0,
-            currentStage: .completed,
-            message: "Exportação em lote concluída"
+            overallProgress: 0.99,
+            currentStage: .exporting,
+            message: "Preparando arquivos para salvar..."
         ))
         
         return BatchExportResult(results: results, errors: errors)

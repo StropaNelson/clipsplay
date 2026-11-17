@@ -1063,6 +1063,8 @@ class EditorViewModel: ObservableObject {
     @Published var lastExportZIPURL: URL?
     @Published var lastExportedFiles: [URL] = []
     @Published var photoSaveStatus: String?
+    @Published var isPreparingZIP = false
+    private var exportFinalized = false
 
     private var project: Project
     private let storage = ProjectStorage.shared
@@ -2903,6 +2905,8 @@ class EditorViewModel: ObservableObject {
         lastExportZIPURL = nil
         lastExportedFiles = []
         photoSaveStatus = nil
+        isPreparingZIP = false
+        exportFinalized = false
 
         do {
             let result = try await exportManager.exportAllEpisodes(
@@ -2911,14 +2915,12 @@ class EditorViewModel: ObservableObject {
                 selectedEpisodes: selection
             ) { progress in
                 Task { @MainActor in
+                    guard !self.exportFinalized else { return }
                     self.exportProgress = progress
                 }
             }
 
-            if exportSettings.includeCovers, !result.results.isEmpty {
-                lastExportZIPURL = try await exportManager.createZIP(from: result.results, projectName: project.name)
-            }
-
+            exportFinalized = true
             lastExportedFiles = result.results.map(\.videoURL) + result.results.compactMap(\.coverURL)
             let summary = result.errors.isEmpty
                 ? "Exportação concluída: \(result.successCount) episódios"
@@ -2934,8 +2936,12 @@ class EditorViewModel: ObservableObject {
                 let details = result.errors.map { "Episódio \($0.episodeNumber): \($0.error)" }.joined(separator: "\n")
                 errorMessage = "\(result.failureCount) episódio(s) não foram exportados.\n\(details)"
             }
+            if exportSettings.includeCovers, !result.results.isEmpty {
+                await prepareExportZIP(result.results, name: project.name)
+            }
         } catch {
             if isExportCancellation(error) {
+                exportFinalized = true
                 exportProgress = cancelledExportProgress()
             } else {
                 showExportProgress = false
@@ -2963,6 +2969,8 @@ class EditorViewModel: ObservableObject {
         lastExportZIPURL = nil
         lastExportedFiles = []
         photoSaveStatus = nil
+        isPreparingZIP = false
+        exportFinalized = false
         var allResults: [ExportResult] = []
         do {
             for (index, variant) in variants.enumerated() {
@@ -2972,6 +2980,7 @@ class EditorViewModel: ObservableObject {
                     selectedEpisodes: nil
                 ) { progress in
                     Task { @MainActor in
+                        guard !self.exportFinalized else { return }
                         self.exportProgress = BatchExportProgress(
                             currentEpisode: progress.currentEpisode,
                             totalEpisodes: progress.totalEpisodes,
@@ -2983,13 +2992,7 @@ class EditorViewModel: ObservableObject {
                 }
                 allResults.append(contentsOf: result.results)
             }
-            if allResults.count > 1 {
-                do {
-                    lastExportZIPURL = try await exportManager.createZIP(from: allResults, projectName: "\(project.name)_multiplicar")
-                } catch {
-                    errorMessage = "Vídeos exportados, mas o ZIP falhou: \(Self.describe(error))"
-                }
-            }
+            exportFinalized = true
             lastExportedFiles = allResults.map(\.videoURL) + allResults.compactMap(\.coverURL)
             exportProgress = BatchExportProgress(
                 currentEpisode: 0,
@@ -2998,13 +3001,28 @@ class EditorViewModel: ObservableObject {
                 currentStage: .completed,
                 message: "Multiplicação concluída: \(allResults.count) vídeos"
             )
+            if allResults.count > 1 {
+                await prepareExportZIP(allResults, name: "\(project.name)_multiplicar")
+            }
         } catch {
             if isExportCancellation(error) {
+                exportFinalized = true
                 exportProgress = cancelledExportProgress()
             } else {
                 showExportProgress = false
                 errorMessage = "Erro na multiplicação: \(Self.describe(error))"
             }
+        }
+    }
+
+    /// Builds the optional ZIP after the videos are already available to save/share.
+    private func prepareExportZIP(_ results: [ExportResult], name: String) async {
+        isPreparingZIP = true
+        defer { isPreparingZIP = false }
+        do {
+            lastExportZIPURL = try await exportManager.createZIP(from: results, projectName: name)
+        } catch {
+            photoSaveStatus = "Vídeos prontos, mas o ZIP falhou: \(Self.describe(error))"
         }
     }
 

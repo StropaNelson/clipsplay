@@ -374,6 +374,10 @@ struct ExportProgressView: View {
                                         .foregroundStyle(.secondary)
                                 }
                             }
+                            if viewModel.isPreparingZIP {
+                                ProgressView("Preparando ZIP com capas…")
+                                    .font(.caption)
+                            }
                             if let zipURL = viewModel.lastExportZIPURL {
                                 Button {
                                     shareItem = ExportShareItem(urls: [zipURL])
