@@ -11,7 +11,7 @@ struct AutomationCenterView: View {
     let onApplyCuts: ([ClosedRange<Double>], AutomationRequest) -> Void
     let onCreateEpisodes: ([Double], AutomationRequest) -> Void
     let onOpenTranscript: () -> Void
-    let onOpenTranscriptEditor: () -> Void
+    let onOpenTranscriptEditor: (ProjectOperation) -> Void
     let onSeek: (Double) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -42,7 +42,7 @@ struct AutomationCenterView: View {
         onApplyCuts: @escaping ([ClosedRange<Double>], AutomationRequest) -> Void,
         onCreateEpisodes: @escaping ([Double], AutomationRequest) -> Void,
         onOpenTranscript: @escaping () -> Void,
-        onOpenTranscriptEditor: @escaping () -> Void,
+        onOpenTranscriptEditor: @escaping (ProjectOperation) -> Void,
         onSeek: @escaping (Double) -> Void
     ) {
         let resolved = operation ?? project.operation ?? .multiply
@@ -95,7 +95,7 @@ struct AutomationCenterView: View {
                 request = AutomationRequest.default(for: newOperation)
                 request.localeIdentifier = locale
                 request.allowServerTranscription = allowServer
-                request.analyzeScenes = analyzeScenes
+                request.analyzeScenes = newOperation == .speechEdit ? false : analyzeScenes
                 selectedKind = request.clipKinds.first ?? .clips
                 refreshSuggestions()
             }
@@ -118,11 +118,25 @@ struct AutomationCenterView: View {
         }
     }
 
+    private var heroTitle: String {
+        operation == .speechEdit ? "Edite o clipe inteiro pelo texto." : "Um vídeo entra. Uma biblioteca sai."
+    }
+
+    private var heroSubtitle: String {
+        operation == .speechEdit
+            ? "A análise roda localmente uma vez. Você revisa a fala e aplica cortes no clipe inteiro, sem criar saídas."
+            : "A análise roda localmente no iPad e é reutilizada pelas próximas saídas. As decisões automáticas continuam editáveis na timeline."
+    }
+
+    private var heroIcon: String {
+        operation == .speechEdit ? "text.badge.minus" : "sparkles.rectangle.stack"
+    }
+
     private var hero: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("Um vídeo entra. Uma biblioteca sai.", systemImage: "sparkles.rectangle.stack")
+            Label(heroTitle, systemImage: heroIcon)
                 .font(.title3.bold())
-            Text("A análise roda localmente no iPad e é reutilizada pelas próximas saídas. As decisões automáticas continuam editáveis na timeline.")
+            Text(heroSubtitle)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
@@ -169,7 +183,7 @@ struct AutomationCenterView: View {
 
     private var configurationCard: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Label("Configurar produção", systemImage: "slider.horizontal.3")
+            Label(operation == .speechEdit ? "Configurar autoedição" : "Configurar produção", systemImage: "slider.horizontal.3")
                 .font(.headline)
 
             Picker("Idioma da fala", selection: $request.localeIdentifier) {
@@ -178,7 +192,9 @@ struct AutomationCenterView: View {
                 }
             }
 
-            Toggle("Analisar cortes visuais", isOn: $request.analyzeScenes)
+            if operation != .speechEdit {
+                Toggle("Analisar cortes visuais", isOn: $request.analyzeScenes)
+            }
             Toggle("Usar servidor da Apple se o offline falhar", isOn: $request.allowServerTranscription)
                 .font(.footnote)
 
@@ -219,7 +235,7 @@ struct AutomationCenterView: View {
             } else if operation == .podcast || operation == .speechEdit {
                 Toggle(operation == .speechEdit ? "Cortar pausas de fala automaticamente" : "Remover pausas longas", isOn: $request.removeSilences)
                 Toggle("Remover vícios de linguagem", isOn: $request.removeFillers)
-                Toggle("Legendas na saída", isOn: $request.captions.enabled)
+                Toggle(operation == .speechEdit ? "Atualizar legendas do clipe" : "Legendas na saída", isOn: $request.captions.enabled)
             } else {
                 Toggle("Gerar capas dos episódios", isOn: $request.generateCovers)
                 Text("A divisão prefere limites de assunto; cortes visuais são usados como apoio.")
@@ -343,16 +359,14 @@ struct AutomationCenterView: View {
             Label(operation == .speechEdit ? "Autoedição por transcrição" : "Limpeza e edição por texto", systemImage: "text.badge.minus")
                 .font(.headline)
 
-            Text("Foram encontradas \(analysis.silenceRanges.count) pausas longas e \(analysis.fillerMatches.count) vícios de linguagem. Revise pelo texto ou aplique o corte automático sugerido.")
+            Text(speechCleanupSummary(analysis))
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
             HStack {
-                Button("Abrir transcrição") { openAfterDismiss(onOpenTranscript) }
+                Button("Revisar texto") { openAfterDismiss(onOpenTranscript) }
                     .buttonStyle(.bordered)
-                Button("Corrigir texto") { openAfterDismiss(onOpenTranscript) }
-                    .buttonStyle(.bordered)
-                Button("Autoedição por fala") { openAfterDismiss(onOpenTranscriptEditor) }
+                Button("Editar pelo texto") { openAfterDismiss { onOpenTranscriptEditor(operation) } }
                     .buttonStyle(.bordered)
             }
         }
@@ -524,6 +538,14 @@ struct AutomationCenterView: View {
         } else {
             selectedSuggestions.insert(id)
         }
+    }
+
+    private func speechCleanupSummary(_ analysis: ContentAnalysis) -> String {
+        let base = "Foram encontradas \(analysis.silenceRanges.count) pausas longas e \(analysis.fillerMatches.count) vícios de linguagem"
+        if operation == .speechEdit {
+            return base + " no clipe inteiro."
+        }
+        return base + ". Revise pelo texto ou aplique o corte automático sugerido."
     }
 
     private func recommendedCuts(from analysis: ContentAnalysis) -> [ClosedRange<Double>] {

@@ -36,15 +36,17 @@ struct EpisodeListView: View {
     @State private var editingEpisode: Episode?
 
     private var allowsAutomaticSplit: Bool {
-        operation != .multiply && operation != .podcast
+        operation != .multiply && operation != .podcast && operation != .speechEdit
     }
 
     private var outputsTitle: String {
-        operation == .episodes ? "Episódios" : "Saídas"
+        if operation == .speechEdit { return "Clipe" }
+        return operation == .episodes ? "Episódios" : "Saídas"
     }
 
     private var outputsCountLabel: String {
-        operation == .episodes ? "episódios" : "saídas"
+        if operation == .speechEdit { return "clipe" }
+        return operation == .episodes ? "episódios" : "saídas"
     }
     
     var body: some View {
@@ -146,6 +148,7 @@ struct EpisodeListView: View {
     }
     
     private func deleteEpisode(_ episode: Episode) {
+        guard operation != .speechEdit || episodes.count > 1 else { return }
         episodes.removeAll { $0.id == episode.id }
         reindexEpisodes()
     }

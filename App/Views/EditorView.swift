@@ -158,7 +158,8 @@ struct EditorView: View {
                     viewModel.removeSourceRanges(
                         ranges,
                         captions: request.captions.enabled,
-                        dynamicCaptions: request.captions.dynamic
+                        dynamicCaptions: request.captions.dynamic,
+                        wholeClip: request.operation == .speechEdit
                     )
                 },
                 onCreateEpisodes: { times, request in
@@ -166,20 +167,14 @@ struct EditorView: View {
                     viewModel.createEpisodesAtTopics(times, request: request)
                 },
                 onOpenTranscript: { showingTranscription = true },
-                onOpenTranscriptEditor: {
-                    if viewModel.editableTranscriptWords.isEmpty {
-                        showingTranscription = true
-                    } else {
-                        showingTranscriptEditor = true
-                    }
-                },
+                onOpenTranscriptEditor: { operation in openTranscriptEditing(operation: operation) },
                 onSeek: { viewModel.seekToSourceTime($0) }
             )
         }
         .sheet(isPresented: $showingTranscriptEditor) {
             TranscriptEditorView(
                 words: viewModel.editableTranscriptWords.sorted { $0.start < $1.start },
-                onRemove: { viewModel.removeSourceRanges($0) },
+                onRemove: { viewModel.removeSourceRanges($0, wholeClip: projectOperation == .speechEdit) },
                 onSeekWord: { viewModel.seekToSourceTime($0) },
                 onMarkTopics: { viewModel.markTimes($0) },
                 onCreateEpisodes: { viewModel.createEpisodesAtTopics($0) }
@@ -305,17 +300,8 @@ struct EditorView: View {
                 Button { showingAutomationCenter = true } label: {
                     Label("Automatizar", systemImage: "sparkles.rectangle.stack")
                 }
-                Button {
-                    if viewModel.editableTranscriptWords.isEmpty {
-                        showingTranscription = true
-                    } else {
-                        showingTranscriptEditor = true
-                    }
-                } label: {
-                    Label("Autoedição por fala", systemImage: "text.badge.minus")
-                }
                 Button { showingTranscription = true } label: {
-                    Label("Transcrição", systemImage: "captions.bubble")
+                    Label("Texto e legendas", systemImage: "captions.bubble")
                 }
             } label: {
                 Image(systemName: "ellipsis")
@@ -448,7 +434,7 @@ struct EditorView: View {
                     onEdit: { episode in viewModel.updateEpisodeDetails(episode) },
                     onRegenerate: { length in Task { await viewModel.regenerateEpisodes(length: length) } }
                 )
-                .navigationTitle("Saídas")
+                .navigationTitle(projectOperation == .speechEdit ? "Clipe" : "Saídas")
                 .navigationBarTitleDisplayMode(.inline)
             }
         case .export:
@@ -500,6 +486,20 @@ struct EditorView: View {
         if initialOperation != nil {
             showingAutomationCenter = true
         }
+    }
+
+    private func openTranscriptEditing(operation: ProjectOperation? = nil) {
+        guard !viewModel.editableTranscriptWords.isEmpty else {
+            showingTranscription = true
+            return
+        }
+        if let operation = operation {
+            viewModel.setOperation(operation)
+        }
+        if (operation ?? projectOperation) == .speechEdit {
+            viewModel.useWholeClipForSpeechEdit()
+        }
+        showingTranscriptEditor = true
     }
 
     private var viewer: some View {
@@ -757,7 +757,7 @@ struct EditorView: View {
                     toolButton("Excluir", icon: "trash", role: .destructive) { viewModel.removeAudioClip(clip.id) }
                 } else {
                     toolButton("Mídia", icon: "photo.on.rectangle.angled") { open(.media) }
-                    toolButton("Episódios", icon: "film.stack") { open(.episodes) }
+                    toolButton(projectOperation == .speechEdit ? "Clipe" : "Episódios", icon: "film.stack") { open(.episodes) }
                     Divider().frame(height: 30).overlay(EditorTheme.divider)
                     toolButton("Dividir", icon: "scissors") { viewModel.splitAtPlayhead() }
                     toolButton("Clipe", icon: "plus.rectangle.on.rectangle") { clipPickRequest = ClipPickRequest(track: .main) }
@@ -778,15 +778,9 @@ struct EditorView: View {
                     toolButton("Encerramento", icon: "flag.checkered") { clipPickRequest = ClipPickRequest(track: .outro) }
                     Divider().frame(height: 30).overlay(EditorTheme.divider)
                     toolButton("Automatizar", icon: "sparkles.rectangle.stack") { showingAutomationCenter = true }
-                    toolButton("Legendas", icon: "captions.bubble") { showingTranscription = true }
+                    toolButton("Texto", icon: "captions.bubble") { showingTranscription = true }
                     toolButton("Sugerir", icon: "wand.and.stars") { showingClipSuggestions = true }
-                    toolButton("Autoedição", icon: "text.badge.minus") {
-                        if viewModel.editableTranscriptWords.isEmpty {
-                            viewModel.errorMessage = "Gere a transcrição primeiro em Legendas."
-                        } else {
-                            showingTranscriptEditor = true
-                        }
-                    }
+                    toolButton("Autoedição", icon: "text.badge.minus") { openTranscriptEditing() }
                     toolButton("Importar", icon: "plus.rectangle.on.folder") { viewModel.showImportAsset = true }
                 }
             }
@@ -1114,6 +1108,7 @@ class EditorViewModel: ObservableObject {
         guard project.operation != operation else { return }
         objectWillChange.send()
         project.operation = operation
+        Task { await persistProjectChanges(reloadPreview: false) }
     }
 
     var orderedSegments: [TimelineSegment] {
@@ -2687,15 +2682,48 @@ class EditorViewModel: ObservableObject {
         }
     }
 
+    /// Speech-edit mode works on one continuous clip instead of output slices.
+    func useWholeClipForSpeechEdit() {
+        guard project.sourceVideoDuration > 0, !isWholeClipEpisode else { return }
+        checkpoint()
+        replaceWithWholeClipEpisode()
+        Task { await persistProjectChanges() }
+    }
+
+    private var isWholeClipEpisode: Bool {
+        guard episodes.count == 1, let episode = episodes.first else { return false }
+        return abs(episode.mainStart) < 0.05 && abs(episode.mainEnd - project.sourceVideoDuration) < 0.05
+    }
+
+    private func replaceWithWholeClipEpisode() {
+        var episode = Episode(
+            index: 0,
+            mainStart: 0,
+            mainEnd: project.sourceVideoDuration,
+            introTemplate: project.introTemplate,
+            outroTemplate: project.outroTemplate,
+            recapSettings: project.recapSettings
+        )
+        episode.displayTitle = "Clipe inteiro"
+        episodes = [episode]
+        selectedEpisode = episode
+        selectedSegmentID = nil
+        updateTimelineForEpisode(episode)
+    }
+
     /// Cuts source-video time ranges (from the transcript) out of every episode's main content.
     func removeSourceRanges(
         _ ranges: [ClosedRange<Double>],
         captions: Bool = false,
-        dynamicCaptions: Bool = false
+        dynamicCaptions: Bool = false,
+        wholeClip: Bool = false
     ) {
         let merged = Self.merge(ranges)
         guard !merged.isEmpty else { return }
         checkpoint()
+        if wholeClip, !isWholeClipEpisode {
+            replaceWithWholeClipEpisode()
+        }
         let shouldApplyCaptions = captions || episodes.contains { $0.textOverlays.contains { $0.isCaption == true } }
         var changed = 0
         for index in episodes.indices {

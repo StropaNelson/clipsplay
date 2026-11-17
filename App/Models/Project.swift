@@ -76,6 +76,20 @@ struct Project: Codable, Identifiable {
     }
     
     mutating func regenerateEpisodes() {
+        if operation == .speechEdit {
+            var episode = Episode(
+                index: 0,
+                mainStart: 0,
+                mainEnd: sourceVideoDuration,
+                introTemplate: introTemplate,
+                outroTemplate: outroTemplate,
+                recapSettings: recapSettings
+            )
+            episode.displayTitle = "Clipe inteiro"
+            episodes = [episode]
+            updateTimestamp()
+            return
+        }
         let count = Int(ceil(sourceVideoDuration / episodeLength))
         episodes = (0..<count).map { index in
             let start = Double(index) * episodeLength
