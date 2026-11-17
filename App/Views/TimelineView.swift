@@ -377,7 +377,7 @@ struct TimelineView: View {
             }
             .onEnded { value in
                 defer { reorderDrag = nil }
-                guard case .second(true, let drag) = value, let drag else { return }
+                guard case .second(true, let drag) = value, let drag = drag else { return }
                 let center = segment.startTime + segment.duration / 2 + Double(drag.translation.width / pixelsPerSecond)
                 onReorderMain(segment.id, center)
             }
