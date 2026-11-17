@@ -224,24 +224,17 @@ struct Project: Codable, Identifiable {
             updateTimestamp()
             return
         }
-        let count = Int(ceil(sequenceDuration / episodeLength))
-        episodes = (0..<count).map { index in
-            let start = Double(index) * episodeLength
-            let end = min(sequenceDuration, start + episodeLength)
-            var episode = Episode(
-                index: index,
-                mainStart: start,
-                mainEnd: end,
-                introTemplate: introTemplate,
-                outroTemplate: outroTemplate,
-                recapSettings: recapSettings
-            )
-            episode.mainClips = sourceSegments(in: start...end)
-            if let recap = episode.recapSegments.first, recap.sourceType == .mainVideo {
-                episode.recapSegments = sourceSegments(in: recap.startTime...recap.endTime)
-            }
-            return episode
-        }
+        let count = EpisodePlanner.episodeCount(totalDuration: sequenceDuration, targetLength: episodeLength)
+        let ideal = EpisodePlanner.idealCuts(totalDuration: sequenceDuration, count: count)
+        let hardBoundaries = sourceClips.dropFirst().map { $0.sequenceStartTime + $0.startTime }
+        let cuts = EpisodePlanner.snappedCuts(
+            ideal: ideal,
+            totalDuration: sequenceDuration,
+            words: transcriptWords ?? [],
+            quietPoints: [],
+            hardBoundaries: hardBoundaries
+        ).map(\.time)
+        episodes = buildEpisodes(fromCuts: cuts)
         updateTimestamp()
     }
     
@@ -262,6 +255,29 @@ struct Project: Codable, Identifiable {
         }
         cuts = merged
         guard !cuts.isEmpty else { return 0 }
+        episodes = buildEpisodes(fromCuts: cuts)
+        updateTimestamp()
+        return cuts.count
+    }
+
+    /// Sequential series ("novelinha"): the whole sequence split in order, no gaps.
+    /// Empty cuts produce a single episode covering the whole sequence.
+    mutating func createSequentialEpisodes(at cuts: [Double]) {
+        let sequenceDuration = sequenceSourceDuration
+        let minimum = 2.0
+        var ordered = cuts.sorted().filter { $0 > minimum && $0 < sequenceDuration - minimum }
+        var deduped: [Double] = []
+        for cut in ordered {
+            if let last = deduped.last, cut - last < minimum { continue }
+            deduped.append(cut)
+        }
+        ordered = deduped
+        episodes = buildEpisodes(fromCuts: ordered)
+        updateTimestamp()
+    }
+
+    private mutating func buildEpisodes(fromCuts cuts: [Double]) -> [Episode] {
+        let sequenceDuration = sequenceSourceDuration
         var ranges: [(Double, Double)] = []
         var cursor = 0.0
         for cut in cuts {
@@ -269,7 +285,7 @@ struct Project: Codable, Identifiable {
             cursor = cut
         }
         ranges.append((cursor, sequenceDuration))
-        episodes = ranges.enumerated().map { index, range in
+        return ranges.enumerated().map { index, range in
             var episode = Episode(
                 index: index,
                 mainStart: range.0,
@@ -284,8 +300,6 @@ struct Project: Codable, Identifiable {
             }
             return episode
         }
-        updateTimestamp()
-        return cuts.count
     }
 }
 

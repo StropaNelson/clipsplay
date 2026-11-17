@@ -19,10 +19,10 @@ enum ProjectOperation: String, CaseIterable, Identifiable, Codable {
 
     var subtitle: String {
         switch self {
-        case .multiply: return "Gere formatos, clipes, legendas e variações de uma gravação."
+        case .multiply: return "Encontre os melhores momentos e gere versões para cada plataforma."
         case .speechEdit: return "Transcreva e corte pausas ou trechos no clipe inteiro, sem gerar saídas."
         case .podcast: return "Transcreva e remova silêncios, repetições e trechos indesejados."
-        case .episodes: return "Divida uma gravação longa em episódios estruturados."
+        case .episodes: return "Divida em partes sequenciais com abertura, resumo e fechamento."
         }
     }
 }

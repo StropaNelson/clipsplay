@@ -27,6 +27,8 @@ struct AutomationCenterView: View {
     @State private var analysisTask: Task<Void, Never>?
     @State private var lastStage: AnalysisStage = .preparing
     @State private var analysisStart: Date?
+    @State private var episodeCuts: [EpisodeCut] = []
+    @State private var computingPlan = false
 
     private let coordinator = AnalysisCoordinator.shared
     private let languages: [AutomationLanguage] = [
@@ -70,7 +72,9 @@ struct AutomationCenterView: View {
                     hero
                     configurationCard
                     analysisCard
-                    if let analysis = analysis {
+                    if operation == .episodes {
+                        episodePlanSection
+                    } else if let analysis = analysis {
                         resultSection(analysis)
                     }
                 }
@@ -90,6 +94,9 @@ struct AutomationCenterView: View {
             }
             .safeAreaInset(edge: .bottom) { actionBar }
             .task { await loadCachedAnalysis() }
+            .task(id: episodePlanKey) {
+                await computeEpisodePlan()
+            }
             .onChange(of: operation) { newOperation in
                 let locale = request.localeIdentifier
                 let allowServer = request.allowServerTranscription
@@ -108,6 +115,7 @@ struct AutomationCenterView: View {
             }
             .onChange(of: request.resultCount) { _ in refreshSuggestions() }
             .onChange(of: request.analyzeScenes) { _ in refreshSuggestions() }
+            .onChange(of: request.momentLength) { _ in refreshSuggestions() }
             .onChange(of: request.localeIdentifier) { locale in
                 guard analysis?.transcriptionLocale != locale else { return }
                 analysis = nil
@@ -121,17 +129,30 @@ struct AutomationCenterView: View {
     }
 
     private var heroTitle: String {
-        operation == .speechEdit ? "Edite o clipe inteiro pelo texto." : "Um vídeo entra. Uma biblioteca sai."
+        switch operation {
+        case .speechEdit: return "Edite o clipe inteiro pelo texto."
+        case .episodes: return "Transforme um vídeo longo em uma série."
+        default: return "Um vídeo entra. Uma biblioteca sai."
+        }
     }
 
     private var heroSubtitle: String {
-        operation == .speechEdit
-            ? "A análise roda localmente uma vez. Você revisa a fala e aplica cortes no clipe inteiro, sem criar saídas."
-            : "A análise roda localmente no iPad e é reutilizada pelas próximas saídas. As decisões automáticas continuam editáveis na timeline."
+        switch operation {
+        case .speechEdit:
+            return "A análise roda localmente uma vez. Você revisa a fala e aplica cortes no clipe inteiro, sem criar saídas."
+        case .episodes:
+            return "Divide em ordem, sem pular trechos, com abertura, resumo e fechamento."
+        default:
+            return "A análise roda localmente no iPad e é reutilizada pelas próximas saídas. As decisões automáticas continuam editáveis na timeline."
+        }
     }
 
     private var heroIcon: String {
-        operation == .speechEdit ? "text.badge.minus" : "sparkles.rectangle.stack"
+        switch operation {
+        case .speechEdit: return "text.badge.minus"
+        case .episodes: return "film.stack"
+        default: return "sparkles.rectangle.stack"
+        }
     }
 
     private var hero: some View {
@@ -201,53 +222,213 @@ struct AutomationCenterView: View {
                 .font(.footnote)
 
             if operation == .multiply {
-                Picker("Tipo de oportunidade", selection: $selectedKind) {
-                    ForEach(ClipSuggestionKind.allCases) { kind in
-                        Text(kind.rawValue).tag(kind)
-                    }
-                }
-                .pickerStyle(.segmented)
-
-                Stepper("Até \(request.resultCount) sugestões", value: $request.resultCount, in: 1...12)
-                Toggle("Legendas nos clipes", isOn: $request.captions.enabled)
-                if request.captions.enabled {
-                    Toggle("Legendas dinâmicas", isOn: $request.captions.dynamic)
-                }
-                Toggle("Seguir pessoa", isOn: $request.autoFraming)
-                Toggle("Gerar capas", isOn: $request.generateCovers)
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Formatos")
+                    Text("Duração dos momentos")
+                        .font(.footnote.weight(.medium))
+                    Picker("Duração dos momentos", selection: $request.momentLength) {
+                        ForEach(MomentLength.allCases) { length in
+                            Text(length.rawValue).tag(length)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
+
+                Stepper("Até \(request.resultCount) momentos", value: $request.resultCount, in: 1...12)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Plataformas")
                         .font(.footnote.weight(.medium))
                     HStack(spacing: 8) {
-                        ForEach([AspectRatio.portrait9_16, .square1_1, .landscape16_9, .original]) { ratio in
+                        ForEach(PublishPlatform.allCases) { platform in
                             Button {
-                                toggleFormat(ratio)
+                                togglePlatform(platform)
                             } label: {
-                                Text(ratio.rawValue)
+                                Label(platform.shortName, systemImage: platform.icon)
                                     .font(.caption.weight(.medium))
+                                    .lineLimit(1)
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 7)
-                                    .background(request.formats.contains(ratio) ? Color.accentColor.opacity(0.2) : Color(uiColor: .tertiarySystemGroupedBackground), in: Capsule())
-                                    .foregroundStyle(request.formats.contains(ratio) ? Color.accentColor : Color.secondary)
+                                    .background(request.platforms.contains(platform) ? Color.accentColor.opacity(0.2) : Color(uiColor: .tertiarySystemGroupedBackground), in: Capsule())
+                                    .foregroundStyle(request.platforms.contains(platform) ? Color.accentColor : Color.secondary)
                             }
                             .buttonStyle(.plain)
                         }
                     }
                 }
+
+                Toggle("Legendas nos clipes", isOn: $request.captions.enabled)
+                if request.captions.enabled {
+                    Toggle("Legendas dinâmicas", isOn: $request.captions.dynamic)
+                }
+                Toggle("Seguir pessoa (formatos verticais)", isOn: $request.autoFraming)
+                Toggle("Gerar capas", isOn: $request.generateCovers)
             } else if operation == .podcast || operation == .speechEdit {
                 Toggle(operation == .speechEdit ? "Cortar pausas de fala automaticamente" : "Remover pausas longas", isOn: $request.removeSilences)
                 Toggle("Remover vícios de linguagem", isOn: $request.removeFillers)
                 Toggle(operation == .speechEdit ? "Atualizar legendas do clipe" : "Legendas na saída", isOn: $request.captions.enabled)
             } else {
-                Toggle("Gerar capas dos episódios", isOn: $request.generateCovers)
-                Text("A divisão prefere limites de assunto; cortes visuais são usados como apoio.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                episodeConfiguration
             }
         }
         .padding()
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
         .disabled(isAnalyzing)
+    }
+
+    private var sourceIsPortrait: Bool {
+        let size = project.sourceVideoNaturalSize.cgSize.applying(project.sourceVideoTransform.cgAffineTransform)
+        return abs(size.height) > abs(size.width)
+    }
+
+    private var videoAssets: [MediaAsset] {
+        project.mediaAssets.filter { $0.type == .video }
+    }
+
+    private var hasTranscriptWords: Bool {
+        !(analysis?.transcriptWords ?? project.transcriptWords ?? []).isEmpty
+    }
+
+    private var episodeTargetLength: Double {
+        let total = project.sequenceSourceDuration
+        if request.episodePlan.targetLength > 0 { return request.episodePlan.targetLength }
+        return EpisodePlanner.suggestedLength(
+            totalDuration: total,
+            format: request.formats.first ?? .original,
+            sourceIsPortrait: sourceIsPortrait
+        )
+    }
+
+    private var plannedEpisodeCount: Int {
+        EpisodePlanner.episodeCount(
+            totalDuration: project.sequenceSourceDuration,
+            targetLength: episodeTargetLength
+        )
+    }
+
+    private func durationChipLabel(_ seconds: Double) -> String {
+        seconds < 60 ? "30 s" : "\(Int(seconds / 60)) min"
+    }
+
+    private var episodeConfiguration: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            TextField("Título da série", text: $request.episodePlan.seriesTitle)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Formato de saída")
+                    .font(.footnote.weight(.medium))
+                HStack(spacing: 8) {
+                    ForEach([AspectRatio.portrait9_16, .landscape16_9, .square1_1, .original]) { ratio in
+                        Button {
+                            request.formats = [ratio]
+                        } label: {
+                            Text(ratio.rawValue)
+                                .font(.caption.weight(.medium))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .background(request.formats.first == ratio ? Color.accentColor.opacity(0.2) : Color(uiColor: .tertiarySystemGroupedBackground), in: Capsule())
+                                .foregroundStyle(request.formats.first == ratio ? Color.accentColor : Color.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Duração por episódio")
+                    .font(.footnote.weight(.medium))
+                let suggested = EpisodePlanner.suggestedLength(
+                    totalDuration: project.sequenceSourceDuration,
+                    format: request.formats.first ?? .original,
+                    sourceIsPortrait: sourceIsPortrait
+                )
+                HStack(spacing: 8) {
+                    ForEach([30.0, 60, 120, 180, 300, 600], id: \.self) { length in
+                        Button {
+                            request.episodePlan.targetLength = length
+                        } label: {
+                            VStack(spacing: 2) {
+                                Text(durationChipLabel(length))
+                                    .font(.caption.weight(.medium))
+                                if abs(length - suggested) < 0.5 {
+                                    Text("Sugerido")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .background(
+                                request.episodePlan.targetLength == length || (request.episodePlan.targetLength == 0 && abs(length - suggested) < 0.5)
+                                    ? Color.accentColor.opacity(0.2)
+                                    : Color(uiColor: .tertiarySystemGroupedBackground),
+                                in: Capsule()
+                            )
+                            .foregroundStyle(request.episodePlan.targetLength == length ? Color.accentColor : Color.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            Stepper(
+                "Quantidade de episódios: \(plannedEpisodeCount)",
+                value: Binding(
+                    get: { plannedEpisodeCount },
+                    set: { newCount in
+                        let total = project.sequenceSourceDuration
+                        if total > 0 {
+                            request.episodePlan.targetLength = total / Double(newCount)
+                        }
+                    }
+                ),
+                in: 1...30
+            )
+
+            Text("Duração total \(clock(project.sequenceSourceDuration)) → \(plannedEpisodeCount) episódios de ~\(clock(project.sequenceSourceDuration / Double(max(1, plannedEpisodeCount))))")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Toggle("Cartão de abertura (Parte N de M)", isOn: $request.episodePlan.introCard)
+
+            Picker("Vinheta de abertura", selection: $request.episodePlan.introAssetID) {
+                Text("Nenhuma").tag(UUID?.none)
+                ForEach(videoAssets) { asset in
+                    Text(asset.name).tag(UUID?.some(asset.id))
+                }
+            }
+            .disabled(videoAssets.isEmpty)
+
+            Toggle("Anteriormente (resumo do episódio anterior)", isOn: $request.episodePlan.recap)
+            if request.episodePlan.recap {
+                Picker("Duração do resumo", selection: $request.episodePlan.recapDuration) {
+                    ForEach([4.0, 6, 8, 10], id: \.self) { seconds in
+                        Text("\(Int(seconds)) s").tag(seconds)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+
+            Toggle("Cartão de fechamento (Continua na Parte N)", isOn: $request.episodePlan.outroCard)
+
+            Picker("Vinheta de encerramento", selection: $request.episodePlan.outroAssetID) {
+                Text("Nenhuma").tag(UUID?.none)
+                ForEach(videoAssets) { asset in
+                    Text(asset.name).tag(UUID?.some(asset.id))
+                }
+            }
+            .disabled(videoAssets.isEmpty)
+
+            Toggle("Gerar capas dos episódios", isOn: $request.generateCovers)
+
+            Toggle("Legendas nos episódios", isOn: $request.captions.enabled)
+                .disabled(!hasTranscriptWords)
+            if !hasTranscriptWords {
+                Text("Analise o vídeo para gerar legendas.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     private var analysisCard: some View {
@@ -290,6 +471,11 @@ struct AutomationCenterView: View {
                 Text("Transcrição, cenas, pausas, vícios e assuntos serão reunidos em um índice reutilizável.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                if operation == .episodes {
+                    Text("Opcional: analise para cortar no fim das frases e gerar legendas.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             if let errorMessage = errorMessage {
@@ -326,7 +512,7 @@ struct AutomationCenterView: View {
         case .podcast, .speechEdit:
             speechCleanupSection(analysis)
         case .episodes:
-            episodesSection(analysis)
+            EmptyView()
         }
     }
 
@@ -357,7 +543,10 @@ struct AutomationCenterView: View {
                         sourceTime: frame?.time ?? (suggestion.start + suggestion.end) / 2,
                         selected: selectedSuggestions.contains(suggestion.id),
                         onToggle: { toggleSuggestion(suggestion.id) },
-                        onSeek: { onSeek(suggestion.start) }
+                        onSeek: { onSeek(suggestion.start) },
+                        canShorten: hasTranscriptWords && canAdjust(suggestion, extend: false),
+                        canExtend: hasTranscriptWords && canAdjust(suggestion, extend: true),
+                        onAdjust: hasTranscriptWords ? { extend in adjustSuggestion(suggestion, extend: extend) } : nil
                     )
                 }
             }
@@ -386,24 +575,31 @@ struct AutomationCenterView: View {
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
     }
 
-    private func episodesSection(_ analysis: ContentAnalysis) -> some View {
+    private var episodePlanSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("Limites de episódio", systemImage: "rectangle.split.3x1")
+            Label("Plano dos episódios", systemImage: "rectangle.split.3x1")
                 .font(.headline)
 
-            if analysis.topicBoundaries.isEmpty {
-                Text("Nenhuma mudança forte de assunto foi detectada. Você ainda pode usar divisão automática em Saídas.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+            if computingPlan {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                    Text("Calculando pontos de corte…")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             } else {
-                ForEach(analysis.topicBoundaries.prefix(8), id: \.time) { boundary in
-                    Button { onSeek(boundary.time) } label: {
+                let parts = episodeParts()
+                ForEach(parts.indices, id: \.self) { index in
+                    Button { onSeek(parts[index].0) } label: {
                         HStack {
-                            Image(systemName: "bookmark")
-                            Text(clock(boundary.time))
-                                .monospacedDigit()
+                            Text("Parte \(index + 1)")
+                                .font(.footnote.weight(.semibold))
+                            Text("\(clock(parts[index].0))–\(clock(parts[index].1))")
+                                .font(.footnote.monospacedDigit())
+                                .foregroundStyle(.secondary)
                             Spacer()
-                            Text("\(Int(boundary.score * 100))%")
+                            Text(parts[index].2)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -416,9 +612,74 @@ struct AutomationCenterView: View {
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
     }
 
+    /// (start, end, label of the cut that ends the part) for the current plan.
+    private func episodeParts() -> [(Double, Double, String)] {
+        let total = project.sequenceSourceDuration
+        var parts: [(Double, Double, String)] = []
+        var cursor = 0.0
+        for cut in episodeCuts {
+            parts.append((cursor, cut.time, cut.kind.rawValue))
+            cursor = cut.time
+        }
+        parts.append((cursor, total, "fim do vídeo"))
+        return parts
+    }
+
+    @MainActor
+    private func computeEpisodePlan() async {
+        let total = project.sequenceSourceDuration
+        guard operation == .episodes, total > 0 else {
+            episodeCuts = []
+            return
+        }
+        computingPlan = true
+        defer { if !Task.isCancelled { computingPlan = false } }
+        let count = EpisodePlanner.episodeCount(totalDuration: total, targetLength: episodeTargetLength)
+        let ideal = EpisodePlanner.idealCuts(totalDuration: total, count: count)
+        let words = analysis?.transcriptWords ?? project.transcriptWords ?? []
+        var quietPoints: [Double] = []
+        if words.isEmpty {
+            quietPoints = await AudioEnergyAnalyzer.quietPoints(project: project, near: ideal)
+        }
+        guard !Task.isCancelled else { return }
+        let hardBoundaries = project.sourceClips.dropFirst().map { $0.sequenceStartTime + $0.startTime }
+        episodeCuts = EpisodePlanner.snappedCuts(
+            ideal: ideal,
+            totalDuration: total,
+            words: words,
+            quietPoints: quietPoints,
+            hardBoundaries: hardBoundaries
+        )
+    }
+
     private var actionBar: some View {
         VStack(spacing: 8) {
-            if analysis == nil || isAnalyzing {
+            if operation == .episodes {
+                Button {
+                    onCreateEpisodes(episodeCuts.map(\.time), request)
+                    dismiss()
+                } label: {
+                    Label("Criar \(episodeCuts.count + 1) episódios", systemImage: "film.stack")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(computingPlan || project.sequenceSourceDuration <= 0)
+                if analysis == nil && !isAnalyzing {
+                    Button { startAnalysis() } label: {
+                        Label("Analisar vídeo (opcional)", systemImage: "wand.and.stars")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                } else if isAnalyzing {
+                    Button { } label: {
+                        Label("Analisando…", systemImage: "wand.and.stars")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(true)
+                }
+            } else if analysis == nil || isAnalyzing {
                 Button { startAnalysis() } label: {
                     Label(isAnalyzing ? "Analisando…" : "Analisar vídeo", systemImage: "wand.and.stars")
                         .frame(maxWidth: .infinity)
@@ -427,17 +688,21 @@ struct AutomationCenterView: View {
                 .controlSize(.large)
                 .disabled(isAnalyzing)
             } else if operation == .multiply {
+                let platformCount = max(1, request.platforms.count)
                 Button {
                     let chosen = suggestions.filter { selectedSuggestions.contains($0.id) }
                     onCreateOutputs(chosen, request)
                     dismiss()
                 } label: {
-                    Label("Criar \(selectedSuggestions.count * max(1, request.formats.count)) saídas editáveis", systemImage: "rectangle.stack.badge.plus")
+                    Label("Criar \(selectedSuggestions.count * platformCount) vídeos", systemImage: "rectangle.stack.badge.plus")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .disabled(selectedSuggestions.isEmpty)
+                Text("\(selectedSuggestions.count) momentos × \(platformCount) plataformas = \(selectedSuggestions.count * platformCount) vídeos")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             } else if operation == .podcast || operation == .speechEdit {
                 Button {
                     guard let analysis = analysis else { return }
@@ -450,17 +715,6 @@ struct AutomationCenterView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .disabled(analysis.map { recommendedCuts(from: $0).isEmpty } ?? true)
-            } else if operation == .episodes {
-                Button {
-                    onCreateEpisodes(analysis?.topicBoundaries.map(\.time) ?? [], request)
-                    dismiss()
-                } label: {
-                    Label("Criar episódios por assunto", systemImage: "rectangle.split.3x1")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(analysis?.topicBoundaries.isEmpty ?? true)
             }
 
             Text("Vídeo, fala e análise permanecem no dispositivo. O score indica qualidade editorial estimada, não viralização.")
@@ -576,19 +830,54 @@ struct AutomationCenterView: View {
                 sourceDuration: analysis.duration,
                 kind: kind,
                 sceneCuts: request.analyzeScenes ? analysis.sceneCuts : [],
-                maxResults: request.resultCount
+                maxResults: request.resultCount,
+                momentLength: operation == .multiply ? request.momentLength : nil,
+                energy: operation == .multiply ? analysis.audioEnergy : nil,
+                energyInterval: 0.5
             ))
         }
         suggestions = generated.sorted { $0.score > $1.score }
         selectedSuggestions = Set(suggestions.map(\.id))
     }
 
-    private func toggleFormat(_ ratio: AspectRatio) {
-        if request.formats.contains(ratio), request.formats.count > 1 {
-            request.formats.removeAll { $0 == ratio }
-        } else if !request.formats.contains(ratio) {
-            request.formats.append(ratio)
+    private func togglePlatform(_ platform: PublishPlatform) {
+        if request.platforms.contains(platform), request.platforms.count > 1 {
+            request.platforms.removeAll { $0 == platform }
+        } else if !request.platforms.contains(platform) {
+            request.platforms.append(platform)
         }
+    }
+
+    private var episodePlanKey: String {
+        let words = analysis?.transcriptWords ?? project.transcriptWords ?? []
+        return [
+            operation.rawValue,
+            "\(Int(project.sequenceSourceDuration))",
+            "\(Int(episodeTargetLength * 10))",
+            request.formats.first?.rawValue ?? "",
+            "\(words.count)"
+        ].joined(separator: "|")
+    }
+
+    private func adjustSuggestion(_ suggestion: ClipSuggestion, extend: Bool) {
+        let words = analysis?.transcriptWords ?? []
+        guard let updated = ClipSuggestionEngine.adjusted(
+            suggestion,
+            extend: extend,
+            words: words,
+            sourceDuration: analysis?.duration ?? project.sequenceSourceDuration
+        ), let index = suggestions.firstIndex(where: { $0.id == suggestion.id }) else { return }
+        suggestions[index] = updated
+    }
+
+    private func canAdjust(_ suggestion: ClipSuggestion, extend: Bool) -> Bool {
+        let words = analysis?.transcriptWords ?? []
+        return ClipSuggestionEngine.adjusted(
+            suggestion,
+            extend: extend,
+            words: words,
+            sourceDuration: analysis?.duration ?? project.sequenceSourceDuration
+        ) != nil
     }
 
     private func toggleSuggestion(_ id: UUID) {
@@ -643,6 +932,9 @@ private struct OutputCandidateCard: View {
     let selected: Bool
     let onToggle: () -> Void
     let onSeek: () -> Void
+    var canShorten = false
+    var canExtend = false
+    var onAdjust: ((Bool) -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -676,6 +968,18 @@ private struct OutputCandidateCard: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
+                if let onAdjust = onAdjust {
+                    HStack(spacing: 8) {
+                        Button("Encurtar") { onAdjust(false) }
+                            .font(.caption.weight(.medium))
+                            .disabled(!canShorten)
+                        Button("Estender") { onAdjust(true) }
+                            .font(.caption.weight(.medium))
+                            .disabled(!canExtend)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                }
                 HStack(spacing: 5) {
                     ForEach(suggestion.reasons.prefix(2), id: \.self) { reason in
                         Text(reason)

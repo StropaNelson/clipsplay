@@ -145,14 +145,18 @@ struct EditorView: View {
                 onAnalysisReady: { viewModel.applyContentAnalysis($0) },
                 onCreateOutputs: { suggestions, request in
                     viewModel.setOperation(request.operation)
-                    viewModel.createSuggestedEpisodes(
-                        suggestions,
-                        autoFraming: request.autoFraming,
-                        captions: request.captions.enabled,
-                        dynamicCaptions: request.captions.dynamic,
-                        formats: request.formats,
-                        generateCovers: request.generateCovers
-                    )
+                    if request.operation == .multiply {
+                        viewModel.createMomentOutputs(suggestions, request: request)
+                    } else {
+                        viewModel.createSuggestedEpisodes(
+                            suggestions,
+                            autoFraming: request.autoFraming,
+                            captions: request.captions.enabled,
+                            dynamicCaptions: request.captions.dynamic,
+                            formats: request.formats,
+                            generateCovers: request.generateCovers
+                        )
+                    }
                 },
                 onApplyCuts: { ranges, request in
                     viewModel.setOperation(request.operation)
@@ -165,7 +169,7 @@ struct EditorView: View {
                 },
                 onCreateEpisodes: { times, request in
                     viewModel.setOperation(request.operation)
-                    viewModel.createEpisodesAtTopics(times, request: request)
+                    viewModel.createSequentialEpisodes(cuts: times, request: request)
                 },
                 onOpenTranscript: { showingTranscription = true },
                 onOpenTranscriptEditor: { operation in openTranscriptEditing(operation: operation) },
@@ -1783,11 +1787,12 @@ class EditorViewModel: ObservableObject {
 
     /// Converts transcript cues (timed in the concatenated source sequence) into caption
     /// overlays in every episode, following each main clip's position on that timeline.
-    func applyCaptions(_ cues: [TranscriptCue], dynamic: Bool = false, recordUndo: Bool = true) {
+    func applyCaptions(_ cues: [TranscriptCue], dynamic: Bool = false, recordUndo: Bool = true, episodeIDs: Set<UUID>? = nil) {
         if recordUndo { checkpoint() }
         let words = project.transcriptWords ?? []
         var total = 0
         for index in episodes.indices {
+            if let episodeIDs = episodeIDs, !episodeIDs.contains(episodes[index].id) { continue }
             var overlays = episodes[index].textOverlays.filter { $0.isCaption != true }
             for item in episodes[index].storyline() where item.track == .main {
                 let clip = item.segment
@@ -2518,6 +2523,151 @@ class EditorViewModel: ObservableObject {
         mutateSelectedEpisode(reloadPreview: false) { ep in
             for time in times { ep.markers.append(TimelineMarker(time: time)) }
         }
+    }
+
+    /// "Criar episódios": sequential series covering the whole video, with optional
+    /// part cards, intro/outro vinhetas and "Anteriormente" recaps.
+    func createSequentialEpisodes(cuts: [Double], request: AutomationRequest) {
+        checkpoint()
+        let plan = request.episodePlan
+        let seriesInput = plan.seriesTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !seriesInput.isEmpty {
+            project.seriesTitle = seriesInput
+        }
+        project.recapSettings = RecapSettings(enabled: plan.recap, mode: .automatic, duration: plan.recapDuration)
+        project.introTemplate = vinhetaTemplate(for: plan.introAssetID, track: .intro)
+        project.outroTemplate = vinhetaTemplate(for: plan.outroAssetID, track: .outro)
+        project.createSequentialEpisodes(at: cuts)
+        episodes = project.episodes
+        let format = request.formats.first ?? .original
+        if format != .original {
+            for index in episodes.indices {
+                episodes[index].outputAspectRatio = format
+            }
+        }
+        exportSettings.includeCovers = request.generateCovers
+        project.coverSettings.enabled = request.generateCovers
+
+        let series = !seriesInput.isEmpty
+            ? seriesInput
+            : (project.seriesTitle != "Minha Série" ? project.seriesTitle : project.name)
+        let count = episodes.count
+        for index in episodes.indices {
+            let storyline = episodes[index].storyline()
+            guard let mainStart = storyline.first(where: { $0.track == .main })?.start,
+                  let mainEnd = storyline.last(where: { $0.track == .main })?.end else { continue }
+            let mainLength = max(0.1, mainEnd - mainStart)
+            var overlays = episodes[index].textOverlays
+            if plan.introCard {
+                overlays.append(partCard(text: "\(series)\nParte \(index + 1) de \(count)", start: mainStart, duration: min(3, mainLength / 3)))
+            }
+            if plan.recap, index > 0, let recapItem = storyline.first(where: { $0.track == .recap }) {
+                overlays.append(partCard(text: "Anteriormente…", start: recapItem.start, duration: max(0.5, recapItem.end - recapItem.start), positionY: 0.12))
+            }
+            if plan.outroCard, index < count - 1 {
+                let cardLength = min(3, mainLength / 3)
+                overlays.append(partCard(text: "Continua na Parte \(index + 2)", start: mainEnd - cardLength, duration: cardLength))
+            }
+            episodes[index].textOverlays = overlays
+        }
+        if request.captions.enabled, let srt = project.transcriptSRT, let cues = try? SubtitleFile.parse(srt) {
+            applyCaptions(cues, dynamic: request.captions.dynamic, recordUndo: false)
+        }
+        if let first = episodes.first { selectedEpisode = first }
+        Task { await persistProjectChanges() }
+    }
+
+    private func vinhetaTemplate(for assetID: UUID?, track: TrackType) -> SegmentTemplate? {
+        guard let assetID = assetID,
+              let asset = mediaAssets.first(where: { $0.id == assetID && $0.type == .video }) else { return nil }
+        return SegmentTemplate(
+            name: asset.name,
+            sourceType: track == .intro ? .introAsset : .outroAsset,
+            assetID: asset.id,
+            startTime: 0,
+            endTime: asset.duration,
+            targetTrack: track
+        )
+    }
+
+    private func partCard(text: String, start: Double, duration: Double, positionY: Double = 0.15) -> TextOverlay {
+        var overlay = TextOverlay(text: text, startTime: start, duration: max(0.5, duration))
+        overlay.positionY = positionY
+        overlay.fontScale = 0.06
+        overlay.style = .box
+        overlay.animation = .fade
+        return overlay
+    }
+
+    /// "Multiplicar conteúdo": one output per (moment, platform), titled "Momento N • Plataforma".
+    func createMomentOutputs(_ suggestions: [ClipSuggestion], request: AutomationRequest) {
+        guard !suggestions.isEmpty else { return }
+        let platforms = request.platforms.isEmpty ? [PublishPlatform.vertical] : request.platforms
+        checkpoint()
+        var selected: Episode?
+        var nextIndex = (episodes.map(\.index).max() ?? -1) + 1
+        var momentCount = 0
+        for episode in episodes where episode.displayTitle?.hasPrefix("Momento") == true {
+            let suffix = episode.displayTitle?.dropFirst("Momento".count).trimmingCharacters(in: .whitespaces) ?? ""
+            let number = Int(suffix.prefix { $0.isNumber }) ?? 0
+            momentCount = max(momentCount, number)
+        }
+        exportSettings.includeCovers = request.generateCovers
+        project.coverSettings.enabled = request.generateCovers
+        let sequenceDuration = project.sequenceSourceDuration
+        var newEpisodeIDs = Set<UUID>()
+        var framedIDs = Set<UUID>()
+        for suggestion in suggestions.sorted(by: { $0.start < $1.start }) {
+            let start = max(0, min(suggestion.start, sequenceDuration))
+            let end = max(start, min(suggestion.end, sequenceDuration))
+            guard end - start > 0.2 else { continue }
+            momentCount += 1
+            for platform in platforms {
+                var mainPieces = project.sourceSegments(in: start...end)
+                guard !mainPieces.isEmpty else { continue }
+                if request.autoFraming && platform != .youtube {
+                    for index in mainPieces.indices {
+                        var adjustments = mainPieces[index].clipAdjustments
+                        adjustments.autoFraming = true
+                        mainPieces[index].clipAdjustments = adjustments
+                    }
+                }
+                for index in mainPieces.indices {
+                    mainPieces[index].transition = .none
+                }
+                var episode = Episode(
+                    index: nextIndex,
+                    mainStart: start,
+                    mainEnd: end,
+                    introTemplate: nil,
+                    outroTemplate: nil,
+                    recapSettings: RecapSettings(enabled: false)
+                )
+                episode.mainClips = mainPieces
+                episode.outputAspectRatio = platform.aspectRatio
+                episode.displayTitle = "Momento \(momentCount) • \(platform.shortName)"
+                episode.useGlobalIntro = false
+                episode.useGlobalOutro = false
+                episode.useGlobalRecap = false
+                episodes.append(episode)
+                newEpisodeIDs.insert(episode.id)
+                if platform != .youtube { framedIDs.insert(episode.id) }
+                selected = episode
+                nextIndex += 1
+            }
+        }
+        guard let selected = selected else { return }
+        selectedEpisode = selected
+        if request.captions.enabled, let srt = project.transcriptSRT, let cues = try? SubtitleFile.parse(srt) {
+            let landscapeIDs = newEpisodeIDs.subtracting(framedIDs)
+            if !framedIDs.isEmpty {
+                applyCaptions(cues, dynamic: request.captions.dynamic, recordUndo: false, episodeIDs: framedIDs)
+            }
+            if !landscapeIDs.isEmpty {
+                applyCaptions(cues, dynamic: false, recordUndo: false, episodeIDs: landscapeIDs)
+            }
+        }
+        Task { await persistProjectChanges() }
     }
 
     /// Rebuilds the project's episodes at detected topic boundaries (source times).

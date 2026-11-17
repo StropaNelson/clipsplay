@@ -18,6 +18,8 @@ struct ContentAnalysis: Codable, Identifiable {
     var audioStats: ContentAudioStats
     var personSamples: [PersonSample]
     var transcriptionLocale: String?
+    /// Normalized loudness profile of the sequence at 0.5 s intervals (optional index data).
+    var audioEnergy: [Float]?
     var warnings: [String]
 
     init(
@@ -35,6 +37,7 @@ struct ContentAnalysis: Codable, Identifiable {
         audioStats: ContentAudioStats = ContentAudioStats(),
         personSamples: [PersonSample] = [],
         transcriptionLocale: String? = nil,
+        audioEnergy: [Float]? = nil,
         warnings: [String] = []
     ) {
         self.id = id
@@ -52,6 +55,7 @@ struct ContentAnalysis: Codable, Identifiable {
         self.audioStats = audioStats
         self.personSamples = personSamples
         self.transcriptionLocale = transcriptionLocale
+        self.audioEnergy = audioEnergy
         self.warnings = warnings
     }
 }

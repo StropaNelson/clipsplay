@@ -182,6 +182,9 @@ actor AnalysisCoordinator {
         let topics = Self.topicBoundaries(words: words, sceneCuts: sceneCuts)
         let stats = Self.audioStats(words: words, silences: silences, fillers: fillers, duration: sourceDuration)
 
+        progress(AnalysisProgress(stage: .indexing, message: "Medindo energia do áudio…", fraction: 0.92))
+        let audioEnergy = await AudioEnergyAnalyzer.sequenceProfile(project: project, interval: 0.5)
+
         var resolvedTranscriptionLocale: String? = nil
         if transcriptSRT != nil {
             if transcriptionWasGenerated {
@@ -203,6 +206,7 @@ actor AnalysisCoordinator {
             topicBoundaries: topics,
             audioStats: stats,
             transcriptionLocale: resolvedTranscriptionLocale,
+            audioEnergy: audioEnergy.isEmpty ? nil : audioEnergy,
             warnings: warnings
         )
 

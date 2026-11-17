@@ -16,6 +16,12 @@ struct AutomationRequest: Codable {
     var localeIdentifier: String
     var allowServerTranscription: Bool
     var analyzeScenes: Bool
+    /// Target platforms for "Multiplicar conteúdo" (one output per moment × platform).
+    var platforms: [PublishPlatform]
+    /// Length band used to find complete moments.
+    var momentLength: MomentLength
+    /// Sequential "novelinha" split settings for "Criar episódios".
+    var episodePlan: EpisodePlanSettings
 
     init(
         operation: ProjectOperation,
@@ -30,7 +36,10 @@ struct AutomationRequest: Codable {
         outputPreset: ProductionPreset = .balanced,
         localeIdentifier: String = "pt-BR",
         allowServerTranscription: Bool = false,
-        analyzeScenes: Bool = true
+        analyzeScenes: Bool = true,
+        platforms: [PublishPlatform] = [.vertical],
+        momentLength: MomentLength = .short,
+        episodePlan: EpisodePlanSettings = EpisodePlanSettings()
     ) {
         self.operation = operation
         self.clipKinds = clipKinds
@@ -45,6 +54,9 @@ struct AutomationRequest: Codable {
         self.localeIdentifier = localeIdentifier
         self.allowServerTranscription = allowServerTranscription
         self.analyzeScenes = analyzeScenes
+        self.platforms = platforms
+        self.momentLength = momentLength
+        self.episodePlan = episodePlan
     }
 
     static func `default`(for operation: ProjectOperation) -> AutomationRequest {
@@ -52,13 +64,15 @@ struct AutomationRequest: Codable {
         case .multiply:
             return AutomationRequest(
                 operation: operation,
-                clipKinds: [.clips, .teasers],
+                clipKinds: [.clips],
                 resultCount: 6,
-                formats: [.portrait9_16, .square1_1],
+                formats: [.portrait9_16],
                 captions: CaptionAutomationSettings(enabled: true, dynamic: true),
                 autoFraming: true,
                 generateCovers: true,
-                outputPreset: .socialClips
+                outputPreset: .socialClips,
+                platforms: [.vertical],
+                momentLength: .short
             )
         case .speechEdit:
             return AutomationRequest(
@@ -92,7 +106,7 @@ struct AutomationRequest: Codable {
                 operation: operation,
                 clipKinds: [.segments],
                 resultCount: 4,
-                formats: [.landscape16_9],
+                formats: [.original],
                 captions: CaptionAutomationSettings(enabled: false, dynamic: false),
                 autoFraming: false,
                 generateCovers: true,
@@ -100,6 +114,56 @@ struct AutomationRequest: Codable {
             )
         }
     }
+}
+
+/// Distribution target for multiplied content; each maps to one output format.
+enum PublishPlatform: String, Codable, CaseIterable, Identifiable {
+    case vertical = "Reels · TikTok · Shorts"
+    case feed = "Feed 4:5"
+    case square = "Quadrado 1:1"
+    case youtube = "YouTube 16:9"
+
+    var id: String { rawValue }
+
+    var aspectRatio: AspectRatio {
+        switch self {
+        case .vertical: return .portrait9_16
+        case .feed: return .portrait4_5
+        case .square: return .square1_1
+        case .youtube: return .landscape16_9
+        }
+    }
+
+    var shortName: String {
+        switch self {
+        case .vertical: return "Vertical"
+        case .feed: return "Feed"
+        case .square: return "Quadrado"
+        case .youtube: return "YouTube"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .vertical: return "rectangle.portrait"
+        case .feed: return "rectangle.portrait.inset.filled"
+        case .square: return "square"
+        case .youtube: return "play.rectangle"
+        }
+    }
+}
+
+/// Structure of the sequential episode split ("novelinha").
+struct EpisodePlanSettings: Codable, Hashable {
+    /// 0 = use the planner's suggested length.
+    var targetLength: Double = 0
+    var seriesTitle: String = ""
+    var introCard = true
+    var outroCard = true
+    var recap = false
+    var recapDuration: Double = 6
+    var introAssetID: UUID?
+    var outroAssetID: UUID?
 }
 
 struct CaptionAutomationSettings: Codable, Hashable {
