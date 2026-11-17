@@ -260,7 +260,7 @@ struct Episode: Codable, Identifiable {
         }
     }
     
-    var mainDuration: Double { mainEnd - mainStart }
+    var mainDuration: Double { mainClips.reduce(0) { $0 + $1.timelineDuration } }
 
     var title: String { displayTitle ?? "Episódio \(index + 1)" }
 

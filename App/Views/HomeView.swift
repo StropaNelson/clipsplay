@@ -14,6 +14,7 @@ struct HomeView: View {
     @State private var newProjectName = ""
     @State private var pendingProjectName: String?
     @State private var pendingOperation: ProjectOperation?
+    @State private var pendingSequentialLoad = false
     
     var body: some View {
         NavigationStack {
@@ -49,9 +50,10 @@ struct HomeView: View {
                     showingVideoSource = true
                 }
             }) {
-                NewProjectSheet(onCreate: { name, operation in
+                NewProjectSheet(onCreate: { name, operation, sequential in
                     pendingProjectName = name
                     pendingOperation = operation
+                    pendingSequentialLoad = sequential
                     showingNewProject = false
                 })
             }
@@ -61,31 +63,36 @@ struct HomeView: View {
                         openFileImporterAfterSourceDismiss = true
                         showingVideoSource = false
                     },
-                    onGalleryPick: { item in
+                    onGalleryPick: { items in
                         showingVideoSource = false
-                        handleGalleryVideoSelection(item)
+                        handleGalleryVideoSelection(items)
                     }
                 )
             }
             .fileImporter(
                 isPresented: $showingVideoImport,
                 allowedContentTypes: VideoImporter.supportedVideoTypes,
-                allowsMultipleSelection: false
+                allowsMultipleSelection: true
             ) { result in
                 switch result {
                 case .success(let urls):
-                    guard let url = urls.first, let name = pendingProjectName else {
+                    guard !urls.isEmpty, let name = pendingProjectName else {
                         pendingProjectName = nil
                         pendingOperation = nil
+                        pendingSequentialLoad = false
                         return
                     }
                     pendingProjectName = nil
                     let operation = pendingOperation ?? .multiply
+                    let sequential = pendingSequentialLoad
                     pendingOperation = nil
-                    Task { await viewModel.createProject(name: name, from: url, operation: operation) }
+                    pendingSequentialLoad = false
+                    let ordered = urls.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+                    Task { await viewModel.createProject(name: name, from: ordered, operation: operation, sequential: sequential) }
                 case .failure(let error):
                     pendingProjectName = nil
                     pendingOperation = nil
+                    pendingSequentialLoad = false
                     if (error as NSError).code != NSUserCancelledError {
                         viewModel.errorMessage = "Erro ao selecionar vídeo: \(error.localizedDescription)"
                     }
@@ -211,24 +218,27 @@ struct HomeView: View {
         } else {
             pendingProjectName = nil
             pendingOperation = nil
+            pendingSequentialLoad = false
         }
     }
 
-    private func handleGalleryVideoSelection(_ item: PhotosPickerItem) {
-        guard let name = pendingProjectName else { return }
+    private func handleGalleryVideoSelection(_ items: [PhotosPickerItem]) {
+        guard !items.isEmpty, let name = pendingProjectName else { return }
         pendingProjectName = nil
         let operation = pendingOperation ?? .multiply
+        let sequential = pendingSequentialLoad
         pendingOperation = nil
-        Task { await viewModel.createProject(name: name, from: item, operation: operation) }
+        pendingSequentialLoad = false
+        Task { await viewModel.createProject(name: name, from: items, operation: operation, sequential: sequential) }
     }
 }
 
 private struct VideoSourceSheet: View {
     let onSelectFiles: () -> Void
-    let onGalleryPick: (PhotosPickerItem) -> Void
+    let onGalleryPick: ([PhotosPickerItem]) -> Void
 
     @Environment(\.dismiss) private var dismiss
-    @State private var gallerySelection: PhotosPickerItem?
+    @State private var gallerySelection: [PhotosPickerItem] = []
 
     var body: some View {
         NavigationStack {
@@ -236,7 +246,7 @@ private struct VideoSourceSheet: View {
                 PhotosPicker(selection: $gallerySelection, matching: .videos) {
                     sourceLabel(
                         title: "Galeria",
-                        subtitle: "Escolher um vídeo do app Fotos",
+                        subtitle: "Escolher um ou mais vídeos do app Fotos",
                         icon: "photo.on.rectangle"
                     )
                 }
@@ -245,7 +255,7 @@ private struct VideoSourceSheet: View {
                 Button(action: onSelectFiles) {
                     sourceLabel(
                         title: "Arquivos",
-                        subtitle: "Escolher um vídeo salvo em Arquivos",
+                        subtitle: "Escolher um ou mais vídeos em Arquivos",
                         icon: "folder"
                     )
                 }
@@ -259,9 +269,9 @@ private struct VideoSourceSheet: View {
                     Button("Cancelar") { dismiss() }
                 }
             }
-            .onChange(of: gallerySelection) { item in
-                guard let item = item else { return }
-                onGalleryPick(item)
+            .onChange(of: gallerySelection) { items in
+                guard !items.isEmpty else { return }
+                onGalleryPick(items)
             }
         }
         .presentationDetents([.height(260)])
@@ -363,9 +373,10 @@ struct ProjectShareItem: Identifiable {
 }
 
 struct NewProjectSheet: View {
-    let onCreate: (String, ProjectOperation) -> Void
+    let onCreate: (String, ProjectOperation, Bool) -> Void
     @State private var name = ""
     @State private var operation: ProjectOperation = .multiply
+    @State private var sequentialLoad = false
     @Environment(\.dismiss) private var dismiss
     
     var body: some View {
@@ -399,6 +410,13 @@ struct NewProjectSheet: View {
                     }
                 }
                 
+                Section("Importação") {
+                    Toggle("Carregar vídeos em sequência", isOn: $sequentialLoad)
+                    Text("Se você escolher mais de um vídeo, eles entram na timeline na ordem selecionada. Sem essa opção, os extras ficam na biblioteca de mídia.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section {
                     Text("Depois da importação, o ClipStudio abre diretamente a automação escolhida. Tudo continua editável na timeline.")
                         .font(.footnote)
@@ -412,7 +430,7 @@ struct NewProjectSheet: View {
                     Button("Cancelar") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Continuar") { onCreate(name, operation) }
+                    Button("Continuar") { onCreate(name, operation, sequentialLoad) }
                         .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
@@ -473,15 +491,25 @@ class HomeViewModel: ObservableObject {
         }
     }
     
-    func createProject(name: String, from videoURL: URL, operation: ProjectOperation) async {
+    func createProject(name: String, from videoURLs: [URL], operation: ProjectOperation, sequential: Bool) async {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return }
-        
+        guard !trimmed.isEmpty, let primaryURL = videoURLs.first else { return }
+
         errorMessage = nil
         do {
-            var project = try await importer.importVideo(from: videoURL, projectName: trimmed)
+            var project = try await importer.importVideo(from: primaryURL, projectName: trimmed)
+            var sequenceAssets: [MediaAsset] = []
+            for url in videoURLs.dropFirst() {
+                let asset = try await importer.importMediaAsset(from: url, type: .video)
+                project.mediaAssets.append(asset)
+                sequenceAssets.append(asset)
+            }
             project.operation = operation
-            project.regenerateEpisodes()
+            if sequential && !sequenceAssets.isEmpty {
+                configureSequentialEpisode(&project, assets: sequenceAssets)
+            } else {
+                project.regenerateEpisodes()
+            }
             try await storage.saveProject(project)
             await loadProjects()
             selectedProjectOperation = operation
@@ -491,15 +519,50 @@ class HomeViewModel: ObservableObject {
         }
     }
 
-    func createProject(name: String, from item: PhotosPickerItem, operation: ProjectOperation) async {
+    private func configureSequentialEpisode(_ project: inout Project, assets: [MediaAsset]) {
+        var episode = Episode(
+            index: 0,
+            mainStart: 0,
+            mainEnd: project.sourceVideoDuration,
+            introTemplate: project.introTemplate,
+            outroTemplate: project.outroTemplate,
+            recapSettings: project.recapSettings
+        )
+        episode.displayTitle = "Clipe em sequência"
+        var clips = [VideoSegment(
+            id: episode.id,
+            startTime: 0,
+            endTime: project.sourceVideoDuration,
+            sourceType: .mainVideo
+        )]
+        for asset in assets {
+            clips.append(VideoSegment(
+                startTime: 0,
+                endTime: asset.duration,
+                sourceType: .clipAsset,
+                assetID: asset.id
+            ))
+        }
+        episode.mainClips = clips
+        project.episodes = [episode]
+        project.updateTimestamp()
+    }
+
+    func createProject(name: String, from items: [PhotosPickerItem], operation: ProjectOperation, sequential: Bool) async {
         errorMessage = nil
+        var urls: [URL] = []
+        defer {
+            for url in urls { try? FileManager.default.removeItem(at: url) }
+        }
         do {
-            guard let video = try await item.loadTransferable(type: GalleryVideo.self) else {
-                errorMessage = "Não foi possível ler o vídeo selecionado."
-                return
+            for item in items {
+                guard let video = try await item.loadTransferable(type: GalleryVideo.self) else {
+                    errorMessage = "Não foi possível ler o vídeo selecionado."
+                    return
+                }
+                urls.append(video.url)
             }
-            defer { try? FileManager.default.removeItem(at: video.url) }
-            await createProject(name: name, from: video.url, operation: operation)
+            await createProject(name: name, from: urls, operation: operation, sequential: sequential)
         } catch {
             errorMessage = "Erro ao importar vídeo da galeria: \(error.localizedDescription)"
         }

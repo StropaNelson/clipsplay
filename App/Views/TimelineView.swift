@@ -96,6 +96,30 @@ struct TimelineView: View {
 
     private var safeDuration: Double { max(totalDuration, 0.1) }
 
+    private var videoRows: [[TimelineSegment]] {
+        var rows: [[TimelineSegment]] = []
+        for segment in segments.sorted(by: { $0.startTime < $1.startTime }) {
+            var rowIndex = 0
+            while rowIndex < rows.count && rows[rowIndex].contains(where: { overlapping($0, segment) }) {
+                rowIndex += 1
+            }
+            if rowIndex == rows.count {
+                rows.append([segment])
+            } else {
+                rows[rowIndex].append(segment)
+            }
+        }
+        return rows.isEmpty ? [[]] : rows
+    }
+
+    private func overlapping(_ first: TimelineSegment, _ second: TimelineSegment) -> Bool {
+        first.startTime < second.endTime - 0.01 && second.startTime < first.endTime - 0.01
+    }
+
+    private var firstVideoSegmentID: UUID? {
+        segments.min { $0.startTime < $1.startTime }?.id
+    }
+
     var body: some View {
         GeometryReader { geometry in
             VStack(spacing: 0) {
@@ -126,7 +150,13 @@ struct TimelineView: View {
     private var trackHeaders: some View {
         VStack(spacing: laneSpacing) {
             Color.clear.frame(height: rulerHeight + 4)
-            header(icon: "film", title: "Vídeo", height: clipHeight)
+            ForEach(videoRows.indices, id: \.self) { row in
+                header(
+                    icon: "film",
+                    title: videoRows.count == 1 ? "Vídeo" : "Vídeo \(row + 1)",
+                    height: clipHeight
+                )
+            }
             header(icon: "waveform", title: "Som", height: laneHeight)
             header(icon: "rectangle.on.rectangle", title: "PiP", height: laneHeight, action: onAddOverlay)
             header(icon: "textformat", title: "Texto", height: laneHeight, action: onAddText)
@@ -172,7 +202,8 @@ struct TimelineView: View {
     }
 
     private var contentHeight: CGFloat {
-        rulerHeight + 4 + clipHeight + laneHeight * CGFloat(3 + audioRows.count) + laneSpacing * CGFloat(4 + audioRows.count)
+        let videoHeight = clipHeight * CGFloat(videoRows.count) + laneSpacing * CGFloat(max(0, videoRows.count - 1))
+        return rulerHeight + 4 + videoHeight + laneHeight * CGFloat(3 + audioRows.count) + laneSpacing * CGFloat(3 + videoRows.count + audioRows.count)
     }
 
     private func xPosition(for time: Double) -> CGFloat {
@@ -187,7 +218,9 @@ struct TimelineView: View {
         ZStack(alignment: .topLeading) {
             VStack(alignment: .leading, spacing: laneSpacing) {
                 ruler
-                videoLane
+                ForEach(videoRows.indices, id: \.self) { row in
+                    videoLane(for: videoRows[row], rowIndex: row)
+                }
                 videoAudioLane
                 overlayLane
                 textLane
@@ -209,7 +242,8 @@ struct TimelineView: View {
         guard let provider = providers.first else { return false }
         let time = self.time(at: location.x)
         let videoTop = rulerHeight + 4 + laneSpacing
-        let pipTop = videoTop + clipHeight + laneSpacing + laneHeight + laneSpacing
+        let videoHeight = clipHeight * CGFloat(videoRows.count) + laneSpacing * CGFloat(max(0, videoRows.count - 1))
+        let pipTop = videoTop + videoHeight + laneSpacing + laneHeight + laneSpacing
         let textTop = pipTop + laneHeight + laneSpacing
         let audioTop = textTop + laneHeight + laneSpacing
         let track: TrackType
@@ -273,15 +307,15 @@ struct TimelineView: View {
         )
     }
 
-    private var videoLane: some View {
-        let ordered = segments.sorted { $0.startTime < $1.startTime }
+    private func videoLane(for row: [TimelineSegment], rowIndex: Int) -> some View {
+        let ordered = row.sorted { $0.startTime < $1.startTime }
         return ZStack(alignment: .topLeading) {
             Color.clear
                 .frame(width: contentWidth, height: clipHeight)
                 .contentShape(Rectangle())
                 .onTapGesture { onSelect(nil) }
 
-            if canAddIntro {
+            if canAddIntro && rowIndex == 0 {
                 addButton(title: "Intro", systemImage: "plus", action: onAddIntro)
                     .offset(x: 8)
             }
@@ -332,7 +366,7 @@ struct TimelineView: View {
                 .zIndex(reorderOffset != 0 ? 1 : 0)
             }
 
-            ForEach(Array(ordered.enumerated()).filter { $0.offset > 0 }, id: \.element.id) { _, segment in
+            ForEach(ordered.filter { $0.id != firstVideoSegmentID }) { segment in
                 transitionBadge(for: segment)
                     .offset(
                         x: xPosition(for: segment.startTime + segment.overlapIn / 2) - 11,
@@ -340,7 +374,7 @@ struct TimelineView: View {
                     )
             }
 
-            if canAddOutro {
+            if canAddOutro && rowIndex == 0 {
                 addButton(title: "Final", systemImage: "plus", action: onAddOutro)
                     .offset(x: xPosition(for: safeDuration) + 10)
             }
