@@ -109,7 +109,7 @@ actor AnalysisCoordinator {
         }
 
         if transcriptSRT == nil, !words.isEmpty {
-            transcriptSRT = SubtitleFile.srt(from: cues(from: words))
+            transcriptSRT = SubtitleFile.srt(from: Self.cues(from: words))
         }
 
         var sceneCuts = sourceChanged ? [] : (project.sceneCuts ?? cachedSceneCuts)

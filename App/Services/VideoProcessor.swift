@@ -143,7 +143,7 @@ actor VideoProcessor {
             let rawList = UnsafeMutableRawPointer.allocate(byteCount: bufferListSize, alignment: 16)
             defer { rawList.deallocate() }
             let bufferList = rawList.bindMemory(to: AudioBufferList.self, capacity: 1)
-            var retainedBlockBuffer: Unmanaged<CMBlockBuffer>?
+            var retainedBlockBuffer: CMBlockBuffer?
             guard CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
                 sample,
                 bufferListSizeNeededOut: nil,
@@ -154,12 +154,8 @@ actor VideoProcessor {
                 flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
                 blockBufferOut: &retainedBlockBuffer
             ) == noErr else { continue }
-            let retainedBuffer = retainedBlockBuffer?.takeRetainedValue()
-            withExtendedLifetime(retainedBuffer) {
-                let buffers = UnsafeBufferPointer(
-                    start: &bufferList.pointee.mBuffers,
-                    count: Int(bufferList.pointee.mNumberBuffers)
-                )
+            withExtendedLifetime(retainedBlockBuffer) {
+                let buffers = UnsafeMutableAudioBufferListPointer(bufferList)
                 for audioBuffer in buffers {
                     guard let data = audioBuffer.mData?.assumingMemoryBound(to: Float.self) else { continue }
                     let count = Int(audioBuffer.mDataByteSize) / MemoryLayout<Float>.size
