@@ -408,7 +408,7 @@ struct AssetImportSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showingVideoImporter = false
     @State private var showingAudioImporter = false
-    @State private var showingImagePicker = false
+    @State private var showingGalleryPicker = false
     @State private var selectedType: AssetType = .video
     @State private var isImporting = false
     @State private var errorMessage: String?
@@ -439,9 +439,9 @@ struct AssetImportSheet: View {
                         .frame(maxWidth: .infinity)
                     }
                     .disabled(isImporting)
-                    if selectedType == .image {
+                    if selectedType == .image || selectedType == .video {
                         Button {
-                            showingImagePicker = true
+                            showingGalleryPicker = true
                         } label: {
                             Label("Escolher da galeria de Fotos", systemImage: "photo.on.rectangle")
                                 .frame(maxWidth: .infinity)
@@ -485,19 +485,24 @@ struct AssetImportSheet: View {
                 handleImport(result, type: fileImportType)
             }
             .photosPicker(
-                isPresented: $showingImagePicker,
-                selection: $imageSelection,
-                matching: .images
+                isPresented: $showingGalleryPicker,
+                selection: $gallerySelection,
+                matching: galleryPickerFilter
             )
-            .onChange(of: imageSelection) { item in
+            .onChange(of: gallerySelection) { item in
                 guard let item = item else { return }
-                importPhoto(item)
+                importGalleryItem(item)
             }
         }
     }
     
-    @State private var imageSelection: PhotosPickerItem?
+    @State private var gallerySelection: PhotosPickerItem?
     @State private var fileImportType: AssetType = .video
+
+    private var galleryPickerFilter: PhotosPickerFilter {
+        if selectedType == .video { return .videos }
+        return .images
+    }
 
     private func allowedTypes(for type: AssetType) -> [UTType] {
         switch type {
@@ -507,13 +512,44 @@ struct AssetImportSheet: View {
         }
     }
 
+    private func importGalleryItem(_ item: PhotosPickerItem) {
+        if selectedType == .video {
+            importGalleryVideo(item)
+        } else {
+            importPhoto(item)
+        }
+    }
+
+    private func importGalleryVideo(_ item: PhotosPickerItem) {
+        Task {
+            isImporting = true
+            errorMessage = nil
+            defer {
+                isImporting = false
+                gallerySelection = nil
+            }
+            do {
+                guard let video = try await item.loadTransferable(type: GalleryVideo.self) else {
+                    errorMessage = "Não foi possível ler o vídeo selecionado."
+                    return
+                }
+                defer { try? FileManager.default.removeItem(at: video.url) }
+                let asset = try await importer.importMediaAsset(from: video.url, type: .video)
+                onComplete(asset)
+                dismiss()
+            } catch {
+                errorMessage = "Erro ao importar vídeo da galeria: \(error.localizedDescription)"
+            }
+        }
+    }
+
     private func importPhoto(_ item: PhotosPickerItem) {
         Task {
             isImporting = true
             errorMessage = nil
             defer {
                 isImporting = false
-                imageSelection = nil
+                gallerySelection = nil
             }
             do {
                 guard let data = try await item.loadTransferable(type: Data.self),

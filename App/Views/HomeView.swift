@@ -1,4 +1,5 @@
 import SwiftUI
+import PhotosUI
 import UIKit
 import UniformTypeIdentifiers
 
@@ -7,6 +8,8 @@ struct HomeView: View {
     @State private var showingNewProject = false
     @State private var showingImport = false
     @State private var showingVideoImport = false
+    @State private var showingVideoSource = false
+    @State private var openFileImporterAfterSourceDismiss = false
     @State private var projectToEdit: ProjectSummary?
     @State private var newProjectName = ""
     @State private var pendingProjectName: String?
@@ -43,7 +46,7 @@ struct HomeView: View {
             }
             .sheet(isPresented: $showingNewProject, onDismiss: {
                 if pendingProjectName != nil {
-                    showingVideoImport = true
+                    showingVideoSource = true
                 }
             }) {
                 NewProjectSheet(onCreate: { name, operation in
@@ -51,6 +54,18 @@ struct HomeView: View {
                     pendingOperation = operation
                     showingNewProject = false
                 })
+            }
+            .sheet(isPresented: $showingVideoSource, onDismiss: handleVideoSourceDismissal) {
+                VideoSourceSheet(
+                    onSelectFiles: {
+                        openFileImporterAfterSourceDismiss = true
+                        showingVideoSource = false
+                    },
+                    onGalleryPick: { item in
+                        showingVideoSource = false
+                        handleGalleryVideoSelection(item)
+                    }
+                )
             }
             .fileImporter(
                 isPresented: $showingVideoImport,
@@ -187,6 +202,93 @@ struct HomeView: View {
                 onCancel: { projectToEdit = nil }
             )
         }
+    }
+
+    private func handleVideoSourceDismissal() {
+        if openFileImporterAfterSourceDismiss {
+            openFileImporterAfterSourceDismiss = false
+            showingVideoImport = true
+        } else {
+            pendingProjectName = nil
+            pendingOperation = nil
+        }
+    }
+
+    private func handleGalleryVideoSelection(_ item: PhotosPickerItem) {
+        guard let name = pendingProjectName else { return }
+        pendingProjectName = nil
+        let operation = pendingOperation ?? .multiply
+        pendingOperation = nil
+        Task { await viewModel.createProject(name: name, from: item, operation: operation) }
+    }
+}
+
+private struct VideoSourceSheet: View {
+    let onSelectFiles: () -> Void
+    let onGalleryPick: (PhotosPickerItem) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var gallerySelection: PhotosPickerItem?
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 14) {
+                PhotosPicker(selection: $gallerySelection, matching: .videos) {
+                    sourceLabel(
+                        title: "Galeria",
+                        subtitle: "Escolher um vídeo do app Fotos",
+                        icon: "photo.on.rectangle"
+                    )
+                }
+                .buttonStyle(.plain)
+
+                Button(action: onSelectFiles) {
+                    sourceLabel(
+                        title: "Arquivos",
+                        subtitle: "Escolher um vídeo salvo em Arquivos",
+                        icon: "folder"
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+            .padding()
+            .navigationTitle("Escolher vídeo")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancelar") { dismiss() }
+                }
+            }
+            .onChange(of: gallerySelection) { item in
+                guard let item = item else { return }
+                onGalleryPick(item)
+            }
+        }
+        .presentationDetents([.height(260)])
+    }
+
+    private func sourceLabel(title: String, subtitle: String, icon: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.title3)
+                .frame(width: 34, height: 34)
+                .foregroundStyle(.white)
+                .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 10))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.caption.bold())
+                .foregroundStyle(.tertiary)
+        }
+        .padding(14)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
     }
 }
 
@@ -386,6 +488,20 @@ class HomeViewModel: ObservableObject {
             selectedProject = project
         } catch {
             errorMessage = "Erro ao criar projeto: \(error.localizedDescription)"
+        }
+    }
+
+    func createProject(name: String, from item: PhotosPickerItem, operation: ProjectOperation) async {
+        errorMessage = nil
+        do {
+            guard let video = try await item.loadTransferable(type: GalleryVideo.self) else {
+                errorMessage = "Não foi possível ler o vídeo selecionado."
+                return
+            }
+            defer { try? FileManager.default.removeItem(at: video.url) }
+            await createProject(name: name, from: video.url, operation: operation)
+        } catch {
+            errorMessage = "Erro ao importar vídeo da galeria: \(error.localizedDescription)"
         }
     }
     
