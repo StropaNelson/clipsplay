@@ -475,6 +475,9 @@ actor VideoProcessor {
         )
         videoComposition.fadeEdges = fadeEdges
         videoComposition.contentDuration = composition.duration.seconds
+        if requiresCustomCompositor {
+            videoComposition.installCustomInstructions()
+        }
         return CompositionBuildResult(
             composition: composition,
             videoComposition: videoComposition,
@@ -509,6 +512,7 @@ actor VideoProcessor {
         }
         mutable.textOverlays = visible
         mutable.imageOverlays = images
+        mutable.installCustomInstructions()
         return mutable
     }
 
@@ -641,7 +645,6 @@ actor VideoProcessor {
             ))
         }
         videoComposition.trackRenders = renders
-        videoComposition.customVideoCompositorClass = requiresCustomCompositor ? ClipFilterCompositor.self : nil
         return videoComposition
     }
 

@@ -17,29 +17,90 @@ final class FilterVideoComposition: AVMutableVideoComposition, @unchecked Sendab
     /// Burned-in image/video overlays already rasterized to CGImage.
     var imageOverlays: [ImageOverlayRender] = []
 
-    private func copyProperties(to other: FilterVideoComposition) {
-        other.trackRenders = trackRenders
-        other.fitMode = fitMode
-        other.fadeEdges = fadeEdges
-        other.contentDuration = contentDuration
-        other.textOverlays = textOverlays
-        other.imageOverlays = imageOverlays
+    /// AVFoundation copies video compositions on assignment, and the copy loses
+    /// this subclass — so render data travels inside the instruction objects,
+    /// which are passed through untouched. Call once all properties are final.
+    func installCustomInstructions() {
+        let payload = FilterRenderPayload(
+            trackRenders: trackRenders,
+            fitMode: fitMode,
+            fadeEdges: fadeEdges,
+            contentDuration: contentDuration,
+            textOverlays: textOverlays,
+            imageOverlays: imageOverlays
+        )
+        instructions = instructions.map { instruction in
+            let custom = FilterCompositionInstruction(
+                timeRange: instruction.timeRange,
+                requiredSourceTrackIDs: Self.requiredTrackIDs(of: instruction),
+                payload: payload
+            )
+            custom.backgroundColor = instruction.backgroundColor
+            return custom
+        }
+        customVideoCompositorClass = ClipFilterCompositor.self
     }
 
-    override func copy(with zone: NSZone? = nil) -> Any {
-        guard let copy = super.copy(with: zone) as? FilterVideoComposition else {
-            return super.copy(with: zone) as Any
+    private static func requiredTrackIDs(of instruction: AVVideoCompositionInstructionProtocol) -> [NSValue] {
+        if let custom = instruction as? FilterCompositionInstruction {
+            return custom.requiredSourceTrackIDs ?? []
         }
-        copyProperties(to: copy)
-        return copy
+        guard let mutable = instruction as? AVMutableVideoCompositionInstruction else { return [] }
+        return mutable.layerInstructions.map { NSNumber(value: $0.trackID) }
     }
 
-    override func mutableCopy(with zone: NSZone? = nil) -> Any {
-        guard let copy = super.mutableCopy(with: zone) as? FilterVideoComposition else {
-            return super.mutableCopy(with: zone) as Any
-        }
-        copyProperties(to: copy)
-        return copy
+    /// Fallback payload for paths where the subclass object itself survives.
+    var renderPayload: FilterRenderPayload {
+        FilterRenderPayload(
+            trackRenders: trackRenders,
+            fitMode: fitMode,
+            fadeEdges: fadeEdges,
+            contentDuration: contentDuration,
+            textOverlays: textOverlays,
+            imageOverlays: imageOverlays
+        )
+    }
+}
+
+/// Everything the compositor needs for one run of instructions; carried inside
+/// the instruction so it survives AVFoundation's composition copies.
+final class FilterRenderPayload: @unchecked Sendable {
+    let trackRenders: [CMPersistentTrackID: [TrackRenderInfo]]
+    let fitMode: FitMode
+    let fadeEdges: Bool
+    let contentDuration: Double
+    let textOverlays: [TextOverlay]
+    let imageOverlays: [ImageOverlayRender]
+
+    init(trackRenders: [CMPersistentTrackID: [TrackRenderInfo]], fitMode: FitMode,
+         fadeEdges: Bool, contentDuration: Double,
+         textOverlays: [TextOverlay], imageOverlays: [ImageOverlayRender]) {
+        self.trackRenders = trackRenders
+        self.fitMode = fitMode
+        self.fadeEdges = fadeEdges
+        self.contentDuration = contentDuration
+        self.textOverlays = textOverlays
+        self.imageOverlays = imageOverlays
+    }
+}
+
+/// Replaces built-in instructions when the custom compositor is active; the
+/// compositor draws clips/transitions/overlays itself from `payload`.
+final class FilterCompositionInstruction: NSObject, AVVideoCompositionInstructionProtocol {
+    var timeRange: CMTimeRange
+    var enablePostProcessing = false
+    var containsTweening = true
+    var requiredSourceTrackIDs: [NSValue]?
+    var requiredSourceSampleDataTrackIDs: [NSNumber]?
+    var passthroughTrackID = kCMPersistentTrackID_Invalid
+    var backgroundColor: CGColor?
+    let payload: FilterRenderPayload
+
+    init(timeRange: CMTimeRange, requiredSourceTrackIDs: [NSValue], payload: FilterRenderPayload) {
+        self.timeRange = timeRange
+        self.requiredSourceTrackIDs = requiredSourceTrackIDs
+        self.payload = payload
+        super.init()
     }
 }
 
@@ -123,12 +184,21 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
         let composition = request.renderContext.videoComposition
         let renderSize = composition.renderSize
         var canvas = CIImage(color: CIColor(red: 0, green: 0, blue: 0)).cropped(to: CGRect(origin: .zero, size: renderSize))
-        guard let composition = composition as? FilterVideoComposition else { return canvas }
+
+        let payload: FilterRenderPayload?
+        if let instruction = request.videoCompositionInstruction as? FilterCompositionInstruction {
+            payload = instruction.payload
+        } else if let filterComposition = composition as? FilterVideoComposition {
+            payload = filterComposition.renderPayload
+        } else {
+            payload = nil
+        }
+        guard let payload = payload else { return canvas }
 
         let time = request.compositionTime.seconds
         var clips: [(CMPersistentTrackID, TrackRenderInfo)] = []
         var overlays: [(CMPersistentTrackID, TrackRenderInfo)] = []
-        for (trackID, infos) in composition.trackRenders {
+        for (trackID, infos) in payload.trackRenders {
             for info in infos where time >= info.start && time < info.end {
                 switch info.kind {
                 case .clip: clips.append((trackID, info))
@@ -173,7 +243,7 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
                 transform = clipTransform(
                     info,
                     renderSize: renderSize,
-                    fitMode: composition.fitMode,
+                    fitMode: payload.fitMode,
                     image: framingSource,
                     trackID: trackID,
                     time: time
@@ -210,19 +280,19 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
             canvas = image.transformed(by: transform).composited(over: canvas)
         }
         var result = canvas.cropped(to: CGRect(origin: .zero, size: renderSize))
-        if composition.fadeEdges, composition.contentDuration > 0 {
+        if payload.fadeEdges, payload.contentDuration > 0 {
             let fade = 0.5
-            let alpha = min(1, min(time / fade, (composition.contentDuration - time) / fade))
+            let alpha = min(1, min(time / fade, (payload.contentDuration - time) / fade))
             if alpha < 0.999 {
                 result = result.applyingFilter("CIColorMatrix", parameters: [
                     "inputAVector": CIVector(x: 0, y: 0, z: 0, w: max(0, alpha))
                 ])
             }
         }
-        for render in composition.imageOverlays where render.overlay.isVisible(at: time) {
+        for render in payload.imageOverlays where render.overlay.isVisible(at: time) {
             result = compositeImageOverlay(render, over: result, time: time, renderSize: renderSize)
         }
-        for overlay in composition.textOverlays where overlay.isVisible(at: time) {
+        for overlay in payload.textOverlays where overlay.isVisible(at: time) {
             result = compositeTextOverlay(overlay, over: result, time: time, renderSize: renderSize)
         }
         return result
