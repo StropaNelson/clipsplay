@@ -35,7 +35,7 @@ final class FilterVideoComposition: AVMutableVideoComposition, @unchecked Sendab
                 requiredSourceTrackIDs: Self.requiredTrackIDs(of: instruction),
                 payload: payload
             )
-            custom.backgroundColor = instruction.backgroundColor
+            custom.backgroundColor = (instruction as? AVVideoCompositionInstruction)?.backgroundColor
             return custom
         }
         customVideoCompositorClass = ClipFilterCompositor.self
@@ -91,7 +91,6 @@ final class FilterCompositionInstruction: NSObject, AVVideoCompositionInstructio
     var enablePostProcessing = false
     var containsTweening = true
     var requiredSourceTrackIDs: [NSValue]?
-    var requiredSourceSampleDataTrackIDs: [NSNumber]?
     var passthroughTrackID = kCMPersistentTrackID_Invalid
     var backgroundColor: CGColor?
     let payload: FilterRenderPayload
