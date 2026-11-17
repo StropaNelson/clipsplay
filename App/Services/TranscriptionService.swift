@@ -493,9 +493,18 @@ private final class RecognitionState: @unchecked Sendable {
 
 enum SubtitleFile {
     static func parse(_ text: String) throws -> [TranscriptCue] {
-        let normalized = text
+        let unifiedLines = text
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{FEFF}", with: "")
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .joined(separator: "\n")
+        let normalized = unifiedLines.replacingOccurrences(
+            of: "(\\d)[ \\t]*(?:[-\u{2010}\u{2011}\u{2012}\u{2013}\u{2014}\u{2015}\u{2212}]{1,3}>|\u{2192}|\u{27F6}|\u{21D2})[ \\t]*(\\d)",
+            with: "$1 --> $2",
+            options: .regularExpression
+        )
         var cues: [TranscriptCue] = []
 
         for block in normalized.components(separatedBy: "\n\n") {

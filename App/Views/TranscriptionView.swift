@@ -273,7 +273,7 @@ struct TranscriptionView: View {
 
     static func aiPrompt(vocabulary: [String], srt: String) -> String {
         var prompt = """
-        Revise a transcrição abaixo (formato SRT) de um vídeo. Corrija ortografia, pontuação, termos técnicos, nomes de marcas/pessoas e números (use algarismos quando fizer sentido). REGRAS: mantenha exatamente a mesma quantidade de blocos, a mesma numeração e os mesmos tempos (linhas com -->); altere só o texto; não junte, divida, resuma nem traduza blocos; responda apenas com o SRT corrigido, sem comentários.
+        Revise a transcrição abaixo (formato SRT) de um vídeo. Corrija ortografia, pontuação, termos técnicos, nomes de marcas/pessoas e números (use algarismos quando fizer sentido). REGRAS: mantenha exatamente a mesma quantidade de blocos, a mesma numeração e os mesmos tempos (linhas com -->, escrita com dois hífens e o sinal >); altere só o texto; não junte, divida, resuma nem traduza blocos; responda apenas com o SRT corrigido, sem comentários.
         """
         if !vocabulary.isEmpty {
             prompt += " Termos corretos deste vídeo: \(vocabulary.joined(separator: ", "))."
