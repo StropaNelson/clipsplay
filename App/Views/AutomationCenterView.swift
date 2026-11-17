@@ -491,14 +491,83 @@ struct AutomationCenterView: View {
                 vinhetaSlotTile(track: .outro, title: "Encerramento", choice: request.episodePlan.outro)
             }
 
-            VStack(alignment: .leading, spacing: 10) {
-                Toggle("Cartão \"Parte N de M\"", isOn: $request.episodePlan.introCard)
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Textos da abertura e do encerramento")
+                    .font(.footnote.weight(.medium))
+                Toggle("Texto na abertura", isOn: $request.episodePlan.introCard)
                 if request.episodePlan.introCard {
-                    cardMock(text: "\(seriesCardTitle)\nParte 1 de \(plannedEpisodeCount)")
+                    Toggle("Mostrar título da série", isOn: $request.episodePlan.showSeriesTitle)
+                        .font(.footnote)
+                    TextField("Texto da abertura", text: $request.episodePlan.introCardText)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.footnote)
+                    cardPreview(
+                        text: previewText(request.episodePlan.introCardText, prependSeries: true),
+                        caption: request.episodePlan.intro != nil ? "Sobre a vinheta de abertura" : "Sobre o início do conteúdo"
+                    )
                 }
-                Toggle("Cartão \"Continua na Parte N+1\"", isOn: $request.episodePlan.outroCard)
+                Toggle("Texto no encerramento", isOn: $request.episodePlan.outroCard)
                 if request.episodePlan.outroCard {
-                    cardMock(text: "Continua na Parte 2")
+                    TextField("Texto do encerramento", text: $request.episodePlan.outroCardText)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.footnote)
+                    Toggle("\"Fim\" no último episódio", isOn: $request.episodePlan.finalCard)
+                        .font(.footnote)
+                    if request.episodePlan.finalCard {
+                        TextField("Texto final", text: $request.episodePlan.finalCardText)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.footnote)
+                    }
+                    cardPreview(
+                        text: previewText(plannedEpisodeCount == 1 && request.episodePlan.finalCard
+                                          ? request.episodePlan.finalCardText
+                                          : request.episodePlan.outroCardText),
+                        caption: request.episodePlan.outro != nil ? "Sobre a vinheta de encerramento" : "Sobre o fim do conteúdo"
+                    )
+                }
+                Text("Use {n} para o número, {total} para o total e {próx} para o próximo")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Tamanho")
+                        .font(.caption)
+                    Picker("Tamanho", selection: $request.episodePlan.cardSize) {
+                        ForEach(EpisodeCardSize.allCases) { size in
+                            Text(size.rawValue).tag(size)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Posição")
+                        .font(.caption)
+                    Picker("Posição", selection: $request.episodePlan.cardPosition) {
+                        ForEach(EpisodeCardPosition.allCases) { position in
+                            Text(position.rawValue).tag(position)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Estilo")
+                        .font(.caption)
+                    Picker("Estilo", selection: $request.episodePlan.cardStyle) {
+                        ForEach(TextOverlayStyle.allCases) { style in
+                            Text(style.rawValue).tag(style)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Cor")
+                        .font(.caption)
+                    Picker("Cor", selection: $request.episodePlan.cardColor) {
+                        ForEach(EpisodeCardColor.allCases) { color in
+                            Text(color.rawValue).tag(color)
+                        }
+                    }
+                    .pickerStyle(.segmented)
                 }
                 Toggle("Anteriormente (resumo do episódio anterior)", isOn: $request.episodePlan.recap)
                 if request.episodePlan.recap {
@@ -518,14 +587,55 @@ struct AutomationCenterView: View {
         return title.isEmpty ? project.name : title
     }
 
-    private func cardMock(text: String) -> some View {
-        Text(text)
-            .font(.caption.weight(.semibold))
+    /// Card text with placeholders expanded as they will appear in part 1.
+    private func previewText(_ template: String, prependSeries: Bool = false) -> String {
+        EpisodePlanSettings.cardText(
+            template,
+            index: 0,
+            count: plannedEpisodeCount,
+            series: request.episodePlan.showSeriesTitle ? seriesCardTitle : "",
+            prependSeries: prependSeries && request.episodePlan.showSeriesTitle
+        )
+    }
+
+    /// Mini preview of a part card over a dark frame at the chosen look/position.
+    private func cardPreview(text: String, caption: String) -> some View {
+        let vertical = request.formats.first != .landscape16_9
+        return VStack(alignment: .leading, spacing: 4) {
+            ZStack {
+                Color(white: 0.12)
+                GeometryReader { geo in
+                    cardPreviewText(text, height: geo.size.height)
+                        .position(x: geo.size.width / 2, y: geo.size.height * CGFloat(request.episodePlan.cardPosition.positionY))
+                }
+            }
+            .aspectRatio(vertical ? 9.0 / 16.0 : 16.0 / 9.0, contentMode: .fit)
+            .frame(maxWidth: vertical ? 150 : .infinity)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            Text(caption)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func cardPreviewText(_ text: String, height: CGFloat) -> some View {
+        let plan = request.episodePlan
+        let base = Text(text)
+            .font(.system(size: max(7, height * CGFloat(plan.cardSize.fontScale)), weight: .bold))
             .multilineTextAlignment(.center)
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 14)
-            .background(Color.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 10))
+            .lineLimit(3)
+            .foregroundStyle(plan.cardColor.rgba.color)
+        switch plan.cardStyle {
+        case .box:
+            return AnyView(base
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(plan.cardColor.rgba.isDark ? Color.white.opacity(0.85) : Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 6)))
+        case .shadow:
+            return AnyView(base.shadow(color: .black.opacity(0.8), radius: 3))
+        case .plain:
+            return AnyView(base)
+        }
     }
 
     private var episodeDiagram: some View {

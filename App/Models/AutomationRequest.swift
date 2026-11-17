@@ -164,6 +164,75 @@ struct EpisodePlanSettings: Codable, Hashable {
     var recapDuration: Double = 6
     var intro: VinhetaChoice?
     var outro: VinhetaChoice?
+    var cardSize: EpisodeCardSize = .medium
+    var cardPosition: EpisodeCardPosition = .top
+    var cardStyle: TextOverlayStyle = .box
+    var cardColor: EpisodeCardColor = .white
+    var showSeriesTitle = true
+    var introCardText = "Parte {n} de {total}"
+    var outroCardText = "Continua na Parte {próx}"
+    var finalCardText = "Fim"
+    /// Show the final text at the end of the last episode (requires outroCard).
+    var finalCard = true
+
+    /// Expands {n}, {total}, {próx}/{prox}; `series` is prepended only for the intro card.
+    static func cardText(_ template: String, index: Int, count: Int, series: String,
+                         prependSeries: Bool) -> String {
+        var text = template
+            .replacingOccurrences(of: "{n}", with: "\(index + 1)")
+            .replacingOccurrences(of: "{total}", with: "\(count)")
+            .replacingOccurrences(of: "{próx}", with: "\(index + 2)")
+            .replacingOccurrences(of: "{prox}", with: "\(index + 2)")
+        if prependSeries, !series.isEmpty {
+            text = "\(series)\n\(text)"
+        }
+        return text
+    }
+}
+
+enum EpisodeCardSize: String, Codable, CaseIterable, Identifiable {
+    case small = "Pequeno"
+    case medium = "Médio"
+    case large = "Grande"
+
+    var id: String { rawValue }
+    var fontScale: Double {
+        switch self {
+        case .small: return 0.045
+        case .medium: return 0.06
+        case .large: return 0.08
+        }
+    }
+}
+
+enum EpisodeCardPosition: String, Codable, CaseIterable, Identifiable {
+    case top = "Topo"
+    case center = "Centro"
+    case bottom = "Base"
+
+    var id: String { rawValue }
+    var positionY: Double {
+        switch self {
+        case .top: return 0.15
+        case .center: return 0.5
+        case .bottom: return 0.82
+        }
+    }
+}
+
+enum EpisodeCardColor: String, Codable, CaseIterable, Identifiable {
+    case white = "Branco"
+    case yellow = "Amarelo"
+    case black = "Preto"
+
+    var id: String { rawValue }
+    var rgba: RGBAColor {
+        switch self {
+        case .white: return .white
+        case .yellow: return RGBAColor(red: 1, green: 0.84, blue: 0.04, alpha: 1)
+        case .black: return RGBAColor(red: 0, green: 0, blue: 0, alpha: 1)
+        }
+    }
 }
 
 /// A picked piece of a media asset used as opening/closing vinheta.

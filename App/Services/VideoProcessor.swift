@@ -485,6 +485,7 @@ actor VideoProcessor {
 
     /// Adds burned-in text for export. Core Animation layers can't be used with AVPlayerItem,
     /// so the editor draws the same overlays with SwiftUI during preview.
+    @MainActor
     func applyTextOverlays(
         _ overlays: [TextOverlay],
         images: [ImageOverlayRender] = [],
@@ -505,6 +506,10 @@ actor VideoProcessor {
             mutable.contentDuration = source.contentDuration
         }
         let size = mutable.renderSize
+        // CALayer trees must be built inside an explicit transaction — an implicit
+        // one on a background thread may never commit and can crash the exporter.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         let parent = CALayer()
         parent.frame = CGRect(origin: .zero, size: size)
         parent.isGeometryFlipped = true
@@ -527,6 +532,7 @@ actor VideoProcessor {
         for overlay in visible {
             parent.addSublayer(Self.textLayer(for: overlay, renderSize: size))
         }
+        CATransaction.commit()
         mutable.animationTool = AVVideoCompositionCoreAnimationTool(
             postProcessingAsVideoLayer: videoLayer,
             in: parent
@@ -550,7 +556,9 @@ actor VideoProcessor {
         container.bounds = CGRect(x: 0, y: 0, width: bounds.width + padding * 2, height: bounds.height + padding * 2)
         container.position = CGPoint(x: overlay.positionX * size.width, y: overlay.positionY * size.height)
         if overlay.style == .box {
-            container.backgroundColor = UIColor.black.withAlphaComponent(0.6).cgColor
+            container.backgroundColor = overlay.color.isDark
+                ? UIColor.white.withAlphaComponent(0.85).cgColor
+                : UIColor.black.withAlphaComponent(0.6).cgColor
             container.cornerRadius = fontSize * 0.25
         }
 

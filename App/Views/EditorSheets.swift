@@ -428,7 +428,7 @@ struct TextOverlayLabel: View {
             .shadow(color: overlay.style == .shadow ? .black.opacity(0.85) : .clear, radius: fontSize * 0.08)
             .padding(overlay.style == .box ? fontSize * 0.35 : 0)
             .background(
-                overlay.style == .box ? Color.black.opacity(0.6) : Color.clear,
+                overlay.style == .box ? (overlay.color.isDark ? Color.white.opacity(0.85) : Color.black.opacity(0.6)) : Color.clear,
                 in: RoundedRectangle(cornerRadius: fontSize * 0.25)
             )
             .frame(maxWidth: canvasSize.width * 0.9)

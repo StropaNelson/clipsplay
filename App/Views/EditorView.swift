@@ -3030,14 +3030,33 @@ class EditorViewModel: ObservableObject {
             let mainLength = max(0.1, mainEnd - mainStart)
             var overlays = episodes[index].textOverlays
             if plan.introCard {
-                overlays.append(partCard(text: "\(series)\nParte \(index + 1) de \(count)", start: mainStart, duration: min(3, mainLength / 3)))
+                let text = EpisodePlanSettings.cardText(plan.introCardText, index: index, count: count, series: series, prependSeries: plan.showSeriesTitle)
+                if let introItem = storyline.first(where: { $0.track == .intro }) {
+                    overlays.append(partCard(plan: plan, text: text, start: introItem.start, duration: max(1.5, introItem.end - introItem.start)))
+                } else {
+                    overlays.append(partCard(plan: plan, text: text, start: mainStart, duration: min(3, mainLength / 3)))
+                }
             }
             if plan.recap, index > 0, let recapItem = storyline.first(where: { $0.track == .recap }) {
-                overlays.append(partCard(text: "Anteriormente…", start: recapItem.start, duration: max(0.5, recapItem.end - recapItem.start), positionY: 0.12))
+                overlays.append(partCard(plan: plan, text: "Anteriormente…", start: recapItem.start, duration: max(0.5, recapItem.end - recapItem.start), positionY: 0.12))
             }
-            if plan.outroCard, index < count - 1 {
-                let cardLength = min(3, mainLength / 3)
-                overlays.append(partCard(text: "Continua na Parte \(index + 2)", start: mainEnd - cardLength, duration: cardLength))
+            if plan.outroCard {
+                let isLast = index == count - 1
+                if !isLast || plan.finalCard {
+                    let text = EpisodePlanSettings.cardText(
+                        isLast ? plan.finalCardText : plan.outroCardText,
+                        index: index,
+                        count: count,
+                        series: series,
+                        prependSeries: false
+                    )
+                    if let outroItem = storyline.first(where: { $0.track == .outro }) {
+                        overlays.append(partCard(plan: plan, text: text, start: outroItem.start, duration: max(1.5, outroItem.end - outroItem.start)))
+                    } else {
+                        let cardLength = min(3, mainLength / 3)
+                        overlays.append(partCard(plan: plan, text: text, start: mainEnd - cardLength, duration: cardLength))
+                    }
+                }
             }
             episodes[index].textOverlays = overlays
         }
@@ -3063,12 +3082,15 @@ class EditorViewModel: ObservableObject {
         return template
     }
 
-    private func partCard(text: String, start: Double, duration: Double, positionY: Double = 0.15) -> TextOverlay {
+    private func partCard(plan: EpisodePlanSettings, text: String, start: Double, duration: Double,
+                          positionY: Double? = nil) -> TextOverlay {
         var overlay = TextOverlay(text: text, startTime: start, duration: max(0.5, duration))
-        overlay.positionY = positionY
-        overlay.fontScale = 0.06
-        overlay.style = .box
+        overlay.positionY = positionY ?? plan.cardPosition.positionY
+        overlay.fontScale = plan.cardSize.fontScale
+        overlay.style = plan.cardStyle
+        overlay.color = plan.cardColor.rgba
         overlay.animation = .fade
+        overlay.exitAnimation = .fade
         return overlay
     }
 

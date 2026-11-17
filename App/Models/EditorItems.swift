@@ -42,6 +42,9 @@ struct RGBAColor: Codable, Hashable {
 
     static let white = RGBAColor(red: 1, green: 1, blue: 1, alpha: 1)
 
+    /// Dark text needs a light box behind it to stay readable.
+    var isDark: Bool { 0.299 * red + 0.587 * green + 0.114 * blue < 0.4 }
+
     init(red: Double, green: Double, blue: Double, alpha: Double) {
         self.red = red
         self.green = green
