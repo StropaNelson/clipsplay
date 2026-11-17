@@ -175,10 +175,10 @@ struct EditorView: View {
                 },
                 onOpenTranscript: { showingTranscription = true },
                 onOpenTranscriptEditor: { operation in openTranscriptEditing(operation: operation) },
+                onSeek: { viewModel.seekToSourceTime($0) },
                 onImportAsset: { asset in
                     Task { await viewModel.addMediaAsset(asset) }
-                },
-                onSeek: { viewModel.seekToSourceTime($0) }
+                }
             )
         }
         .sheet(isPresented: $showingTranscriptEditor) {
