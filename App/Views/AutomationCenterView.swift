@@ -126,12 +126,40 @@ struct AutomationCenterView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
-            Picker("Fluxo", selection: $operation) {
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
                 ForEach(ProjectOperation.allCases) { item in
-                    Label(item.rawValue, systemImage: item.icon).tag(item)
+                    Button {
+                        operation = item
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: item.icon)
+                                .frame(width: 22)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.rawValue)
+                                    .font(.caption.weight(.semibold))
+                                    .lineLimit(2)
+                                Text(item.subtitle)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .foregroundStyle(.primary)
+                        .padding(10)
+                        .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
+                        .background(
+                            item == operation ? Color.accentColor.opacity(0.18) : Color(uiColor: .tertiarySystemGroupedBackground),
+                            in: RoundedRectangle(cornerRadius: 12)
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(item == operation ? Color.accentColor : Color.clear, lineWidth: 1)
+                        }
+                    }
+                    .buttonStyle(.plain)
                 }
             }
-            .pickerStyle(.segmented)
             .disabled(isAnalyzing)
         }
         .padding()
@@ -188,8 +216,8 @@ struct AutomationCenterView: View {
                         }
                     }
                 }
-            } else if operation == .podcast {
-                Toggle("Remover pausas longas", isOn: $request.removeSilences)
+            } else if operation == .podcast || operation == .speechEdit {
+                Toggle(operation == .speechEdit ? "Cortar pausas de fala automaticamente" : "Remover pausas longas", isOn: $request.removeSilences)
                 Toggle("Remover vícios de linguagem", isOn: $request.removeFillers)
                 Toggle("Legendas na saída", isOn: $request.captions.enabled)
             } else {
@@ -269,8 +297,8 @@ struct AutomationCenterView: View {
         switch operation {
         case .multiply:
             opportunitiesSection(analysis)
-        case .podcast:
-            podcastSection(analysis)
+        case .podcast, .speechEdit:
+            speechCleanupSection(analysis)
         case .episodes:
             episodesSection(analysis)
         }
@@ -310,31 +338,21 @@ struct AutomationCenterView: View {
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
     }
 
-    private func podcastSection(_ analysis: ContentAnalysis) -> some View {
+    private func speechCleanupSection(_ analysis: ContentAnalysis) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("Limpeza e edição por texto", systemImage: "text.badge.minus")
+            Label(operation == .speechEdit ? "Autoedição por transcrição" : "Limpeza e edição por texto", systemImage: "text.badge.minus")
                 .font(.headline)
 
-            Text("Foram encontradas \(analysis.silenceRanges.count) pausas longas e \(analysis.fillerMatches.count) vícios de linguagem. Você pode revisar pelo texto ou aplicar a limpeza sugerida.")
+            Text("Foram encontradas \(analysis.silenceRanges.count) pausas longas e \(analysis.fillerMatches.count) vícios de linguagem. Revise pelo texto ou aplique o corte automático sugerido.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
             HStack {
                 Button("Abrir transcrição") { openAfterDismiss(onOpenTranscript) }
                     .buttonStyle(.bordered)
-                Button("Editar pela fala") { openAfterDismiss(onOpenTranscriptEditor) }
+                Button("Autoedição por fala") { openAfterDismiss(onOpenTranscriptEditor) }
                     .buttonStyle(.bordered)
             }
-
-            Button {
-                onApplyCuts(recommendedCuts(from: analysis), request)
-                dismiss()
-            } label: {
-                Label("Aplicar limpeza sugerida", systemImage: "scissors")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(recommendedCuts(from: analysis).isEmpty)
         }
         .padding()
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
@@ -392,6 +410,18 @@ struct AutomationCenterView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .disabled(selectedSuggestions.isEmpty)
+            } else if operation == .podcast || operation == .speechEdit {
+                Button {
+                    guard let analysis = analysis else { return }
+                    onApplyCuts(recommendedCuts(from: analysis), request)
+                    dismiss()
+                } label: {
+                    Label(operation == .speechEdit ? "Aplicar autoedição" : "Aplicar limpeza sugerida", systemImage: "scissors")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(analysis.map { recommendedCuts(from: $0).isEmpty } ?? true)
             } else if operation == .episodes {
                 Button {
                     onCreateEpisodes(analysis?.topicBoundaries.map(\.time) ?? [], request)

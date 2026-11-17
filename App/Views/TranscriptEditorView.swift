@@ -9,7 +9,7 @@ struct TranscriptEditorView: View {
     var onCreateEpisodes: ([Double]) -> Void = { _ in }
 
     @Environment(\.dismiss) private var dismiss
-    @State private var mode = Mode.text
+    @State private var mode = Mode.suggestions
     @State private var struck: Set<Int> = []
     @State private var minSilence = 0.8
     @State private var includeFillers = true
@@ -32,8 +32,8 @@ struct TranscriptEditorView: View {
     }
 
     enum Mode: String, CaseIterable, Identifiable {
-        case text = "Texto"
         case suggestions = "Sugestões"
+        case text = "Texto"
         case topics = "Assuntos"
         var id: String { rawValue }
     }
@@ -67,7 +67,7 @@ struct TranscriptEditorView: View {
                 }
             }
             .padding()
-            .navigationTitle("Editar pela fala")
+            .navigationTitle("Autoedição por fala")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -260,18 +260,34 @@ struct TranscriptEditorView: View {
         let ranges = mode == .text ? struckRanges : acceptedRanges
         let count = mode == .text ? struck.count : ranges.count
         let label = mode == .text ? "Cortar \(count) palavra(s)" : "Aplicar \(count) sugestão(ões)"
-        return AnyView(Button {
-            onRemove(ranges)
-            dismiss()
-        } label: {
-            Label(label, systemImage: "scissors")
-                .frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.borderedProminent)
-        .tint(.red)
-        .controlSize(.large)
-        .disabled(ranges.isEmpty)
-        .padding())
+        return AnyView(
+            VStack(spacing: 8) {
+                if mode == .suggestions {
+                    Button {
+                        onRemove(acceptedSilenceRanges)
+                        dismiss()
+                    } label: {
+                        Label("Só cortar pausas (\(acceptedSilenceRanges.count))", systemImage: "speaker.slash")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .disabled(acceptedSilenceRanges.isEmpty)
+                }
+                Button {
+                    onRemove(ranges)
+                    dismiss()
+                } label: {
+                    Label(label, systemImage: "scissors")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .controlSize(.large)
+                .disabled(ranges.isEmpty)
+            }
+            .padding()
+        )
     }
 
     private func wordRange(_ index: Int) -> ClosedRange<Double> {
@@ -361,7 +377,9 @@ struct TranscriptEditorView: View {
         var used: Set<Int> = []
         for i in phrases.indices {
             guard !used.contains(i), phrases[i].count >= 4 else { continue }
-            for j in (i + 1)...min(i + 3, phrases.count - 1) where similar(tokens(phrases[i]), tokens(phrases[j])) {
+            let upperBound = min(i + 3, phrases.count - 1)
+            guard i + 1 <= upperBound else { continue }
+            for j in (i + 1)...upperBound where similar(tokens(phrases[i]), tokens(phrases[j])) {
                 let first = phrases[i].first!, last = phrases[i].last!
                 let start = max(words[first].start - padding, first > 0 ? words[first - 1].end : 0)
                 let end = min(words[last].end + padding, words[phrases[j].first!].start)
@@ -383,6 +401,10 @@ struct TranscriptEditorView: View {
 
     private var acceptedRanges: [ClosedRange<Double>] {
         suggestions.filter { !rejected.contains($0.id) }.map(\.range)
+    }
+
+    private var acceptedSilenceRanges: [ClosedRange<Double>] {
+        suggestions.filter { $0.id.hasPrefix("silence-") && !rejected.contains($0.id) }.map(\.range)
     }
 
     private static func clock(_ seconds: Double) -> String {

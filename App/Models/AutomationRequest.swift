@@ -60,6 +60,20 @@ struct AutomationRequest: Codable {
                 generateCovers: true,
                 outputPreset: .socialClips
             )
+        case .speechEdit:
+            return AutomationRequest(
+                operation: operation,
+                clipKinds: [.segments],
+                resultCount: 1,
+                formats: [.original],
+                captions: CaptionAutomationSettings(enabled: false, dynamic: false),
+                autoFraming: false,
+                removeSilences: true,
+                removeFillers: true,
+                generateCovers: false,
+                outputPreset: .fastReview,
+                analyzeScenes: false
+            )
         case .podcast:
             return AutomationRequest(
                 operation: operation,

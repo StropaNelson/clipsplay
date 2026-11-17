@@ -178,7 +178,7 @@ struct EditorView: View {
         }
         .sheet(isPresented: $showingTranscriptEditor) {
             TranscriptEditorView(
-                words: viewModel.editableTranscriptWords,
+                words: viewModel.editableTranscriptWords.sorted { $0.start < $1.start },
                 onRemove: { viewModel.removeSourceRanges($0) },
                 onSeekWord: { viewModel.seekToSourceTime($0) },
                 onMarkTopics: { viewModel.markTimes($0) },
@@ -302,6 +302,15 @@ struct EditorView: View {
                 }
                 Button { showingAutomationCenter = true } label: {
                     Label("Automatizar", systemImage: "sparkles.rectangle.stack")
+                }
+                Button {
+                    if viewModel.editableTranscriptWords.isEmpty {
+                        showingTranscription = true
+                    } else {
+                        showingTranscriptEditor = true
+                    }
+                } label: {
+                    Label("Autoedição por fala", systemImage: "text.badge.minus")
                 }
                 Button { showingTranscription = true } label: {
                     Label("Transcrição", systemImage: "captions.bubble")
@@ -769,7 +778,7 @@ struct EditorView: View {
                     toolButton("Automatizar", icon: "sparkles.rectangle.stack") { showingAutomationCenter = true }
                     toolButton("Legendas", icon: "captions.bubble") { showingTranscription = true }
                     toolButton("Sugerir", icon: "wand.and.stars") { showingClipSuggestions = true }
-                    toolButton("Editar fala", icon: "text.badge.minus") {
+                    toolButton("Autoedição", icon: "text.badge.minus") {
                         if viewModel.editableTranscriptWords.isEmpty {
                             viewModel.errorMessage = "Gere a transcrição primeiro em Legendas."
                         } else {
