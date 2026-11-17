@@ -101,8 +101,8 @@ actor AnalysisCoordinator {
             let cueWords = cues.flatMap {
                 $0.words.isEmpty ? TranscriptWord.spread($0.text, from: $0.startTime, to: $0.endTime) : $0.words
             }
-            let cueText = Self.normalized(cues.map(\.text).joined(separator: " "))
-            let storedText = Self.normalized(words.map(\.text).joined(separator: " "))
+            let cueText = Self.normalizedTranscriptText(cues.map(\.text).joined(separator: " "))
+            let storedText = Self.normalizedTranscriptText(words.map(\.text).joined(separator: " "))
             if words.isEmpty || storedText != cueText {
                 words = cueWords
             }
@@ -229,7 +229,7 @@ actor AnalysisCoordinator {
         }.joined(separator: "||")
     }
 
-    private static func normalized(_ text: String) -> String {
+    private static func normalizedTranscriptText(_ text: String) -> String {
         text.lowercased()
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
             .filter { !$0.isEmpty }

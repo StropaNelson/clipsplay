@@ -222,7 +222,7 @@ final class TranscriptCorrectionService {
 
     private static func checkerLanguage(for localeIdentifier: String) -> String? {
         let underscored = localeIdentifier.replacingOccurrences(of: "-", with: "_")
-        let languageCode = Locale(identifier: localeIdentifier).languageCode ?? "pt"
+        let languageCode = Locale(identifier: localeIdentifier).language.languageCode?.identifier ?? "pt"
         let candidates = [underscored, languageCode, "pt_BR", "pt", "en_US", "en"]
         let available = UITextChecker.availableLanguages
         if available.isEmpty { return candidates.first }
