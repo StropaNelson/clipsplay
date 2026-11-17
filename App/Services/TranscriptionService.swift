@@ -27,6 +27,13 @@ struct TranscriptionSequenceResult {
     let cues: [TranscriptCue]
     /// Clips without usable speech/audio are skipped and reported here.
     let skippedClips: [String]
+    /// Non-fatal issues (e.g. chunks whose recognition timed out).
+    var warnings: [String] = []
+}
+
+struct TranscriptionProgress: Sendable {
+    let fraction: Double
+    let message: String
 }
 
 actor TranscriptionService {
@@ -40,8 +47,9 @@ actor TranscriptionService {
         duration requestedDuration: Double? = nil,
         localeIdentifier: String = "pt-BR",
         allowServer: Bool = false,
-        contextualStrings: [String] = []
-    ) async throws -> [TranscriptCue] {
+        contextualStrings: [String] = [],
+        onChunk: (@Sendable (Double) -> Void)? = nil
+    ) async throws -> (cues: [TranscriptCue], warnings: [String]) {
         let authorization = await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { status in
                 continuation.resume(returning: status)
@@ -82,7 +90,8 @@ actor TranscriptionService {
             recognizer: recognizer,
             modes: modes,
             audioTrackIndex: audioTrackIndex,
-            contextualStrings: contextualStrings
+            contextualStrings: contextualStrings,
+            onChunk: onChunk
         )
     }
 
@@ -93,45 +102,82 @@ actor TranscriptionService {
         _ sources: [TranscriptionSource],
         localeIdentifier: String = "pt-BR",
         allowServer: Bool = false,
-        contextualStrings: [String] = []
+        contextualStrings: [String] = [],
+        progress: (@Sendable (TranscriptionProgress) -> Void)? = nil
     ) async throws -> TranscriptionSequenceResult {
         var allCues: [TranscriptCue] = []
         var skipped: [String] = []
+        var warnings: [String] = []
         var lastError: Error?
 
-        for source in sources where source.duration > 0.05 {
+        let activeSources = sources.filter { $0.duration > 0.05 }
+        let totalDuration = max(0.001, activeSources.reduce(0) { $0 + $1.duration })
+        let box = SequenceProgressBox()
+
+        for (index, source) in activeSources.enumerated() {
             do {
-                let cues = try await transcribeVideo(
+                let output = try await transcribeVideo(
                     at: source.url,
                     startTime: source.startTime,
                     duration: source.duration,
                     localeIdentifier: localeIdentifier,
                     allowServer: allowServer,
-                    contextualStrings: contextualStrings
+                    contextualStrings: contextualStrings,
+                    onChunk: { seconds in
+                        let done = box.doneSeconds + min(seconds, source.duration)
+                        let fraction = min(1, done / totalDuration)
+                        let message: String
+                        if activeSources.count > 1 {
+                            message = "Vídeo \(index + 1) de \(activeSources.count) · transcrevendo \(Self.sequenceClock(done)) de \(Self.sequenceClock(totalDuration))"
+                        } else {
+                            message = "Transcrevendo \(Self.sequenceClock(done)) de \(Self.sequenceClock(totalDuration))"
+                        }
+                        progress?(TranscriptionProgress(fraction: fraction, message: message))
+                    }
                 )
-                allCues.append(contentsOf: cues.map { Self.shifted($0, by: source.offset) })
+                allCues.append(contentsOf: output.cues.map { Self.shifted($0, by: source.offset) })
+                warnings.append(contentsOf: output.warnings.map {
+                    activeSources.count > 1 ? "\(source.name): \($0)" : $0
+                })
             } catch {
                 if Self.isFatal(error) { throw error }
                 lastError = error
                 skipped.append("\(source.name): \(Self.describe(error))")
             }
+            box.doneSeconds += source.duration
         }
 
         guard !allCues.isEmpty else {
             throw lastError ?? TranscriptionError.noSpeechDetected
         }
         allCues.sort { $0.startTime < $1.startTime }
-        return TranscriptionSequenceResult(cues: allCues, skippedClips: skipped)
+        return TranscriptionSequenceResult(cues: allCues, skippedClips: skipped, warnings: warnings)
     }
 
-    private func transcribe(url: URL, startTime: Double, duration: Double, recognizer: SFSpeechRecognizer, modes: [Bool], audioTrackIndex: Int, contextualStrings: [String] = []) async throws -> [TranscriptCue] {
+    nonisolated static func sequenceClock(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds.rounded(.down)))
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let secs = total % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, secs)
+        }
+        return String(format: "%02d:%02d", minutes, secs)
+    }
+
+    private func transcribe(url: URL, startTime: Double, duration: Double, recognizer: SFSpeechRecognizer, modes: [Bool], audioTrackIndex: Int, contextualStrings: [String] = [], onChunk: (@Sendable (Double) -> Void)? = nil) async throws -> (cues: [TranscriptCue], warnings: [String]) {
         let chunkDuration = 30.0
         let overlap = 0.75
         var allCues: [TranscriptCue] = []
         var chunkStart = 0.0
         var lastError: Error?
+        var warnings: [String] = []
+        var timedOutChunks = 0
+        var totalChunks = 0
+        onChunk?(0)
 
         while chunkStart < duration {
+            totalChunks += 1
             let leadingOverlap = chunkStart > 0 ? overlap : 0
             let trailingOverlap = chunkStart + chunkDuration < duration ? overlap : 0
             let extractStart = chunkStart - leadingOverlap
@@ -150,19 +196,27 @@ actor TranscriptionService {
 
             var segments: [SFTranscriptionSegment] = []
             var chunkError: Error?
+            let timeout = max(60, extractDuration * 3)
             for onDevice in modes where segments.isEmpty {
                 do {
-                    segments = try await recognizeFile(audioURL: audioURL, recognizer: recognizer, onDevice: onDevice, contextualStrings: contextualStrings)
+                    segments = try await withRecognitionTimeout(seconds: timeout) {
+                        try await self.recognizeFile(audioURL: audioURL, recognizer: recognizer, onDevice: onDevice, contextualStrings: contextualStrings)
+                    }
                 } catch {
                     chunkError = error
                     do {
-                        segments = try await recognizeBuffered(audioURL: audioURL, recognizer: recognizer, onDevice: onDevice, contextualStrings: contextualStrings)
+                        segments = try await withRecognitionTimeout(seconds: timeout) {
+                            try await self.recognizeBuffered(audioURL: audioURL, recognizer: recognizer, onDevice: onDevice, contextualStrings: contextualStrings)
+                        }
                     } catch {
                         chunkError = error
                     }
                 }
             }
-            if let chunkError = chunkError, !Self.isNoSpeechError(chunkError) {
+            if let chunkError = chunkError, segments.isEmpty, Self.isTimeout(chunkError) {
+                timedOutChunks += 1
+                warnings.append("Trecho \(Self.sequenceClock(chunkStart))–\(Self.sequenceClock(min(chunkStart + chunkDuration, duration))) sem transcrição (tempo esgotado).")
+            } else if let chunkError = chunkError, !Self.isNoSpeechError(chunkError) {
                 lastError = chunkError
             }
 
@@ -183,13 +237,42 @@ actor TranscriptionService {
                     words: $0.words.map { TranscriptWord(text: $0.text, start: $0.start + timeOffset, end: $0.end + timeOffset) }
                 )
             })
+            onChunk?(min(chunkStart + chunkDuration, duration))
             chunkStart += chunkDuration
         }
         if allCues.isEmpty {
+            if timedOutChunks > 0 && timedOutChunks == totalChunks {
+                throw TranscriptionError.recognitionTimedOut
+            }
             if let lastError = lastError, !Self.isNoSpeechError(lastError) { throw lastError }
             throw TranscriptionError.noSpeechDetected
         }
-        return allCues
+        return (allCues, warnings)
+    }
+
+    /// Races a recognition call against a timeout so a recognizer that never calls
+    /// back can't hang the whole transcription. Losing child tasks are cancelled
+    /// (RecognitionState.finish is idempotent, so the continuation can't double-resume).
+    private func withRecognitionTimeout(seconds: Double, operation: @escaping @Sendable () async throws -> [SFTranscriptionSegment]) async throws -> [SFTranscriptionSegment] {
+        try await withThrowingTaskGroup(of: [SFTranscriptionSegment].self) { group in
+            group.addTask {
+                try await operation()
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw TranscriptionError.recognitionTimedOut
+            }
+            guard let first = try await group.next() else {
+                throw TranscriptionError.recognitionTimedOut
+            }
+            group.cancelAll()
+            return first
+        }
+    }
+
+    nonisolated private static func isTimeout(_ error: Error) -> Bool {
+        guard let error = error as? TranscriptionError, case .recognitionTimedOut = error else { return false }
+        return true
     }
 
     private func recognizeFile(audioURL: URL, recognizer: SFSpeechRecognizer, onDevice: Bool, contextualStrings: [String] = []) async throws -> [SFTranscriptionSegment] {
@@ -342,7 +425,7 @@ actor TranscriptionService {
         switch error {
         case .permissionDenied, .localeUnavailable, .recognizerUnavailable, .onDeviceRecognitionUnavailable:
             return true
-        case .invalidSubtitleFile, .noSpeechDetected:
+        case .invalidSubtitleFile, .recognitionTimedOut, .noSpeechDetected:
             return false
         }
     }
@@ -407,6 +490,7 @@ actor TranscriptionService {
         case recognizerUnavailable
         case onDeviceRecognitionUnavailable
         case invalidSubtitleFile
+        case recognitionTimedOut
         case noSpeechDetected
 
         var errorDescription: String? {
@@ -421,11 +505,18 @@ actor TranscriptionService {
                 return "Este dispositivo não oferece transcrição offline para esse idioma. Ative “Usar servidor da Apple” para transcrever online."
             case .invalidSubtitleFile:
                 return "O arquivo não contém legendas SRT ou VTT válidas."
+            case .recognitionTimedOut:
+                return "O reconhecimento de fala demorou demais em um trecho."
             case .noSpeechDetected:
                 return "Nenhuma fala foi reconhecida. Confira se o vídeo tem fala audível e se o idioma escolhido está correto."
             }
         }
     }
+}
+
+/// Mutable accumulator shared with the @Sendable per-source progress closure.
+private final class SequenceProgressBox: @unchecked Sendable {
+    var doneSeconds = 0.0
 }
 
 private final class RecognitionState: @unchecked Sendable {

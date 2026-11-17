@@ -25,6 +25,8 @@ struct AutomationCenterView: View {
     @State private var suggestions: [ClipSuggestion] = []
     @State private var selectedSuggestions: Set<UUID> = []
     @State private var analysisTask: Task<Void, Never>?
+    @State private var lastStage: AnalysisStage = .preparing
+    @State private var analysisStart: Date?
 
     private let coordinator = AnalysisCoordinator.shared
     private let languages: [AutomationLanguage] = [
@@ -275,6 +277,14 @@ struct AutomationCenterView: View {
                     Text(progress.message)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    stepList(for: progress)
+                    if isAnalyzing, let analysisStart = analysisStart {
+                        TimelineView(.periodic(from: analysisStart, by: 1)) { context in
+                            Text("Tempo decorrido: \(elapsedString(from: analysisStart, to: context.date))")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
             } else if analysis == nil {
                 Text("Transcrição, cenas, pausas, vícios e assuntos serão reunidos em um índice reutilizável.")
@@ -462,6 +472,48 @@ struct AutomationCenterView: View {
         .background(.bar)
     }
 
+    private var analysisSteps: [AnalysisStage] {
+        var steps: [AnalysisStage] = [.preparing, .transcribing]
+        if request.analyzeScenes { steps.append(.detectingScenes) }
+        steps.append(.indexing)
+        return steps
+    }
+
+    private func stepList(for progress: AnalysisProgress) -> some View {
+        let steps = analysisSteps
+        let failed = progress.stage == .failed
+        let effective = failed ? lastStage : progress.stage
+        let currentIndex = steps.firstIndex(of: effective) ?? steps.count
+        return VStack(alignment: .leading, spacing: 4) {
+            ForEach(steps.indices, id: \.self) { index in
+                HStack(spacing: 6) {
+                    if failed && index == currentIndex {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.red)
+                    } else if index < currentIndex {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    } else if index == currentIndex {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                            .frame(width: 14, height: 14)
+                    } else {
+                        Image(systemName: "circle")
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(steps[index].rawValue)
+                        .font(.caption.weight(index == currentIndex && !failed ? .semibold : .regular))
+                        .foregroundStyle(index <= currentIndex ? .primary : .secondary)
+                }
+            }
+        }
+    }
+
+    private func elapsedString(from start: Date, to now: Date) -> String {
+        let total = max(0, Int(now.timeIntervalSince(start)))
+        return String(format: "%02d:%02d", total / 60, total % 60)
+    }
+
     private func metric(_ title: String, _ value: String, _ icon: String) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Label(title, systemImage: icon)
@@ -479,6 +531,8 @@ struct AutomationCenterView: View {
         analysisTask?.cancel()
         isAnalyzing = true
         errorMessage = nil
+        lastStage = .preparing
+        analysisStart = Date()
         progress = AnalysisProgress(stage: .preparing, message: "Preparando análise…", fraction: 0)
         let snapshot = project
         let currentRequest = request
@@ -486,6 +540,9 @@ struct AutomationCenterView: View {
             let result = await coordinator.analyze(project: snapshot, request: currentRequest) { item in
                 Task { @MainActor in
                     self.progress = item
+                    if item.stage != .failed {
+                        self.lastStage = item.stage
+                    }
                 }
             }
             await MainActor.run {

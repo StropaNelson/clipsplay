@@ -119,7 +119,14 @@ actor AnalysisCoordinator {
                     transcriptionSources,
                     localeIdentifier: request.localeIdentifier,
                     allowServer: request.allowServerTranscription,
-                    contextualStrings: project.transcriptionVocabulary ?? []
+                    contextualStrings: project.transcriptionVocabulary ?? [],
+                    progress: { p in
+                        progress(AnalysisProgress(
+                            stage: .transcribing,
+                            message: p.message,
+                            fraction: 0.15 + p.fraction * 0.35
+                        ))
+                    }
                 )
                 let cues = result.cues
                 transcriptSRT = SubtitleFile.srt(from: cues)
@@ -128,6 +135,7 @@ actor AnalysisCoordinator {
                     words = cues.flatMap { TranscriptWord.spread($0.text, from: $0.startTime, to: $0.endTime) }
                 }
                 warnings.append(contentsOf: result.skippedClips.map { "Transcrição pulada em \($0)" })
+                warnings.append(contentsOf: result.warnings)
                 transcriptionWasGenerated = true
             } catch {
                 transcriptSRT = discardProjectTranscript ? nil : project.transcriptSRT
@@ -143,9 +151,14 @@ actor AnalysisCoordinator {
 
         var sceneCuts = sourceChanged ? [] : (project.sceneCuts ?? cachedSceneCuts)
         if request.analyzeScenes && sceneCuts.isEmpty {
-            progress(AnalysisProgress(stage: .detectingScenes, message: "Detectando cortes visuais…", fraction: 0.55))
             var detected: [Double] = []
-            for clip in sourceClips {
+            let clipCount = sourceClips.count
+            for (index, clip) in sourceClips.enumerated() {
+                progress(AnalysisProgress(
+                    stage: .detectingScenes,
+                    message: clipCount > 1 ? "Detectando cortes visuais · vídeo \(index + 1) de \(clipCount)" : "Detectando cortes visuais…",
+                    fraction: 0.55 + 0.25 * Double(index) / Double(max(1, clipCount))
+                ))
                 guard let url = project.sourceURL(for: clip) else { continue }
                 let cuts = await visualAnalysis.detectSceneCuts(
                     in: url,

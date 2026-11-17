@@ -44,6 +44,7 @@ struct TranscriptionView: View {
     @State private var correctionSummary: String?
     @State private var applyingCorrection = false
     @State private var vocabularyText = ""
+    @State private var transcriptionProgress: TranscriptionProgress?
 
     private let languages: [(id: String, name: String)] = [
         ("pt-BR", "Português (Brasil)"),
@@ -90,7 +91,16 @@ struct TranscriptionView: View {
                 }
 
                 if isTranscribing {
-                    ProgressView("Transcrevendo no dispositivo…")
+                    if let transcriptionProgress = transcriptionProgress {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ProgressView(value: transcriptionProgress.fraction)
+                            Text(transcriptionProgress.message)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        ProgressView("Transcrevendo no dispositivo…")
+                    }
                 }
 
                 TextField("Termos, marcas e nomes (separados por vírgula)", text: $vocabularyText, axis: .vertical)
@@ -203,19 +213,32 @@ struct TranscriptionView: View {
     private func transcribe() async {
         isTranscribing = true
         errorMessage = nil
-        defer { isTranscribing = false }
+        transcriptionProgress = nil
+        defer {
+            isTranscribing = false
+            transcriptionProgress = nil
+        }
 
         do {
             let result = try await TranscriptionService.shared.transcribeVideoSequence(
                 project.transcriptionSources,
                 localeIdentifier: localeIdentifier,
                 allowServer: allowServer,
-                contextualStrings: parsedVocabulary()
+                contextualStrings: parsedVocabulary(),
+                progress: { p in
+                    Task { @MainActor in
+                        self.transcriptionProgress = p
+                    }
+                }
             )
             transcript = SubtitleFile.srt(from: result.cues)
             onWords(result.cues.flatMap(\.words))
+            var notices = result.warnings
             if !result.skippedClips.isEmpty {
-                errorMessage = "Alguns clipes não tinham fala/áudio e foram pulados: \(result.skippedClips.joined(separator: "; "))"
+                notices.append("Alguns clipes não tinham fala/áudio e foram pulados: \(result.skippedClips.joined(separator: "; "))")
+            }
+            if !notices.isEmpty {
+                errorMessage = notices.joined(separator: "\n")
             }
         } catch {
             errorMessage = "Falha na transcrição: \(error.localizedDescription)"
