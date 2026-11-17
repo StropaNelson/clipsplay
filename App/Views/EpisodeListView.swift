@@ -340,14 +340,16 @@ struct EpisodeDetailView: View {
         self._customOutroStart = State(initialValue: currentEpisode.customOutroTemplate?.startTime ?? currentEpisode.outroSegment?.startTime ?? 0)
         self._customOutroEnd = State(initialValue: currentEpisode.customOutroTemplate?.endTime ?? currentEpisode.outroSegment?.endTime ?? 5)
         let hadCustomRecap = currentEpisode.usesCustomRecapSegments == true || !currentEpisode.customRecapSegments.isEmpty
-        let initialMode = hadCustomRecap || !currentEpisode.useGlobalRecap
-            ? RecapSettings.RecapMode.manual
-            : project.recapSettings.mode
+        let initialMode: RecapSettings.RecapMode
+        if hadCustomRecap || !currentEpisode.useGlobalRecap {
+            initialMode = .manual
+        } else {
+            initialMode = project.recapSettings.mode
+        }
         self.initialRecapMode = initialMode
         self._recapMode = State(initialValue: initialMode)
-        self._recapSegments = State(initialValue: currentEpisode.customRecapSegments.isEmpty
-            ? currentEpisode.effectiveRecaps
-            : currentEpisode.customRecapSegments)
+        let initialRecaps = currentEpisode.customRecapSegments.isEmpty ? currentEpisode.effectiveRecaps : currentEpisode.customRecapSegments
+        self._recapSegments = State(initialValue: initialRecaps)
     }
     
     var body: some View {
@@ -589,11 +591,10 @@ struct EpisodeDetailView: View {
             var recapSettings = project.recapSettings
             recapSettings.enabled = true
             recapSettings.mode = .automatic
-            let previousEnd = project.episodes
+            let previousEpisode = project.episodes
                 .filter { $0.index < episode.index }
-                .max { $0.index < $1.index }?
-                .mainEnd
-            if let previousEnd = previousEnd {
+                .max { $0.index < $1.index }
+            if let previousEnd = previousEpisode?.mainEnd {
                 episode.regenerateRecap(previousEpisodeEnd: previousEnd, settings: recapSettings)
             } else {
                 episode.recapSegments = []

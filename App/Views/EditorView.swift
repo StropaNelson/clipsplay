@@ -2332,9 +2332,12 @@ class EditorViewModel: ObservableObject {
 
     func jumpToMarker(forward: Bool) {
         let times = selectedEpisode?.markers.map(\.time) ?? []
-        let target = forward
-            ? times.first { $0 > currentTime + 0.05 }
-            : times.last { $0 < currentTime - 0.05 }
+        let target: Double?
+        if forward {
+            target = times.first { $0 > currentTime + 0.05 }
+        } else {
+            target = times.last { $0 < currentTime - 0.05 }
+        }
         if let target = target { seek(to: target) }
     }
 

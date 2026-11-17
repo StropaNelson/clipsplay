@@ -133,6 +133,15 @@ actor AnalysisCoordinator {
         let topics = Self.topicBoundaries(words: words, sceneCuts: sceneCuts)
         let stats = Self.audioStats(words: words, silences: silences, fillers: fillers, duration: project.sourceVideoDuration)
 
+        var resolvedTranscriptionLocale: String? = nil
+        if transcriptSRT != nil {
+            if transcriptionWasGenerated {
+                resolvedTranscriptionLocale = request.localeIdentifier
+            } else if transcriptSRT == cached?.transcriptSRT {
+                resolvedTranscriptionLocale = transcriptionLocale
+            }
+        }
+
         var analysis = ContentAnalysis(
             projectID: project.id,
             sourceSignature: signature,
@@ -144,11 +153,7 @@ actor AnalysisCoordinator {
             fillerMatches: fillers,
             topicBoundaries: topics,
             audioStats: stats,
-            transcriptionLocale: transcriptSRT == nil
-                ? nil
-                : (transcriptionWasGenerated
-                    ? request.localeIdentifier
-                    : (transcriptSRT == cached?.transcriptSRT ? transcriptionLocale : nil)),
+            transcriptionLocale: resolvedTranscriptionLocale,
             warnings: warnings
         )
 
