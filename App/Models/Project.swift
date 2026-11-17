@@ -30,6 +30,8 @@ struct Project: Codable, Identifiable {
     /// Source-sequence duration known to be covered by the saved transcript.
     /// nil means legacy data, which is only trusted for single-video projects.
     var transcriptSequenceDuration: Double?
+    /// Project vocabulary (brands, names, technical terms) used to bias transcription and corrections.
+    var transcriptionVocabulary: [String]?
     var sceneCuts: [Double]?
     /// Original source clips concatenated for analysis/transcription. Each clip keeps
     /// its own source range plus the offset where it starts in the sequence.
@@ -71,6 +73,7 @@ struct Project: Codable, Identifiable {
         self.outroTemplate = nil
         self.recapSettings = RecapSettings()
         self.coverSettings = CoverSettings()
+        self.transcriptionVocabulary = nil
         self.storedSourceClips = nil
     }
     

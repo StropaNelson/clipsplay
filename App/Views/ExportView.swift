@@ -357,12 +357,22 @@ struct ExportProgressView: View {
                             Button("Fechar") { dismiss() }
                                 .buttonStyle(.borderedProminent)
                                 .controlSize(.large)
+                        } else {
+                            Button("Cancelar", role: .destructive) {
+                                viewModel.cancelExport()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.large)
                         }
                     }
                     .padding()
                 } else {
                     ProgressView("Preparando exportação...")
                         .scaleEffect(1.5)
+                    Button("Cancelar", role: .destructive) {
+                        viewModel.cancelExport()
+                    }
+                    .buttonStyle(.bordered)
                 }
             }
             .padding()

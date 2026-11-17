@@ -118,7 +118,8 @@ actor AnalysisCoordinator {
                 let result = try await transcription.transcribeVideoSequence(
                     transcriptionSources,
                     localeIdentifier: request.localeIdentifier,
-                    allowServer: request.allowServerTranscription
+                    allowServer: request.allowServerTranscription,
+                    contextualStrings: project.transcriptionVocabulary ?? []
                 )
                 let cues = result.cues
                 transcriptSRT = SubtitleFile.srt(from: cues)

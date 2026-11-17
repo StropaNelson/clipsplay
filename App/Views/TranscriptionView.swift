@@ -8,6 +8,7 @@ struct TranscriptionView: View {
     let onWords: ([TranscriptWord]) -> Void
     let onCorrected: (String, [TranscriptWord]) -> Void
     let currentWords: () -> [TranscriptWord]
+    let onVocabularyChange: ([String]) -> Void
 
     init(
         project: Project,
@@ -15,7 +16,8 @@ struct TranscriptionView: View {
         onApplyCaptions: @escaping ([TranscriptCue], Bool) -> Void,
         onWords: @escaping ([TranscriptWord]) -> Void = { _ in },
         onCorrected: @escaping (String, [TranscriptWord]) -> Void = { _, _ in },
-        currentWords: @escaping () -> [TranscriptWord] = { [] }
+        currentWords: @escaping () -> [TranscriptWord] = { [] },
+        onVocabularyChange: @escaping ([String]) -> Void = { _ in }
     ) {
         self.project = project
         self.onTranscriptChange = onTranscriptChange
@@ -23,7 +25,9 @@ struct TranscriptionView: View {
         self.onWords = onWords
         self.onCorrected = onCorrected
         self.currentWords = currentWords
+        self.onVocabularyChange = onVocabularyChange
         self._transcript = State(initialValue: project.transcriptSRT ?? "")
+        self._vocabularyText = State(initialValue: (project.transcriptionVocabulary ?? []).joined(separator: ", "))
     }
 
     @Environment(\.dismiss) private var dismiss
@@ -39,6 +43,7 @@ struct TranscriptionView: View {
     @State private var correctionPreview: TranscriptCorrectionResult?
     @State private var correctionSummary: String?
     @State private var applyingCorrection = false
+    @State private var vocabularyText = ""
 
     private let languages: [(id: String, name: String)] = [
         ("pt-BR", "Português (Brasil)"),
@@ -87,6 +92,14 @@ struct TranscriptionView: View {
                 if isTranscribing {
                     ProgressView("Transcrevendo no dispositivo…")
                 }
+
+                TextField("Termos, marcas e nomes (separados por vírgula)", text: $vocabularyText, axis: .vertical)
+                    .font(.footnote)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(isTranscribing)
+                    .onChange(of: vocabularyText) { _ in
+                        onVocabularyChange(parsedVocabulary())
+                    }
 
                 TextEditor(text: $transcript)
                     .font(.system(.body, design: .monospaced))
@@ -150,6 +163,14 @@ struct TranscriptionView: View {
                             shareTranscript()
                         }
                         .disabled(transcript.isEmpty)
+                        Button("Copiar para IA (ChatGPT)", systemImage: "doc.on.doc") {
+                            copyTranscriptForAI()
+                        }
+                        .disabled(transcript.isEmpty)
+                        Button("Colar transcrição ajustada", systemImage: "doc.on.clipboard") {
+                            pasteAdjustedTranscript()
+                        }
+                        .disabled(transcript.isEmpty)
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
@@ -188,7 +209,8 @@ struct TranscriptionView: View {
             let result = try await TranscriptionService.shared.transcribeVideoSequence(
                 project.transcriptionSources,
                 localeIdentifier: localeIdentifier,
-                allowServer: allowServer
+                allowServer: allowServer,
+                contextualStrings: parsedVocabulary()
             )
             transcript = SubtitleFile.srt(from: result.cues)
             onWords(result.cues.flatMap(\.words))
@@ -209,15 +231,10 @@ struct TranscriptionView: View {
 
         do {
             let cues = try SubtitleFile.parse(transcript)
-            let storedWords = currentWords()
-            let storedText = normalizedForComparison(storedWords.map(\.text).joined(separator: " "))
-            let visibleText = normalizedForComparison(cues.map(\.text).joined(separator: " "))
-            let words = !storedWords.isEmpty && storedText == visibleText ? storedWords : cues.flatMap {
-                $0.words.isEmpty ? TranscriptWord.spread($0.text, from: $0.startTime, to: $0.endTime) : $0.words
-            }
             let result = TranscriptCorrectionService.shared.correct(
-                words: words,
-                localeIdentifier: localeIdentifier
+                words: correctionWords(for: cues),
+                localeIdentifier: localeIdentifier,
+                vocabulary: parsedVocabulary()
             )
             if result.changed {
                 correctionPreview = result
@@ -226,6 +243,70 @@ struct TranscriptionView: View {
             }
         } catch {
             errorMessage = "Não foi possível corrigir o texto: \(error.localizedDescription)"
+        }
+    }
+
+    /// Words matching the visible transcript: stored timings when the text still matches,
+    /// otherwise timings estimated from the cue ranges.
+    private func correctionWords(for cues: [TranscriptCue]) -> [TranscriptWord] {
+        let storedWords = currentWords()
+        let storedText = normalizedForComparison(storedWords.map(\.text).joined(separator: " "))
+        let visibleText = normalizedForComparison(cues.map(\.text).joined(separator: " "))
+        if !storedWords.isEmpty && storedText == visibleText { return storedWords }
+        return cues.flatMap {
+            $0.words.isEmpty ? TranscriptWord.spread($0.text, from: $0.startTime, to: $0.endTime) : $0.words
+        }
+    }
+
+    private func parsedVocabulary() -> [String] {
+        var seen = Set<String>()
+        var terms: [String] = []
+        for raw in vocabularyText.components(separatedBy: CharacterSet(charactersIn: ",\n")) {
+            let term = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = term.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+            guard !term.isEmpty, !seen.contains(key) else { continue }
+            seen.insert(key)
+            terms.append(term)
+        }
+        return terms
+    }
+
+    static func aiPrompt(vocabulary: [String], srt: String) -> String {
+        var prompt = """
+        Revise a transcrição abaixo (formato SRT) de um vídeo. Corrija ortografia, pontuação, termos técnicos, nomes de marcas/pessoas e números (use algarismos quando fizer sentido). REGRAS: mantenha exatamente a mesma quantidade de blocos, a mesma numeração e os mesmos tempos (linhas com -->); altere só o texto; não junte, divida, resuma nem traduza blocos; responda apenas com o SRT corrigido, sem comentários.
+        """
+        if !vocabulary.isEmpty {
+            prompt += " Termos corretos deste vídeo: \(vocabulary.joined(separator: ", "))."
+        }
+        return prompt + "\n\n" + srt
+    }
+
+    private func copyTranscriptForAI() {
+        UIPasteboard.general.string = Self.aiPrompt(vocabulary: parsedVocabulary(), srt: transcript)
+        correctionSummary = "Transcrição copiada. Cole no ChatGPT e depois use “Colar transcrição ajustada”."
+    }
+
+    private func pasteAdjustedTranscript() {
+        guard let pasted = UIPasteboard.general.string,
+              !pasted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            errorMessage = "A área de transferência não contém um SRT válido."
+            return
+        }
+        do {
+            let cues = try SubtitleFile.parse(transcript)
+            let result = try TranscriptCorrectionService.mergePastedTranscript(
+                pasted,
+                original: cues,
+                words: correctionWords(for: cues)
+            )
+            errorMessage = nil
+            if result.changed {
+                correctionPreview = result
+            } else {
+                correctionSummary = "Nenhuma alteração encontrada no texto colado."
+            }
+        } catch {
+            errorMessage = "A área de transferência não contém um SRT válido."
         }
     }
 

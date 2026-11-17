@@ -187,7 +187,8 @@ struct EditorView: View {
                 onApplyCaptions: { viewModel.applyCaptions($0, dynamic: $1) },
                 onWords: { viewModel.saveTranscriptWords($0) },
                 onCorrected: { viewModel.applyCorrectedTranscript($0, words: $1) },
-                currentWords: { viewModel.editableTranscriptWords }
+                currentWords: { viewModel.editableTranscriptWords },
+                onVocabularyChange: { viewModel.saveTranscriptionVocabulary($0) }
             )
         }
         .sheet(isPresented: $showingClipSuggestions) {
@@ -1745,6 +1746,16 @@ class EditorViewModel: ObservableObject {
         }
     }
 
+    func saveTranscriptionVocabulary(_ terms: [String]) {
+        project.transcriptionVocabulary = terms.isEmpty ? nil : terms
+        transcriptSaveTask?.cancel()
+        transcriptSaveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard let self = self, !Task.isCancelled else { return }
+            await self.persistProjectChanges(reloadPreview: false)
+        }
+    }
+
     /// Applies a reviewed transcript correction and refreshes caption overlays in place.
     func applyCorrectedTranscript(_ srt: String, words: [TranscriptWord]) {
         project.transcriptSRT = srt
@@ -2840,7 +2851,36 @@ class EditorViewModel: ObservableObject {
 
     // MARK: Export
 
+    private var exportTask: Task<Void, Never>?
+
+    func cancelExport() {
+        exportTask?.cancel()
+    }
+
+    private func isExportCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let processorError = error as? ProcessorError, case .exportCancelled = processorError { return true }
+        return false
+    }
+
+    private func cancelledExportProgress() -> BatchExportProgress {
+        BatchExportProgress(
+            currentEpisode: 0,
+            totalEpisodes: 0,
+            overallProgress: 0,
+            currentStage: .failed,
+            message: "Exportação cancelada."
+        )
+    }
+
     func exportEpisodes(selection: Set<Int>?) async {
+        let task = Task { await self.performExportEpisodes(selection: selection) }
+        exportTask = task
+        await task.value
+        exportTask = nil
+    }
+
+    private func performExportEpisodes(selection: Set<Int>?) async {
         let seconds = currentProject.episodes
             .filter { selection?.contains($0.index + 1) ?? true }
             .map { $0.storyline().map(\.end).max() ?? 0 }
@@ -2882,9 +2922,17 @@ class EditorViewModel: ObservableObject {
                 currentStage: .completed,
                 message: "Exportação concluída: \(result.successCount) episódios"
             )
+            if !result.errors.isEmpty {
+                let details = result.errors.map { "Episódio \($0.episodeNumber): \($0.error)" }.joined(separator: "\n")
+                errorMessage = "\(result.failureCount) episódio(s) não foram exportados.\n\(details)"
+            }
         } catch {
-            showExportProgress = false
-            errorMessage = "Erro na exportação: \(Self.describe(error))"
+            if isExportCancellation(error) {
+                exportProgress = cancelledExportProgress()
+            } else {
+                showExportProgress = false
+                errorMessage = "Erro na exportação: \(Self.describe(error))"
+            }
         }
     }
 
@@ -2895,6 +2943,13 @@ class EditorViewModel: ObservableObject {
     /// Multiplicar conteúdo: exports every episode once per variant setting, then zips everything.
     func exportVariants(_ variants: [ExportSettings]) async {
         guard !variants.isEmpty else { return }
+        let task = Task { await self.performExportVariants(variants) }
+        exportTask = task
+        await task.value
+        exportTask = nil
+    }
+
+    private func performExportVariants(_ variants: [ExportSettings]) async {
         showExportProgress = true
         exportProgress = nil
         lastExportZIPURL = nil
@@ -2934,8 +2989,12 @@ class EditorViewModel: ObservableObject {
                 message: "Multiplicação concluída: \(allResults.count) vídeos"
             )
         } catch {
-            showExportProgress = false
-            errorMessage = "Erro na multiplicação: \(Self.describe(error))"
+            if isExportCancellation(error) {
+                exportProgress = cancelledExportProgress()
+            } else {
+                showExportProgress = false
+                errorMessage = "Erro na multiplicação: \(Self.describe(error))"
+            }
         }
     }
 

@@ -39,7 +39,8 @@ actor TranscriptionService {
         startTime: Double = 0,
         duration requestedDuration: Double? = nil,
         localeIdentifier: String = "pt-BR",
-        allowServer: Bool = false
+        allowServer: Bool = false,
+        contextualStrings: [String] = []
     ) async throws -> [TranscriptCue] {
         let authorization = await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { status in
@@ -80,7 +81,8 @@ actor TranscriptionService {
             duration: duration,
             recognizer: recognizer,
             modes: modes,
-            audioTrackIndex: audioTrackIndex
+            audioTrackIndex: audioTrackIndex,
+            contextualStrings: contextualStrings
         )
     }
 
@@ -90,7 +92,8 @@ actor TranscriptionService {
     func transcribeVideoSequence(
         _ sources: [TranscriptionSource],
         localeIdentifier: String = "pt-BR",
-        allowServer: Bool = false
+        allowServer: Bool = false,
+        contextualStrings: [String] = []
     ) async throws -> TranscriptionSequenceResult {
         var allCues: [TranscriptCue] = []
         var skipped: [String] = []
@@ -103,7 +106,8 @@ actor TranscriptionService {
                     startTime: source.startTime,
                     duration: source.duration,
                     localeIdentifier: localeIdentifier,
-                    allowServer: allowServer
+                    allowServer: allowServer,
+                    contextualStrings: contextualStrings
                 )
                 allCues.append(contentsOf: cues.map { Self.shifted($0, by: source.offset) })
             } catch {
@@ -120,7 +124,7 @@ actor TranscriptionService {
         return TranscriptionSequenceResult(cues: allCues, skippedClips: skipped)
     }
 
-    private func transcribe(url: URL, startTime: Double, duration: Double, recognizer: SFSpeechRecognizer, modes: [Bool], audioTrackIndex: Int) async throws -> [TranscriptCue] {
+    private func transcribe(url: URL, startTime: Double, duration: Double, recognizer: SFSpeechRecognizer, modes: [Bool], audioTrackIndex: Int, contextualStrings: [String] = []) async throws -> [TranscriptCue] {
         let chunkDuration = 30.0
         let overlap = 0.75
         var allCues: [TranscriptCue] = []
@@ -148,11 +152,11 @@ actor TranscriptionService {
             var chunkError: Error?
             for onDevice in modes where segments.isEmpty {
                 do {
-                    segments = try await recognizeFile(audioURL: audioURL, recognizer: recognizer, onDevice: onDevice)
+                    segments = try await recognizeFile(audioURL: audioURL, recognizer: recognizer, onDevice: onDevice, contextualStrings: contextualStrings)
                 } catch {
                     chunkError = error
                     do {
-                        segments = try await recognizeBuffered(audioURL: audioURL, recognizer: recognizer, onDevice: onDevice)
+                        segments = try await recognizeBuffered(audioURL: audioURL, recognizer: recognizer, onDevice: onDevice, contextualStrings: contextualStrings)
                     } catch {
                         chunkError = error
                     }
@@ -188,19 +192,19 @@ actor TranscriptionService {
         return allCues
     }
 
-    private func recognizeFile(audioURL: URL, recognizer: SFSpeechRecognizer, onDevice: Bool) async throws -> [SFTranscriptionSegment] {
+    private func recognizeFile(audioURL: URL, recognizer: SFSpeechRecognizer, onDevice: Bool, contextualStrings: [String] = []) async throws -> [SFTranscriptionSegment] {
         let request = SFSpeechURLRecognitionRequest(url: audioURL)
-        configure(request, onDevice: onDevice)
+        configure(request, onDevice: onDevice, contextualStrings: contextualStrings)
         return try await recognize(request: request, recognizer: recognizer)
     }
 
     /// Feeds decoded PCM to the recognizer. Silent chunks ("No speech detected") return no segments
     /// instead of failing the whole transcription, and the last partial result is kept if the
     /// recognizer ends with an error after already hearing words.
-    private func recognizeBuffered(audioURL: URL, recognizer: SFSpeechRecognizer, onDevice: Bool) async throws -> [SFTranscriptionSegment] {
+    private func recognizeBuffered(audioURL: URL, recognizer: SFSpeechRecognizer, onDevice: Bool, contextualStrings: [String] = []) async throws -> [SFTranscriptionSegment] {
         let file = try AVAudioFile(forReading: audioURL)
         let request = SFSpeechAudioBufferRecognitionRequest()
-        configure(request, onDevice: onDevice)
+        configure(request, onDevice: onDevice, contextualStrings: contextualStrings)
         let state = RecognitionState()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[SFTranscriptionSegment], Error>) in
@@ -221,11 +225,14 @@ actor TranscriptionService {
         }
     }
 
-    private func configure(_ request: SFSpeechRecognitionRequest, onDevice: Bool) {
+    private func configure(_ request: SFSpeechRecognitionRequest, onDevice: Bool, contextualStrings: [String] = []) {
         request.requiresOnDeviceRecognition = onDevice
         request.shouldReportPartialResults = true
         request.taskHint = .dictation
         request.addsPunctuation = true
+        if !contextualStrings.isEmpty {
+            request.contextualStrings = Array(contextualStrings.prefix(100))
+        }
     }
 
     private func recognize(request: SFSpeechRecognitionRequest, recognizer: SFSpeechRecognizer) async throws -> [SFTranscriptionSegment] {

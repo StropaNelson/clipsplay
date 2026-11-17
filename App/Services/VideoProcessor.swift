@@ -719,7 +719,8 @@ actor VideoProcessor {
         to outputURL: URL,
         preset: String,
         videoComposition: AVVideoComposition? = nil,
-        audioMix: AVAudioMix? = nil
+        audioMix: AVAudioMix? = nil,
+        progress: (@Sendable (Double) -> Void)? = nil
     ) async throws {
         try? FileManager.default.removeItem(at: outputURL)
         
@@ -734,7 +735,7 @@ actor VideoProcessor {
         exporter.videoComposition = videoComposition
         exporter.audioMix = audioMix
         
-        try await runExport(ExportSessionBox(exporter))
+        try await runExport(ExportSessionBox(exporter), progress: progress)
     }
     
     private func makeTransitionVideoComposition(
@@ -1183,17 +1184,113 @@ actor VideoProcessor {
         return resizedCoverData(image: UIImage(cgImage: cgImage), targetSize: coverSize(for: project))
     }
     
-    private func runExport(_ exporterBox: ExportSessionBox) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            exporterBox.session.exportAsynchronously {
-                switch exporterBox.session.status {
-                case .completed: continuation.resume()
-                case .failed: continuation.resume(throwing: exporterBox.session.error ?? ProcessorError.exportFailed)
-                case .cancelled: continuation.resume(throwing: ProcessorError.exportCancelled)
-                default: continuation.resume(throwing: exporterBox.session.error ?? ProcessorError.exportFailed)
+    private func runExport(_ exporterBox: ExportSessionBox, progress: (@Sendable (Double) -> Void)? = nil) async throws {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let monitor = ExportMonitor(session: exporterBox.session, continuation: continuation, progress: progress)
+                monitor.start()
+                exporterBox.session.exportAsynchronously {
+                    monitor.finish()
                 }
             }
+        } onCancel: {
+            exporterBox.session.cancelExport()
         }
+    }
+}
+
+/// Polls `session.progress` while an export runs and resumes the continuation exactly once.
+/// If progress stalls for two minutes the session is cancelled and reported as `exportStalled`.
+private final class ExportMonitor: @unchecked Sendable {
+    private let lock = NSLock()
+    private let session: AVAssetExportSession
+    private var continuation: CheckedContinuation<Void, Error>?
+    private let progress: (@Sendable (Double) -> Void)?
+    private var lastProgress: Float = -1
+    private var lastProgressChange = Date()
+    private var pollingTask: Task<Void, Never>?
+    private var finished = false
+    private var stalled = false
+
+    init(session: AVAssetExportSession, continuation: CheckedContinuation<Void, Error>, progress: (@Sendable (Double) -> Void)?) {
+        self.session = session
+        self.continuation = continuation
+        self.progress = progress
+    }
+
+    func start() {
+        pollingTask = Task.detached { [self] in
+            while !Task.isCancelled && !isFinished {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                poll()
+            }
+        }
+    }
+
+    private var isFinished: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return finished
+    }
+
+    private func poll() {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        let current = session.progress
+        let status = session.status
+        if current > lastProgress {
+            lastProgress = current
+            lastProgressChange = Date()
+        }
+        let didStall = (status == .exporting || status == .waiting)
+            && Date().timeIntervalSince(lastProgressChange) > 120
+        lock.unlock()
+
+        progress?(Double(current))
+        if didStall {
+            lock.lock()
+            stalled = true
+            lock.unlock()
+            session.cancelExport()
+            resume(with: .failure(ProcessorError.exportStalled))
+        }
+    }
+
+    /// Called from `exportAsynchronously`'s completion handler.
+    func finish() {
+        let result: Result<Void, Error>
+        switch session.status {
+        case .completed:
+            result = .success(())
+        case .cancelled:
+            lock.lock()
+            let wasStalled = stalled
+            lock.unlock()
+            result = .failure(wasStalled ? ProcessorError.exportStalled : ProcessorError.exportCancelled)
+        case .failed:
+            result = .failure(session.error ?? ProcessorError.exportFailed)
+        default:
+            result = .failure(session.error ?? ProcessorError.exportFailed)
+        }
+        resume(with: result)
+    }
+
+    private func resume(with result: Result<Void, Error>) {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        let pending = continuation
+        continuation = nil
+        pollingTask?.cancel()
+        pollingTask = nil
+        lock.unlock()
+        pending?.resume(with: result)
     }
 }
 
@@ -1319,6 +1416,7 @@ enum ProcessorError: LocalizedError {
     case exportSessionUnavailable
     case exportFailed
     case exportCancelled
+    case exportStalled
     case missingAsset
     case unsupportedOperation
     case invalidTimeRange
@@ -1332,6 +1430,7 @@ enum ProcessorError: LocalizedError {
         case .exportSessionUnavailable: return "Não foi possível iniciar a exportação com essas configurações."
         case .exportFailed: return "A exportação falhou."
         case .exportCancelled: return "A exportação foi cancelada."
+        case .exportStalled: return "A exportação parou de avançar. Tente desativar o auto-enquadramento ou as legendas, ou exporte em resolução menor."
         case .missingAsset: return "Asset referenciado não encontrado."
         case .unsupportedOperation: return "Operação não suportada para este tipo de segmento."
         case .invalidTimeRange: return "Intervalo de tempo inválido."

@@ -57,7 +57,15 @@ actor ExportManager {
             to: videoURL,
             preset: settings.resolution.presetName,
             videoComposition: videoComposition,
-            audioMix: output.audioMix
+            audioMix: output.audioMix,
+            progress: { fraction in
+                progressHandler(ExportProgress(
+                    stage: .exporting,
+                    episode: episodeNumber,
+                    progress: 0.2 + fraction * 0.7,
+                    message: "Exportando vídeo... \(Int(fraction * 100))%"
+                ))
+            }
         )
         
         progressHandler(ExportProgress(stage: .exporting, episode: episodeNumber, progress: 0.9, message: "Finalizando vídeo..."))
@@ -121,6 +129,7 @@ actor ExportManager {
         let total = episodesToExport.count
         
         for (index, episode) in episodesToExport.enumerated() {
+            if Task.isCancelled { throw CancellationError() }
             let episodeNumber = episode.index + 1
             progressHandler(BatchExportProgress(
                 currentEpisode: episodeNumber,
@@ -149,6 +158,9 @@ actor ExportManager {
                 }
                 results.append(result)
             } catch {
+                if error is CancellationError { throw error }
+                if let processorError = error as? ProcessorError, case .exportCancelled = processorError { throw error }
+                if Task.isCancelled { throw CancellationError() }
                 errors.append(ExportErrorDetail(episodeNumber: episodeNumber, error: error.localizedDescription))
                 progressHandler(BatchExportProgress(
                     currentEpisode: episodeNumber,
