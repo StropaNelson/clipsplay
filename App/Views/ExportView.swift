@@ -62,6 +62,20 @@ struct ExportView: View {
                                     .frame(width: 50)
                             }
                         }
+
+                        if settings.coverMode == .customImage {
+                            Picker("Imagem da capa", selection: $settings.coverImageAssetID) {
+                                Text("Selecionar imagem").tag(nil as UUID?)
+                                ForEach(project.mediaAssets.filter { $0.type == .image }) { asset in
+                                    Text(asset.name).tag(asset.id as UUID?)
+                                }
+                            }
+                            if project.mediaAssets.filter({ $0.type == .image }).isEmpty {
+                                Text("Importe uma imagem em Mídia para usá-la como capa.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                     }
                 }
                 
@@ -443,11 +457,12 @@ struct MultiplySheet: View {
             for (exclude, suffix) in captionOptions {
                 var variant = base
                 variant.aspectRatio = ratio
+                variant.respectOutputFormats = false
                 variant.excludeCaptions = exclude
                 let tag = ratio == .original ? "orig" : ratio.rawValue.replacingOccurrences(of: ":", with: "x")
                 variant.fileNamePrefix = "\(base.fileNamePrefix)_\(tag)\(suffix)"
-                // Covers are aspect-independent; generate them only once.
-                variant.includeCovers = list.isEmpty && base.includeCovers
+                // Every exported variant gets a cover in its own output format.
+                variant.includeCovers = base.includeCovers
                 list.append(variant)
             }
         }

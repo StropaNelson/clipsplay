@@ -1105,15 +1105,47 @@ actor VideoProcessor {
             guard let assetID = settings.customImageAssetID,
                   let asset = project.mediaAssets.first(where: { $0.id == assetID }),
                   asset.type == .image,
-                  let data = try? Data(contentsOf: asset.url) else {
+                  let image = UIImage(contentsOfFile: asset.url.path) else {
                 return try makeTemplateCover(project: project, episode: episode, number: episodeNumber)
             }
-            return data
+            return resizedCoverData(image: image, targetSize: coverSize(for: project))
         }
     }
     
+    private func coverSize(for project: Project) -> CGSize {
+        calculateRenderSize(
+            aspect: project.aspectRatio,
+            resolution: .p1080,
+            naturalSize: project.sourceVideoNaturalSize.cgSize,
+            transform: project.sourceVideoTransform.cgAffineTransform
+        )
+    }
+
+    private func resizedCoverData(image: UIImage, targetSize: CGSize) -> Data {
+        let sourceRatio = image.size.width / max(1, image.size.height)
+        let targetRatio = targetSize.width / max(1, targetSize.height)
+        let renderer = UIGraphicsImageRenderer(size: targetSize)
+        let result = renderer.image { context in
+            UIColor.black.setFill()
+            context.fill(CGRect(origin: .zero, size: targetSize))
+            let drawRect: CGRect
+            if sourceRatio > targetRatio {
+                let height = targetSize.height
+                let width = height * sourceRatio
+                drawRect = CGRect(x: (targetSize.width - width) / 2, y: 0, width: width, height: height)
+            } else {
+                let width = targetSize.width
+                let height = width / sourceRatio
+                drawRect = CGRect(x: 0, y: (targetSize.height - height) / 2, width: width, height: height)
+            }
+            image.draw(in: drawRect)
+        }
+        return result.jpegData(compressionQuality: 0.92) ?? Data()
+    }
+
     private func makeTemplateCover(project: Project, episode: Episode, number: Int) throws -> Data {
-        let size = CGSize(width: 1080, height: 1350)
+        let size = coverSize(for: project)
+        let scale = min(size.width / 1080, size.height / 1350)
         let renderer = UIGraphicsImageRenderer(size: size)
         let image = renderer.image { context in
             UIColor(red: 0.055, green: 0.09, blue: 0.16, alpha: 1).setFill()
@@ -1122,17 +1154,23 @@ actor VideoProcessor {
             paragraph.alignment = .center
             let title = "\(project.seriesTitle)\n\(project.episodeTitleTemplate) \(number)"
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: UIFont.boldSystemFont(ofSize: 76),
+                .font: UIFont.boldSystemFont(ofSize: max(28, 76 * scale)),
                 .foregroundColor: UIColor.white,
                 .paragraphStyle: paragraph
             ]
-            (title as NSString).draw(in: CGRect(x: 70, y: 470, width: 940, height: 360), withAttributes: attrs)
+            (title as NSString).draw(
+                in: CGRect(x: size.width * 0.065, y: size.height * 0.35, width: size.width * 0.87, height: size.height * 0.27),
+                withAttributes: attrs
+            )
             let sub = "CLIPSTUDIO"
-            (sub as NSString).draw(in: CGRect(x: 70, y: 1120, width: 940, height: 80), withAttributes: [
-                .font: UIFont.systemFont(ofSize: 30, weight: .semibold),
-                .foregroundColor: UIColor.systemBlue,
-                .paragraphStyle: paragraph
-            ])
+            (sub as NSString).draw(
+                in: CGRect(x: size.width * 0.065, y: size.height * 0.83, width: size.width * 0.87, height: size.height * 0.06),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: max(16, 30 * scale), weight: .semibold),
+                    .foregroundColor: UIColor.systemBlue,
+                    .paragraphStyle: paragraph
+                ]
+            )
         }
         return image.jpegData(compressionQuality: 0.9) ?? Data()
     }
@@ -1145,8 +1183,7 @@ actor VideoProcessor {
         
         let time = CMTime(seconds: captureTime, preferredTimescale: 600)
         let cgImage = try generator.copyCGImage(at: time, actualTime: nil)
-        let image = UIImage(cgImage: cgImage)
-        return image.jpegData(compressionQuality: 0.9) ?? Data()
+        return resizedCoverData(image: UIImage(cgImage: cgImage), targetSize: coverSize(for: project))
     }
     
     private func runExport(_ exporterBox: ExportSessionBox) async throws {

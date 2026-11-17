@@ -453,6 +453,7 @@ extension Episode {
             recapSegments = customRecapSegments
             customRecapSegments = []
             useGlobalRecap = true
+            usesCustomRecapSegments = true
         }
     }
 
@@ -470,6 +471,7 @@ extension Episode {
         }
         if let index = recapSegments.firstIndex(where: { $0.id == segmentID }) {
             body(&recapSegments[index])
+            usesCustomRecapSegments = true
             return
         }
         var clips = mainClips
@@ -495,6 +497,7 @@ extension Episode {
         if let index = recapSegments.firstIndex(where: { $0.id == segmentID }) {
             recapSegments.remove(at: index)
             useGlobalRecap = !recapSegments.isEmpty
+            usesCustomRecapSegments = true
             return true
         }
         var clips = mainClips

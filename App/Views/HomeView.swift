@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 struct HomeView: View {
@@ -77,7 +78,7 @@ struct HomeView: View {
             }
             .fileImporter(
                 isPresented: $showingImport,
-                allowedContentTypes: [.json],
+                allowedContentTypes: ProjectDocument.contentTypes,
                 allowsMultipleSelection: false
             ) { result in
                 Task {
@@ -85,6 +86,9 @@ struct HomeView: View {
                         await viewModel.importProject(from: url)
                     }
                 }
+            }
+            .sheet(item: $viewModel.shareItem) { item in
+                ShareSheet(items: [item.url])
             }
             .alert("Erro", isPresented: .constant(viewModel.errorMessage != nil)) {
                 Button("OK") { viewModel.errorMessage = nil }
@@ -251,11 +255,9 @@ struct ProjectRowView: View {
     }
 }
 
-extension ProjectSummary {
-    var thumbnailURL: URL? {
-        // This would need to be stored in the project or generated
-        nil
-    }
+struct ProjectShareItem: Identifiable {
+    let id = UUID()
+    let url: URL
 }
 
 struct NewProjectSheet: View {
@@ -353,6 +355,7 @@ class HomeViewModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var selectedProject: Project?
     @Published var selectedProjectOperation: ProjectOperation?
+    @Published var shareItem: ProjectShareItem?
     
     private let storage = ProjectStorage.shared
     private let importer = VideoImporter.shared
@@ -419,10 +422,11 @@ class HomeViewModel: ObservableObject {
     func exportProjectFile(_ summary: ProjectSummary) async {
         do {
             let project = try await storage.loadProject(id: summary.id)
-            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            let url = docs.appendingPathComponent("\(project.name)_\(Int(Date().timeIntervalSince1970)).clipstudio")
+            let docs = FileManager.default.temporaryDirectory
+            let safeName = project.name.replacingOccurrences(of: "/", with: "-")
+            let url = docs.appendingPathComponent("\(safeName)_\(Int(Date().timeIntervalSince1970)).clipstudio")
             try await storage.exportProject(project, to: url)
-            // Share sheet would be presented here
+            shareItem = ProjectShareItem(url: url)
         } catch {
             errorMessage = "Erro ao exportar: \(error.localizedDescription)"
         }

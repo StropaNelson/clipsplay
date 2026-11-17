@@ -63,13 +63,20 @@ actor TimelineEngine {
             )
         }
 
+        let aspect: AspectRatio
+        if settings?.respectOutputFormats == false {
+            aspect = settings?.aspectRatio ?? project.aspectRatio
+        } else {
+            aspect = episode.outputAspectRatio ?? settings?.aspectRatio ?? project.aspectRatio
+        }
+
         return try await VideoProcessor.shared.createComposition(
             from: segments,
             audioClips: audioClips,
             overlayVideos: overlayVideos,
             sourceURL: project.sourceVideoFileURL,
             additionalAssets: additionalAssets,
-            aspect: settings?.aspectRatio ?? project.aspectRatio,
+            aspect: aspect,
             resolution: settings?.resolution ?? project.resolution,
             fitMode: settings?.fitMode ?? project.fitMode,
             fadeEdges: settings?.fadeEdges ?? false

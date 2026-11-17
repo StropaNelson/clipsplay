@@ -2,7 +2,27 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>NSSpeechRecognitionUsageDescription</key>
-    <string>O ClipStudio usa o reconhecimento de fala do dispositivo para transcrever o vídeo selecionado.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>O ClipStudio usa o reconhecimento de fala do dispositivo para transcrever o vídeo selecionado.</string>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.stropa.clipstudio.project</string>
+			<key>UTTypeDescription</key>
+			<string>ClipStudio Project</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>clipstudio</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
 </dict>
 </plist>

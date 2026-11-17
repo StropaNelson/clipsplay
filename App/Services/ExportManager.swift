@@ -70,9 +70,15 @@ actor ExportManager {
                 mode: settings.coverMode,
                 templateName: "Padrão",
                 captureTime: settings.coverCaptureTime,
-                customImageAssetID: nil
+                customImageAssetID: settings.coverImageAssetID
             )
-            let coverData = try await processor.generateCover(for: project, episode: episode, episodeNumber: episodeNumber, settings: coverSettings)
+            var coverProject = project
+            if settings.respectOutputFormats, let outputAspectRatio = episode.outputAspectRatio {
+                coverProject.aspectRatio = outputAspectRatio
+            } else {
+                coverProject.aspectRatio = settings.aspectRatio
+            }
+            let coverData = try await processor.generateCover(for: coverProject, episode: episode, episodeNumber: episodeNumber, settings: coverSettings)
             coverURL = exportDir.appendingPathComponent(
                 String(format: "%@_%02d.jpg", settings.fileNamePrefix, episodeNumber)
             )
@@ -171,8 +177,7 @@ actor ExportManager {
         let zipURL = exportDir.appendingPathComponent(zipName)
         
         let files = results.flatMap { [$0.videoURL] + ($0.coverURL.map { [$0] } ?? []) }
-        let data = try SimpleZIP.make(from: files)
-        try data.write(to: zipURL, options: .atomic)
+        try SimpleZIP.write(entries: files.map { SimpleZIP.Entry(name: $0.lastPathComponent, fileURL: $0) }, to: zipURL)
         
         return zipURL
     }
@@ -185,12 +190,15 @@ struct ExportSettings {
     var includeCovers: Bool = true
     var coverMode: CoverSettings.CoverMode = .template
     var coverCaptureTime: Double = 0
+    var coverImageAssetID: UUID?
     var fileNamePrefix: String = "Episodio"
     var quality: ExportQuality = .high
     /// Multiplicar conteúdo: variant without burned-in captions.
     var excludeCaptions: Bool = false
     /// Fade from/to black at the start and end of each episode.
     var fadeEdges: Bool = false
+    /// Multi-format batch exports deliberately override per-output generated formats.
+    var respectOutputFormats: Bool = true
 }
 
 enum ExportQuality: String, CaseIterable, Identifiable {

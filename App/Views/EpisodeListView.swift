@@ -1,5 +1,28 @@
 import SwiftUI
 
+private func segment(_ segment: VideoSegment?, matchesTemplate template: SegmentTemplate?) -> Bool {
+    guard let segment = segment, let template = template else { return false }
+    let expected = template.toSegment()
+    return segment.sourceType == expected.sourceType
+        && segment.assetID == expected.assetID
+        && abs(segment.startTime - expected.startTime) < 0.01
+        && abs(segment.endTime - expected.endTime) < 0.01
+        && segment.trackIndex == expected.trackIndex
+        && segment.isEnabled == expected.isEnabled
+        && segment.timelineStartTime == expected.timelineStartTime
+        && segment.transition == expected.transition
+        && abs(segment.transitionDuration - expected.transitionDuration) < 0.01
+        && abs(segment.clipVolume - expected.clipVolume) < 0.001
+        && segment.narrationAssetID == expected.narrationAssetID
+        && abs(segment.narrationLevel - expected.narrationLevel) < 0.001
+        && segment.narrationOffset == expected.narrationOffset
+        && segment.audioFadeIn == expected.audioFadeIn
+        && segment.audioFadeOut == expected.audioFadeOut
+        && abs(segment.playbackSpeed - expected.playbackSpeed) < 0.001
+        && segment.clipTransform == expected.clipTransform
+        && segment.clipAdjustments == expected.clipAdjustments
+}
+
 struct EpisodeListView: View {
     @Binding var episodes: [Episode]
     let project: Project
@@ -10,6 +33,7 @@ struct EpisodeListView: View {
     
     @State private var showingRegenerateAlert = false
     @State private var newEpisodeLength: Double = 60
+    @State private var editingEpisode: Episode?
 
     private var allowsAutomaticSplit: Bool {
         operation != .multiply && operation != .podcast
@@ -61,7 +85,7 @@ struct EpisodeListView: View {
                         .contentShape(Rectangle())
                         .onTapGesture { onSelect(episode) }
                         .contextMenu {
-                            Button("Editar", systemImage: "pencil") { onEdit(episode) }
+                            Button("Editar", systemImage: "pencil") { editingEpisode = episode }
                             Button("Pré-visualizar", systemImage: "play.circle") { onSelect(episode) }
                             if episode.index > 0 {
                                 Divider()
@@ -84,6 +108,17 @@ struct EpisodeListView: View {
             }
         }
         .listStyle(.insetGrouped)
+        .sheet(item: $editingEpisode) { episode in
+            EpisodeDetailView(
+                episode: Binding(
+                    get: { editingEpisode ?? episode },
+                    set: { editingEpisode = $0 }
+                ),
+                project: project,
+                mediaAssets: project.mediaAssets,
+                onSave: { onEdit(editingEpisode ?? episode) }
+            )
+        }
         .alert("Regenerar Episódios", isPresented: $showingRegenerateAlert) {
             TextField("Duração (segundos)", value: $newEpisodeLength, format: .number)
                 .keyboardType(.numberPad)
@@ -103,9 +138,10 @@ struct EpisodeListView: View {
     }
     
     private func moveEpisode(_ episode: Episode, direction: Int) {
-        let newIndex = episode.index + direction
+        guard let oldIndex = episodes.firstIndex(where: { $0.id == episode.id }) else { return }
+        let newIndex = oldIndex + direction
         guard newIndex >= 0 && newIndex < episodes.count else { return }
-        episodes.swapAt(episode.index, newIndex)
+        episodes.swapAt(oldIndex, newIndex)
         reindexEpisodes()
     }
     
@@ -126,12 +162,33 @@ struct EpisodeListView: View {
 struct EpisodeRowView: View {
     let episode: Episode
     let project: Project
-    
+
+    private var hasCustomIntro: Bool {
+        episode.customIntroTemplate != nil
+            || (episode.useGlobalIntro
+                && episode.introSegment != nil
+                && !segment(episode.introSegment, matchesTemplate: project.introTemplate))
+    }
+
+    private var hasCustomOutro: Bool {
+        episode.customOutroTemplate != nil
+            || (episode.useGlobalOutro
+                && episode.outroSegment != nil
+                && !segment(episode.outroSegment, matchesTemplate: project.outroTemplate))
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(episode.title)
                     .font(.headline)
+                if let format = episode.outputAspectRatio {
+                    Text(format.rawValue)
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.accentColor.opacity(0.15), in: Capsule())
+                }
                 Spacer()
                 Text(formatDuration(episode.totalDuration))
                     .font(.caption.monospacedDigit())
@@ -165,12 +222,12 @@ struct EpisodeRowView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                if episode.customIntroTemplate != nil {
+                if hasCustomIntro {
                     Label("Intro personalizada", systemImage: "star.fill")
                         .font(.caption)
                         .foregroundStyle(.yellow)
                 }
-                if episode.customOutroTemplate != nil {
+                if hasCustomOutro {
                     Label("Outro personalizado", systemImage: "star.fill")
                         .font(.caption)
                         .foregroundStyle(.yellow)
@@ -226,6 +283,8 @@ struct EpisodeDetailView: View {
     let onSave: () -> Void
     
     @Environment(\.dismiss) private var dismiss
+    @State private var title: String
+    @State private var outputFormat: AspectRatio?
     @State private var mainStart: Double
     @State private var mainEnd: Double
     @State private var useCustomIntro = false
@@ -238,6 +297,11 @@ struct EpisodeDetailView: View {
     @State private var customOutroEnd: Double = 5
     @State private var recapMode: RecapSettings.RecapMode = .manual
     @State private var recapSegments: [VideoSegment] = []
+    private let initialRecapMode: RecapSettings.RecapMode
+    private let initialHasIntro: Bool
+    private let initialHasOutro: Bool
+    private let initialCustomIntro: Bool
+    private let initialCustomOutro: Bool
     
     init(episode: Binding<Episode>, project: Project, mediaAssets: [MediaAsset], onSave: @escaping () -> Void) {
         let currentEpisode = episode.wrappedValue
@@ -245,21 +309,60 @@ struct EpisodeDetailView: View {
         self.project = project
         self.mediaAssets = mediaAssets
         self.onSave = onSave
+        self._title = State(initialValue: currentEpisode.displayTitle ?? "")
+        self._outputFormat = State(initialValue: currentEpisode.outputAspectRatio)
         self._mainStart = State(initialValue: currentEpisode.mainStart)
         self._mainEnd = State(initialValue: currentEpisode.mainEnd)
-        self._useCustomIntro = State(initialValue: currentEpisode.customIntroTemplate != nil)
-        self._customIntroStart = State(initialValue: currentEpisode.customIntroTemplate?.startTime ?? 0)
-        self._customIntroEnd = State(initialValue: currentEpisode.customIntroTemplate?.endTime ?? 5)
-        self._useCustomOutro = State(initialValue: currentEpisode.customOutroTemplate != nil)
-        self._customOutroStart = State(initialValue: currentEpisode.customOutroTemplate?.startTime ?? 0)
-        self._customOutroEnd = State(initialValue: currentEpisode.customOutroTemplate?.endTime ?? 5)
-        self._recapMode = State(initialValue: project.recapSettings.mode)
-        self._recapSegments = State(initialValue: currentEpisode.customRecapSegments)
+        self.initialHasIntro = currentEpisode.effectiveIntro != nil
+            || (currentEpisode.useGlobalIntro && project.introTemplate != nil)
+        self.initialHasOutro = currentEpisode.effectiveOutro != nil
+            || (currentEpisode.useGlobalOutro && project.outroTemplate != nil)
+        let hasCustomIntro = currentEpisode.customIntroTemplate != nil
+            || (currentEpisode.useGlobalIntro
+                && currentEpisode.introSegment != nil
+                && !segment(currentEpisode.introSegment, matchesTemplate: project.introTemplate))
+        self.initialCustomIntro = hasCustomIntro
+        self._useCustomIntro = State(initialValue: hasCustomIntro)
+        self._customIntroAsset = State(initialValue: mediaAssets.first {
+            $0.id == (currentEpisode.customIntroTemplate?.assetID ?? currentEpisode.introSegment?.assetID)
+        })
+        self._customIntroStart = State(initialValue: currentEpisode.customIntroTemplate?.startTime ?? currentEpisode.introSegment?.startTime ?? 0)
+        self._customIntroEnd = State(initialValue: currentEpisode.customIntroTemplate?.endTime ?? currentEpisode.introSegment?.endTime ?? 5)
+        let hasCustomOutro = currentEpisode.customOutroTemplate != nil
+            || (currentEpisode.useGlobalOutro
+                && currentEpisode.outroSegment != nil
+                && !segment(currentEpisode.outroSegment, matchesTemplate: project.outroTemplate))
+        self.initialCustomOutro = hasCustomOutro
+        self._useCustomOutro = State(initialValue: hasCustomOutro)
+        self._customOutroAsset = State(initialValue: mediaAssets.first {
+            $0.id == (currentEpisode.customOutroTemplate?.assetID ?? currentEpisode.outroSegment?.assetID)
+        })
+        self._customOutroStart = State(initialValue: currentEpisode.customOutroTemplate?.startTime ?? currentEpisode.outroSegment?.startTime ?? 0)
+        self._customOutroEnd = State(initialValue: currentEpisode.customOutroTemplate?.endTime ?? currentEpisode.outroSegment?.endTime ?? 5)
+        let hadCustomRecap = currentEpisode.usesCustomRecapSegments == true || !currentEpisode.customRecapSegments.isEmpty
+        let initialMode = hadCustomRecap || !currentEpisode.useGlobalRecap
+            ? RecapSettings.RecapMode.manual
+            : project.recapSettings.mode
+        self.initialRecapMode = initialMode
+        self._recapMode = State(initialValue: initialMode)
+        self._recapSegments = State(initialValue: currentEpisode.customRecapSegments.isEmpty
+            ? currentEpisode.effectiveRecaps
+            : currentEpisode.customRecapSegments)
     }
     
     var body: some View {
         NavigationStack {
             Form {
+                Section("Saída") {
+                    TextField("Nome", text: $title)
+                    Picker("Formato", selection: $outputFormat) {
+                        Text("Seguir projeto").tag(nil as AspectRatio?)
+                        ForEach(AspectRatio.allCases) { ratio in
+                            Text(ratio.rawValue).tag(ratio as AspectRatio?)
+                        }
+                    }
+                }
+
                 Section("Conteúdo Principal") {
                     HStack {
                         Text("Início")
@@ -387,38 +490,116 @@ struct EpisodeDetailView: View {
         }
     }
     
+
     private func saveChanges() {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        episode.displayTitle = trimmedTitle.isEmpty ? nil : trimmedTitle
+        episode.outputAspectRatio = outputFormat
         episode.mainStart = mainStart
         episode.mainEnd = mainEnd
+        if episode.mainClips.count == 1 {
+            var clips = episode.mainClips
+            clips[0].startTime = mainStart
+            clips[0].endTime = mainEnd
+            episode.mainClips = clips
+        }
         
-        if useCustomIntro, let asset = customIntroAsset {
-            episode.customIntroTemplate = SegmentTemplate(
-                name: asset.name,
-                sourceType: .introAsset,
-                assetID: asset.id,
-                startTime: customIntroStart,
-                endTime: customIntroEnd,
-                targetTrack: .intro
-            )
+        if useCustomIntro {
+            if let asset = customIntroAsset {
+                episode.customIntroTemplate = nil
+                var segment = episode.introSegment ?? VideoSegment(
+                    startTime: customIntroStart,
+                    endTime: customIntroEnd,
+                    sourceType: .introAsset,
+                    assetID: asset.id
+                )
+                segment.startTime = customIntroStart
+                segment.endTime = customIntroEnd
+                segment.sourceType = .introAsset
+                segment.assetID = asset.id
+                episode.introSegment = segment
+                episode.useGlobalIntro = true
+            } else if initialCustomIntro {
+                if var template = episode.customIntroTemplate {
+                    template.startTime = customIntroStart
+                    template.endTime = customIntroEnd
+                    episode.customIntroTemplate = template
+                } else if var existing = episode.introSegment {
+                    existing.startTime = customIntroStart
+                    existing.endTime = customIntroEnd
+                    episode.introSegment = existing
+                    episode.useGlobalIntro = true
+                }
+            } else {
+                episode.customIntroTemplate = nil
+                episode.introSegment = initialHasIntro ? project.introTemplate?.toSegment() : nil
+                episode.useGlobalIntro = initialHasIntro && project.introTemplate != nil
+            }
         } else {
             episode.customIntroTemplate = nil
+            episode.introSegment = initialHasIntro ? project.introTemplate?.toSegment() : nil
+            episode.useGlobalIntro = initialHasIntro && project.introTemplate != nil
         }
         
-        if useCustomOutro, let asset = customOutroAsset {
-            episode.customOutroTemplate = SegmentTemplate(
-                name: asset.name,
-                sourceType: .outroAsset,
-                assetID: asset.id,
-                startTime: customOutroStart,
-                endTime: customOutroEnd,
-                targetTrack: .outro
-            )
+        if useCustomOutro {
+            if let asset = customOutroAsset {
+                episode.customOutroTemplate = nil
+                var segment = episode.outroSegment ?? VideoSegment(
+                    startTime: customOutroStart,
+                    endTime: customOutroEnd,
+                    sourceType: .outroAsset,
+                    assetID: asset.id
+                )
+                segment.startTime = customOutroStart
+                segment.endTime = customOutroEnd
+                segment.sourceType = .outroAsset
+                segment.assetID = asset.id
+                episode.outroSegment = segment
+                episode.useGlobalOutro = true
+            } else if initialCustomOutro {
+                if var template = episode.customOutroTemplate {
+                    template.startTime = customOutroStart
+                    template.endTime = customOutroEnd
+                    episode.customOutroTemplate = template
+                } else if var existing = episode.outroSegment {
+                    existing.startTime = customOutroStart
+                    existing.endTime = customOutroEnd
+                    episode.outroSegment = existing
+                    episode.useGlobalOutro = true
+                }
+            } else {
+                episode.customOutroTemplate = nil
+                episode.outroSegment = initialHasOutro ? project.outroTemplate?.toSegment() : nil
+                episode.useGlobalOutro = initialHasOutro && project.outroTemplate != nil
+            }
         } else {
             episode.customOutroTemplate = nil
+            episode.outroSegment = initialHasOutro ? project.outroTemplate?.toSegment() : nil
+            episode.useGlobalOutro = initialHasOutro && project.outroTemplate != nil
         }
-        
+
+        let wasCustom = episode.usesCustomRecapSegments == true || !episode.customRecapSegments.isEmpty
+        episode.customRecapSegments = []
         if recapMode == .manual {
-            episode.customRecapSegments = recapSegments
+            let recapChanged = recapSegments != episode.effectiveRecaps
+            episode.recapSegments = recapSegments
+            episode.useGlobalRecap = !recapSegments.isEmpty
+            episode.usesCustomRecapSegments = wasCustom || recapChanged || recapMode != initialRecapMode ? true : nil
+        } else {
+            var recapSettings = project.recapSettings
+            recapSettings.enabled = true
+            recapSettings.mode = .automatic
+            let previousEnd = project.episodes
+                .filter { $0.index < episode.index }
+                .max { $0.index < $1.index }?
+                .mainEnd
+            if let previousEnd = previousEnd {
+                episode.regenerateRecap(previousEpisodeEnd: previousEnd, settings: recapSettings)
+            } else {
+                episode.recapSegments = []
+            }
+            episode.useGlobalRecap = !episode.recapSegments.isEmpty
+            episode.usesCustomRecapSegments = nil
         }
         
         onSave()

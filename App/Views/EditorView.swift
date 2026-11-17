@@ -47,6 +47,7 @@ struct EditorView: View {
     @StateObject private var viewModel: EditorViewModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @State private var showingAutomationCenter = false
     @State private var showingTranscription = false
     @State private var showingTranscriptEditor = false
     @State private var showingClipSuggestions = false
@@ -71,7 +72,7 @@ struct EditorView: View {
     }
 
     private var isRegular: Bool { horizontalSizeClass == .regular }
-    private var projectOperation: ProjectOperation? { initialOperation ?? viewModel.currentProject.operation }
+    private var projectOperation: ProjectOperation? { viewModel.currentProject.operation ?? initialOperation }
 
     var body: some View {
         GeometryReader { geometry in
@@ -135,6 +136,45 @@ struct EditorView: View {
         }
         .sheet(isPresented: $viewModel.showExportProgress) {
             ExportProgressView(viewModel: viewModel)
+        }
+        .sheet(isPresented: $showingAutomationCenter) {
+            AutomationCenterView(
+                project: viewModel.currentProject,
+                operation: projectOperation,
+                onAnalysisReady: { viewModel.applyContentAnalysis($0) },
+                onCreateOutputs: { suggestions, request in
+                    viewModel.setOperation(request.operation)
+                    viewModel.createSuggestedEpisodes(
+                        suggestions,
+                        autoFraming: request.autoFraming,
+                        captions: request.captions.enabled,
+                        dynamicCaptions: request.captions.dynamic,
+                        formats: request.formats,
+                        generateCovers: request.generateCovers
+                    )
+                },
+                onApplyCuts: { ranges, request in
+                    viewModel.setOperation(request.operation)
+                    viewModel.removeSourceRanges(
+                        ranges,
+                        captions: request.captions.enabled,
+                        dynamicCaptions: request.captions.dynamic
+                    )
+                },
+                onCreateEpisodes: { times, request in
+                    viewModel.setOperation(request.operation)
+                    viewModel.createEpisodesAtTopics(times, request: request)
+                },
+                onOpenTranscript: { showingTranscription = true },
+                onOpenTranscriptEditor: {
+                    if viewModel.editableTranscriptWords.isEmpty {
+                        showingTranscription = true
+                    } else {
+                        showingTranscriptEditor = true
+                    }
+                },
+                onSeek: { viewModel.seekToSourceTime($0) }
+            )
         }
         .sheet(isPresented: $showingTranscriptEditor) {
             TranscriptEditorView(
@@ -259,6 +299,9 @@ struct EditorView: View {
                 }
                 Button { viewModel.showDuplicateSheet = true } label: {
                     Label("Duplicar projeto", systemImage: "doc.on.doc")
+                }
+                Button { showingAutomationCenter = true } label: {
+                    Label("Automatizar", systemImage: "sparkles.rectangle.stack")
                 }
                 Button { showingTranscription = true } label: {
                     Label("Transcrição", systemImage: "captions.bubble")
@@ -391,7 +434,7 @@ struct EditorView: View {
                         viewModel.selectEpisode(episode)
                         sheetPanel = nil
                     },
-                    onEdit: { episode in viewModel.selectEpisode(episode) },
+                    onEdit: { episode in viewModel.updateEpisodeDetails(episode) },
                     onRegenerate: { length in Task { await viewModel.regenerateEpisodes(length: length) } }
                 )
                 .navigationTitle("Saídas")
@@ -443,19 +486,8 @@ struct EditorView: View {
     private func openInitialOperationIfNeeded() {
         guard !didOpenInitialOperation else { return }
         didOpenInitialOperation = true
-        switch initialOperation {
-        case .multiply:
-            showingClipSuggestions = true
-        case .podcast:
-            if viewModel.editableTranscriptWords.isEmpty {
-                showingTranscription = true
-            } else {
-                showingTranscriptEditor = true
-            }
-        case .episodes:
-            open(.episodes)
-        case .none:
-            break
+        if initialOperation != nil {
+            showingAutomationCenter = true
         }
     }
 
@@ -734,6 +766,7 @@ struct EditorView: View {
                     toolButton("Recap", icon: "arrow.counterclockwise") { clipPickRequest = ClipPickRequest(track: .recap) }
                     toolButton("Encerramento", icon: "flag.checkered") { clipPickRequest = ClipPickRequest(track: .outro) }
                     Divider().frame(height: 30).overlay(EditorTheme.divider)
+                    toolButton("Automatizar", icon: "sparkles.rectangle.stack") { showingAutomationCenter = true }
                     toolButton("Legendas", icon: "captions.bubble") { showingTranscription = true }
                     toolButton("Sugerir", icon: "wand.and.stars") { showingClipSuggestions = true }
                     toolButton("Editar fala", icon: "text.badge.minus") {
@@ -1050,6 +1083,7 @@ class EditorViewModel: ObservableObject {
             includeCovers: project.coverSettings.enabled,
             coverMode: project.coverSettings.mode,
             coverCaptureTime: project.coverSettings.captureTime,
+            coverImageAssetID: project.coverSettings.customImageAssetID,
             fileNamePrefix: project.episodeTitleTemplate,
             quality: .high
         )
@@ -1063,6 +1097,12 @@ class EditorViewModel: ObservableObject {
         snapshot.resolution = exportSettings.resolution
         snapshot.fitMode = exportSettings.fitMode
         return snapshot
+    }
+
+    func setOperation(_ operation: ProjectOperation) {
+        guard project.operation != operation else { return }
+        objectWillChange.send()
+        project.operation = operation
     }
 
     var orderedSegments: [TimelineSegment] {
@@ -1079,7 +1119,7 @@ class EditorViewModel: ObservableObject {
     }
 
     var canvasAspectRatio: CGFloat {
-        if let ratio = exportSettings.aspectRatio.ratio { return ratio }
+        if let ratio = selectedEpisode?.outputAspectRatio?.ratio ?? exportSettings.aspectRatio.ratio { return ratio }
         let rect = CGRect(origin: .zero, size: project.sourceVideoNaturalSize.cgSize)
             .applying(project.sourceVideoTransform.cgAffineTransform)
         guard abs(rect.width) > 1, abs(rect.height) > 1 else { return 16 / 9 }
@@ -1087,7 +1127,8 @@ class EditorViewModel: ObservableObject {
     }
 
     var canvasLabel: String {
-        exportSettings.aspectRatio == .original ? "Original" : exportSettings.aspectRatio.rawValue
+        let ratio = selectedEpisode?.outputAspectRatio ?? exportSettings.aspectRatio
+        return ratio == .original ? "Original" : ratio.rawValue
     }
 
     func sourceURL(for segment: TimelineSegment) -> URL? {
@@ -1131,7 +1172,7 @@ class EditorViewModel: ObservableObject {
             mode: exportSettings.coverMode,
             templateName: "Padrão",
             captureTime: exportSettings.coverCaptureTime,
-            customImageAssetID: nil
+            customImageAssetID: exportSettings.coverImageAssetID
         )
 
         do {
@@ -1164,6 +1205,15 @@ class EditorViewModel: ObservableObject {
         episodes = project.episodes
         if let first = episodes.first { selectedEpisode = first }
         await persistProjectChanges()
+    }
+
+    func updateEpisodeDetails(_ episode: Episode) {
+        guard let index = episodes.firstIndex(where: { $0.id == episode.id }) else { return }
+        checkpoint()
+        episodes[index] = episode
+        selectedEpisode = episode
+        updateTimelineForEpisode(episode)
+        Task { await persistProjectChanges() }
     }
 
     func addMediaAsset(_ asset: MediaAsset) async {
@@ -1237,6 +1287,7 @@ class EditorViewModel: ObservableObject {
                 episodes[index].recapSegments = [segment]
                 episodes[index].customRecapSegments = []
                 episodes[index].useGlobalRecap = true
+                episodes[index].usesCustomRecapSegments = nil
                 episodes[index].clearTimelinePins()
             }
         default:
@@ -2087,6 +2138,16 @@ class EditorViewModel: ObservableObject {
         }
         project.episodes = episodes
         project.mediaAssets = mediaAssets
+        project.aspectRatio = exportSettings.aspectRatio
+        project.resolution = exportSettings.resolution
+        project.fitMode = exportSettings.fitMode
+        project.coverSettings = CoverSettings(
+            enabled: exportSettings.includeCovers,
+            mode: exportSettings.coverMode,
+            templateName: "Padrão",
+            captureTime: exportSettings.coverCaptureTime,
+            customImageAssetID: exportSettings.coverImageAssetID
+        )
         do {
             try await storage.saveProject(project)
         } catch {
@@ -2387,71 +2448,125 @@ class EditorViewModel: ObservableObject {
     }
 
     /// Rebuilds the project's episodes at detected topic boundaries (source times).
-    func createEpisodesAtTopics(_ sourceTimes: [Double]) {
-        guard project.createEpisodes(at: sourceTimes) > 0 else {
+    func createEpisodesAtTopics(_ sourceTimes: [Double], request: AutomationRequest? = nil) {
+        var workingProject = project
+        guard workingProject.createEpisodes(at: sourceTimes) > 0 else {
             errorMessage = "Os limites detectados ficam perto demais das bordas (menos de 5s) para virar episódio."
             return
         }
+        checkpoint()
+        project = workingProject
         episodes = project.episodes
+        if let request = request {
+            exportSettings.includeCovers = request.generateCovers
+            project.coverSettings.enabled = request.generateCovers
+            let format = request.formats.first ?? .original
+            if format != .original {
+                for index in episodes.indices {
+                    episodes[index].outputAspectRatio = format
+                }
+            }
+        }
         if let first = episodes.first { selectedEpisode = first }
         Task { await persistProjectChanges() }
     }
 
     func saveSceneCuts(_ cuts: [Double]) {
-        project.sceneCuts = cuts.isEmpty ? nil : cuts
+        project.sceneCuts = cuts
         Task { await persistProjectChanges(reloadPreview: false) }
     }
 
-    func createSuggestedEpisodes(_ suggestions: [ClipSuggestion], autoFraming: Bool) {
+    /// Reuses the generated analysis in the legacy views while keeping the
+    /// complete index in AnalysisStore for future automation runs.
+    func applyContentAnalysis(_ analysis: ContentAnalysis) {
+        var changed = false
+        let newWords = analysis.transcriptWords
+        if project.transcriptSRT != analysis.transcriptSRT {
+            project.transcriptSRT = analysis.transcriptSRT
+            changed = true
+        }
+        if project.transcriptWords != newWords {
+            project.transcriptWords = newWords
+            changed = true
+        }
+        let newSceneCuts = analysis.sceneCuts
+        if project.sceneCuts != newSceneCuts {
+            project.sceneCuts = newSceneCuts
+            changed = true
+        }
+        guard changed else { return }
+        Task { await persistProjectChanges(reloadPreview: false) }
+    }
+
+    func createSuggestedEpisodes(
+        _ suggestions: [ClipSuggestion],
+        autoFraming: Bool,
+        captions: Bool = false,
+        dynamicCaptions: Bool = false,
+        formats: [AspectRatio] = [],
+        generateCovers: Bool? = nil
+    ) {
         guard !suggestions.isEmpty else { return }
         checkpoint()
-        let hadCaptions = episodes.contains { $0.textOverlays.contains { $0.isCaption == true } }
+        let shouldApplyCaptions = captions || episodes.contains { $0.textOverlays.contains { $0.isCaption == true } }
         var selected: Episode?
         var nextIndex = (episodes.map(\.index).max() ?? -1) + 1
         var outputCounts: [ClipSuggestionKind: Int] = [:]
+        let outputFormats = formats.isEmpty ? [AspectRatio.original] : formats
+        if let generateCovers = generateCovers {
+            exportSettings.includeCovers = generateCovers
+            project.coverSettings.enabled = generateCovers
+        }
         for episode in episodes {
             for kind in ClipSuggestionKind.allCases where episode.displayTitle?.hasPrefix(kind.outputName) == true {
-                outputCounts[kind, default: 0] += 1
+                let suffix = episode.displayTitle?.dropFirst(kind.outputName.count).trimmingCharacters(in: .whitespaces) ?? ""
+                let numberText = suffix.prefix { $0.isNumber }
+                let number = Int(numberText) ?? 0
+                outputCounts[kind] = max(outputCounts[kind] ?? 0, number)
             }
         }
         for suggestion in suggestions.sorted(by: { $0.start < $1.start }) {
             let start = max(0, min(suggestion.start, project.sourceVideoDuration))
             let end = max(start, min(suggestion.end, project.sourceVideoDuration))
             guard end - start > 0.2 else { continue }
-            var episode = Episode(
-                index: nextIndex,
-                mainStart: start,
-                mainEnd: end,
-                introTemplate: nil,
-                outroTemplate: nil,
-                recapSettings: RecapSettings(enabled: false)
-            )
-            var clip = VideoSegment(
-                startTime: start,
-                endTime: end,
-                sourceType: .mainVideo,
-                transitionStyle: TransitionStyle.none
-            )
-            if autoFraming {
-                var adjustments = clip.clipAdjustments
-                adjustments.autoFraming = true
-                clip.clipAdjustments = adjustments
-            }
-            episode.mainClips = [clip]
             let outputNumber = (outputCounts[suggestion.kind] ?? 0) + 1
             outputCounts[suggestion.kind] = outputNumber
-            episode.displayTitle = "\(suggestion.kind.outputName) \(outputNumber)"
-            episode.useGlobalIntro = false
-            episode.useGlobalOutro = false
-            episode.useGlobalRecap = false
-            episodes.append(episode)
-            selected = episode
-            nextIndex += 1
+            for format in outputFormats {
+                var episode = Episode(
+                    index: nextIndex,
+                    mainStart: start,
+                    mainEnd: end,
+                    introTemplate: nil,
+                    outroTemplate: nil,
+                    recapSettings: RecapSettings(enabled: false)
+                )
+                var clip = VideoSegment(
+                    startTime: start,
+                    endTime: end,
+                    sourceType: .mainVideo,
+                    transitionStyle: TransitionStyle.none
+                )
+                if autoFraming {
+                    var adjustments = clip.clipAdjustments
+                    adjustments.autoFraming = true
+                    clip.clipAdjustments = adjustments
+                }
+                episode.mainClips = [clip]
+                episode.outputAspectRatio = format == .original ? nil : format
+                let suffix = outputFormats.count > 1 ? " • \(format.rawValue)" : ""
+                episode.displayTitle = "\(suggestion.kind.outputName) \(outputNumber)\(suffix)"
+                episode.useGlobalIntro = false
+                episode.useGlobalOutro = false
+                episode.useGlobalRecap = false
+                episodes.append(episode)
+                selected = episode
+                nextIndex += 1
+            }
         }
         guard let selected = selected else { return }
         selectedEpisode = selected
-        if hadCaptions, let srt = project.transcriptSRT, let cues = try? SubtitleFile.parse(srt) {
-            applyCaptions(cues, dynamic: captionsAreDynamic, recordUndo: false)
+        if shouldApplyCaptions, let srt = project.transcriptSRT, let cues = try? SubtitleFile.parse(srt) {
+            applyCaptions(cues, dynamic: captions ? dynamicCaptions : captionsAreDynamic, recordUndo: false)
         }
         Task { await persistProjectChanges() }
     }
@@ -2510,25 +2625,45 @@ class EditorViewModel: ObservableObject {
         }
     }
 
-    /// Positions the playhead where a source-video time lands in the selected episode.
+    /// Positions the playhead where a source-video time lands, preferring the
+    /// selected output and only switching when that range lives in another one.
     func seekToSourceTime(_ source: Double) {
-        guard let episode = selectedEpisode else { return }
-        for item in episode.storyline() where item.track == .main {
-            let clip = item.segment
-            // Only the recorded video's clips carry source-video timestamps; library clips don't.
-            guard clip.sourceType == .mainVideo,
-                  clip.startTime <= source, source < clip.endTime else { continue }
-            seek(to: item.start + (source - clip.startTime) / clip.playbackSpeed)
+        func target(in episode: Episode) -> Double? {
+            for item in episode.storyline() where item.track == .main {
+                let clip = item.segment
+                // Only the recorded video's clips carry source-video timestamps; library clips don't.
+                guard clip.sourceType == .mainVideo,
+                      clip.startTime <= source, source < clip.endTime else { continue }
+                return item.start + (source - clip.startTime) / clip.playbackSpeed
+            }
+            return nil
+        }
+
+        if let selectedEpisode = selectedEpisode, let target = target(in: selectedEpisode) {
+            seek(to: target)
+            return
+        }
+        for episode in episodes where episode.id != selectedEpisode?.id {
+            guard let target = target(in: episode) else { continue }
+            selectedEpisode = episode
+            selectedSegmentID = nil
+            updateTimelineForEpisode(episode)
+            currentTime = target
+            loadPreview(for: episode, keepTime: true)
             return
         }
     }
 
     /// Cuts source-video time ranges (from the transcript) out of every episode's main content.
-    func removeSourceRanges(_ ranges: [ClosedRange<Double>]) {
+    func removeSourceRanges(
+        _ ranges: [ClosedRange<Double>],
+        captions: Bool = false,
+        dynamicCaptions: Bool = false
+    ) {
         let merged = Self.merge(ranges)
         guard !merged.isEmpty else { return }
         checkpoint()
-        let hadCaptions = episodes.contains { $0.textOverlays.contains { $0.isCaption == true } }
+        let shouldApplyCaptions = captions || episodes.contains { $0.textOverlays.contains { $0.isCaption == true } }
         var changed = 0
         for index in episodes.indices {
             var episode = episodes[index]
@@ -2576,8 +2711,8 @@ class EditorViewModel: ObservableObject {
             return
         }
         if let index = selectedEpisodeIndex { selectedEpisode = episodes[index] }
-        if hadCaptions, let srt = project.transcriptSRT, let cues = try? SubtitleFile.parse(srt) {
-            applyCaptions(cues, dynamic: captionsAreDynamic, recordUndo: false)
+        if shouldApplyCaptions, let srt = project.transcriptSRT, let cues = try? SubtitleFile.parse(srt) {
+            applyCaptions(cues, dynamic: captions ? dynamicCaptions : captionsAreDynamic, recordUndo: false)
         }
         Task { await persistProjectChanges() }
     }
