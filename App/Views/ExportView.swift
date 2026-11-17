@@ -320,6 +320,7 @@ struct ExportProgressView: View {
     
     @Environment(\.dismiss) private var dismiss
     @State private var shareItem: ExportShareItem?
+    @State private var savingToPhotos = false
     
     var body: some View {
         NavigationStack {
@@ -345,9 +346,37 @@ struct ExportProgressView: View {
                             .multilineTextAlignment(.center)
                         
                         if progress.currentStage == .completed || progress.currentStage == .failed {
+                            if !viewModel.lastExportedFiles.isEmpty {
+                                Button {
+                                    savingToPhotos = true
+                                    Task {
+                                        await viewModel.saveExportedVideosToPhotos()
+                                        savingToPhotos = false
+                                    }
+                                } label: {
+                                    Label("Salvar na Galeria", systemImage: "photo.on.rectangle")
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.large)
+                                .disabled(savingToPhotos)
+
+                                Button {
+                                    shareItem = ExportShareItem(urls: viewModel.lastExportedFiles)
+                                } label: {
+                                    Label("Compartilhar / Salvar em Arquivos", systemImage: "square.and.arrow.up")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.large)
+
+                                if let photoSaveStatus = viewModel.photoSaveStatus {
+                                    Text(photoSaveStatus)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
                             if let zipURL = viewModel.lastExportZIPURL {
                                 Button {
-                                    shareItem = ExportShareItem(url: zipURL)
+                                    shareItem = ExportShareItem(urls: [zipURL])
                                 } label: {
                                     Label("Compartilhar ZIP", systemImage: "square.and.arrow.up")
                                 }
@@ -386,16 +415,16 @@ struct ExportProgressView: View {
                 }
             }
         }
-        .presentationDetents([.height(300)])
+        .presentationDetents([.medium, .large])
         .sheet(item: $shareItem) { item in
-            ShareSheet(items: [item.url])
+            ShareSheet(items: item.urls)
         }
     }
 }
 
 private struct ExportShareItem: Identifiable {
     let id = UUID()
-    let url: URL
+    let urls: [URL]
 }
 
 /// Generates several versions of the same episodes: formats × captions on/off, exported in batch.

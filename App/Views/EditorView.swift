@@ -2,6 +2,7 @@ import SwiftUI
 import AVKit
 import AVFoundation
 import PhotosUI
+import Photos
 
 enum EditorTheme {
     static let background = Color(red: 0.07, green: 0.07, blue: 0.08)
@@ -1060,6 +1061,8 @@ class EditorViewModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var exportProgress: BatchExportProgress?
     @Published var lastExportZIPURL: URL?
+    @Published var lastExportedFiles: [URL] = []
+    @Published var photoSaveStatus: String?
 
     private var project: Project
     private let storage = ProjectStorage.shared
@@ -2898,6 +2901,8 @@ class EditorViewModel: ObservableObject {
         showExportProgress = true
         exportProgress = nil
         lastExportZIPURL = nil
+        lastExportedFiles = []
+        photoSaveStatus = nil
 
         do {
             let result = try await exportManager.exportAllEpisodes(
@@ -2914,13 +2919,16 @@ class EditorViewModel: ObservableObject {
                 lastExportZIPURL = try await exportManager.createZIP(from: result.results, projectName: project.name)
             }
 
-            showExportProgress = false
+            lastExportedFiles = result.results.map(\.videoURL) + result.results.compactMap(\.coverURL)
+            let summary = result.errors.isEmpty
+                ? "Exportação concluída: \(result.successCount) episódios"
+                : "Exportação concluída: \(result.successCount) vídeo(s) · \(result.failureCount) com erro"
             exportProgress = BatchExportProgress(
                 currentEpisode: 0,
                 totalEpisodes: result.results.count,
                 overallProgress: 1.0,
                 currentStage: .completed,
-                message: "Exportação concluída: \(result.successCount) episódios"
+                message: summary
             )
             if !result.errors.isEmpty {
                 let details = result.errors.map { "Episódio \($0.episodeNumber): \($0.error)" }.joined(separator: "\n")
@@ -2953,6 +2961,8 @@ class EditorViewModel: ObservableObject {
         showExportProgress = true
         exportProgress = nil
         lastExportZIPURL = nil
+        lastExportedFiles = []
+        photoSaveStatus = nil
         var allResults: [ExportResult] = []
         do {
             for (index, variant) in variants.enumerated() {
@@ -2980,7 +2990,7 @@ class EditorViewModel: ObservableObject {
                     errorMessage = "Vídeos exportados, mas o ZIP falhou: \(Self.describe(error))"
                 }
             }
-            showExportProgress = false
+            lastExportedFiles = allResults.map(\.videoURL) + allResults.compactMap(\.coverURL)
             exportProgress = BatchExportProgress(
                 currentEpisode: 0,
                 totalEpisodes: allResults.count,
@@ -2995,6 +3005,37 @@ class EditorViewModel: ObservableObject {
                 showExportProgress = false
                 errorMessage = "Erro na multiplicação: \(Self.describe(error))"
             }
+        }
+    }
+
+    /// Saves the videos from the last export to the user's photo library.
+    func saveExportedVideosToPhotos() async {
+        let videos = lastExportedFiles.filter { ["mp4", "mov"].contains($0.pathExtension.lowercased()) }
+        guard !videos.isEmpty else { return }
+        let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        guard status == .authorized || status == .limited else {
+            photoSaveStatus = "Permita o acesso à Galeria nos Ajustes para salvar os vídeos."
+            return
+        }
+        photoSaveStatus = "Salvando na Galeria…"
+        var saved = 0
+        var firstError: Error?
+        for url in videos {
+            do {
+                try await PHPhotoLibrary.shared().performChanges {
+                    PHAssetCreationRequest.forAsset().addResource(with: .video, fileURL: url, options: nil)
+                }
+                saved += 1
+            } catch {
+                if firstError == nil { firstError = error }
+            }
+        }
+        if saved == videos.count {
+            photoSaveStatus = "\(saved) vídeo(s) salvos na Galeria."
+        } else if saved > 0 {
+            photoSaveStatus = "\(saved) vídeo(s) salvos; \(videos.count - saved) falharam."
+        } else {
+            photoSaveStatus = "Falha ao salvar na Galeria: \(Self.describe(firstError ?? ProcessorError.exportFailed))"
         }
     }
 

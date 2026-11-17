@@ -4,6 +4,12 @@
 <dict>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>O ClipStudio usa o reconhecimento de fala do dispositivo para transcrever o vídeo selecionado.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>O ClipStudio salva os vídeos exportados na sua Galeria.</string>
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 	<key>UTExportedTypeDeclarations</key>
 	<array>
 		<dict>
