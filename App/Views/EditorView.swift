@@ -190,7 +190,9 @@ struct EditorView: View {
                 project: viewModel.currentProject,
                 onTranscriptChange: { viewModel.saveTranscript($0) },
                 onApplyCaptions: { viewModel.applyCaptions($0, dynamic: $1) },
-                onWords: { viewModel.saveTranscriptWords($0) }
+                onWords: { viewModel.saveTranscriptWords($0) },
+                onCorrected: { viewModel.applyCorrectedTranscript($0, words: $1) },
+                currentWords: { viewModel.editableTranscriptWords }
             )
         }
         .sheet(isPresented: $showingClipSuggestions) {
@@ -1723,6 +1725,25 @@ class EditorViewModel: ObservableObject {
             guard let self = self, !Task.isCancelled else { return }
             await self.persistProjectChanges(reloadPreview: false)
         }
+    }
+
+    /// Applies a reviewed transcript correction and refreshes caption overlays in place.
+    func applyCorrectedTranscript(_ srt: String, words: [TranscriptWord]) {
+        project.transcriptSRT = srt
+        project.transcriptWords = words
+        transcriptSaveTask?.cancel()
+        let hasCaptions = episodes.contains {
+            $0.textOverlays.contains { $0.isCaption == true }
+        }
+        guard hasCaptions, let cues = try? SubtitleFile.parse(srt) else {
+            Task { await persistProjectChanges(reloadPreview: false) }
+            return
+        }
+        let dynamic = episodes.contains {
+            $0.textOverlays.contains { $0.isCaption == true && !($0.words?.isEmpty ?? true) }
+        }
+        checkpoint()
+        applyCaptions(cues, dynamic: dynamic, recordUndo: false)
     }
 
     /// Converts transcript cues (timed against the source video) into caption overlays in every

@@ -350,6 +350,8 @@ struct AutomationCenterView: View {
             HStack {
                 Button("Abrir transcrição") { openAfterDismiss(onOpenTranscript) }
                     .buttonStyle(.bordered)
+                Button("Corrigir texto") { openAfterDismiss(onOpenTranscript) }
+                    .buttonStyle(.bordered)
                 Button("Autoedição por fala") { openAfterDismiss(onOpenTranscriptEditor) }
                     .buttonStyle(.bordered)
             }
