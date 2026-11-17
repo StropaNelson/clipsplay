@@ -460,7 +460,7 @@ struct AutomationCenterView: View {
                         .foregroundStyle(.secondary)
                     stepList(for: progress)
                     if isAnalyzing, let analysisStart = analysisStart {
-                        TimelineView(.periodic(from: analysisStart, by: 1)) { context in
+                        SwiftUI.TimelineView(.periodic(from: analysisStart, by: 1)) { context in
                             Text("Tempo decorrido: \(elapsedString(from: analysisStart, to: context.date))")
                                 .font(.caption.monospacedDigit())
                                 .foregroundStyle(.secondary)
