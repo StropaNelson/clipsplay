@@ -3,6 +3,7 @@ import AVKit
 import AVFoundation
 import PhotosUI
 import Photos
+import UniformTypeIdentifiers
 
 enum EditorTheme {
     static let background = Color(red: 0.07, green: 0.07, blue: 0.08)
@@ -52,6 +53,7 @@ struct EditorView: View {
     @State private var showingTranscription = false
     @State private var showingTranscriptEditor = false
     @State private var showingClipSuggestions = false
+    @State private var showingPauseRemoval = false
     @State private var sidePanel: EditorPanel? = .media
     @State private var sheetPanel: EditorPanel?
     @State private var clipPickRequest: ClipPickRequest?
@@ -173,6 +175,9 @@ struct EditorView: View {
                 },
                 onOpenTranscript: { showingTranscription = true },
                 onOpenTranscriptEditor: { operation in openTranscriptEditing(operation: operation) },
+                onImportAsset: { asset in
+                    Task { await viewModel.addMediaAsset(asset) }
+                },
                 onSeek: { viewModel.seekToSourceTime($0) }
             )
         }
@@ -196,6 +201,16 @@ struct EditorView: View {
                 onVocabularyChange: { viewModel.saveTranscriptionVocabulary($0) }
             )
         }
+        .sheet(isPresented: $showingPauseRemoval) {
+            PauseRemovalView(
+                project: viewModel.currentProject,
+                episodes: viewModel.episodes,
+                selectedEpisodeID: viewModel.selectedEpisode?.id,
+                coverage: { viewModel.sourceCoverage(of: $0) }
+            ) { ranges, episodeIDs in
+                viewModel.removeSourceRanges(ranges, episodeIDs: episodeIDs)
+            }
+        }
         .sheet(isPresented: $showingClipSuggestions) {
             ClipSuggestionsView(
                 words: viewModel.editableTranscriptWords,
@@ -214,6 +229,8 @@ struct EditorView: View {
             ClipAssetPickerSheet(
                 track: request.track,
                 assets: viewModel.mediaAssets.filter { $0.type == .video },
+                project: viewModel.currentProject,
+                canvasSize: pickerCanvasSize,
                 onImportAsset: { asset in
                     Task { await viewModel.addMediaAsset(asset) }
                 },
@@ -308,6 +325,9 @@ struct EditorView: View {
                 }
                 Button { showingTranscription = true } label: {
                     Label("Texto e legendas", systemImage: "captions.bubble")
+                }
+                Button { showingPauseRemoval = true } label: {
+                    Label("Remover pausas", systemImage: "speaker.slash")
                 }
             } label: {
                 Image(systemName: "ellipsis")
@@ -766,6 +786,7 @@ struct EditorView: View {
                     toolButton(projectOperation == .speechEdit ? "Clipe" : "Episódios", icon: "film.stack") { open(.episodes) }
                     Divider().frame(height: 30).overlay(EditorTheme.divider)
                     toolButton("Dividir", icon: "scissors") { viewModel.splitAtPlayhead() }
+                    toolButton("Pausas", icon: "speaker.slash") { showingPauseRemoval = true }
                     toolButton("Clipe", icon: "plus.rectangle.on.rectangle") { clipPickRequest = ClipPickRequest(track: .main) }
                     toolButton("Sobrepor", icon: "rectangle.on.rectangle") { showingAddOverlay = true }
                     toolButton("Texto", icon: "textformat") { textEditRequest = viewModel.newTextRequest() }
@@ -883,6 +904,24 @@ struct EditorView: View {
         return text.replacingOccurrences(of: ".", with: ",") + "×"
     }
 
+    private var pickerCanvasSize: CGSize {
+        let format = viewModel.selectedEpisode?.outputAspectRatio ?? viewModel.currentProject.aspectRatio
+        if let size = ClipAssetPickerSheet.canvasSize(for: format) { return size }
+        let oriented = viewModel.currentProject.sourceVideoNaturalSize.cgSize
+            .applying(viewModel.currentProject.sourceVideoTransform.cgAffineTransform)
+        var width = abs(oriented.width)
+        var height = abs(oriented.height)
+        if width <= 0 || height <= 0 {
+            width = 1920
+            height = 1080
+        }
+        let scale = min(1, 1920 / max(width, height))
+        return CGSize(
+            width: (width * scale / 2).rounded() * 2,
+            height: (height * scale / 2).rounded() * 2
+        )
+    }
+
     private func toolButton(_ title: String, icon: String, role: ButtonRole? = nil, action: @escaping () -> Void) -> some View {
         Button(role: role, action: action) {
             VStack(spacing: 4) {
@@ -929,12 +968,51 @@ final class PlayerLayerView: UIView {
 struct ClipAssetPickerSheet: View {
     let track: TrackType
     let assets: [MediaAsset]
+    let project: Project
+    let canvasSize: CGSize
     let onImportAsset: (MediaAsset) -> Void
     let onAssign: (MediaAsset, ClipSelection) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var trimRequest: AssetTrimRequest?
     @State private var showingImport = false
+    @State private var gallerySelection: PhotosPickerItem?
+    @State private var galleryKind: PickerFileKind = .video
+    @State private var showingGallery = false
+    @State private var fileImportKind: PickerFileKind?
+    @State private var showingImageSourceDialog = false
+    @State private var showingCamera = false
+    @State private var imageClipRequest: ImageClipRequest?
+    @State private var busyMessage: String?
+    @State private var errorMessage: String?
+    @State private var importedAssets: [MediaAsset] = []
+
+    private let importer = VideoImporter.shared
+
+    private var displayAssets: [MediaAsset] {
+        var merged = assets
+        for asset in importedAssets where !merged.contains(where: { $0.id == asset.id }) {
+            merged.append(asset)
+        }
+        return merged
+    }
+
+    enum PickerFileKind: String, Identifiable {
+        case video, image
+        var id: String { rawValue }
+        var allowedTypes: [UTType] {
+            switch self {
+            case .video: return VideoImporter.supportedVideoTypes
+            case .image: return VideoImporter.supportedImageTypes
+            }
+        }
+    }
+
+    struct ImageClipRequest: Identifiable {
+        let id = UUID()
+        let image: UIImage
+        let name: String
+    }
 
     private func onImport() { showingImport = true }
 
@@ -947,38 +1025,68 @@ struct ClipAssetPickerSheet: View {
         }
     }
 
+    static func canvasSize(for format: AspectRatio) -> CGSize? {
+        switch format {
+        case .portrait9_16: return CGSize(width: 1080, height: 1920)
+        case .portrait4_5: return CGSize(width: 1080, height: 1350)
+        case .portrait3_4: return CGSize(width: 1080, height: 1440)
+        case .square1_1: return CGSize(width: 1080, height: 1080)
+        case .landscape16_9: return CGSize(width: 1920, height: 1080)
+        case .original: return nil
+        }
+    }
+
+    private var projectSourceAssetIDs: Set<UUID> {
+        Set(project.sourceClips.compactMap(\.assetID))
+    }
+
     var body: some View {
         NavigationStack {
-            Group {
-                if assets.isEmpty {
-                    VStack(spacing: 16) {
-                        Image(systemName: "video.badge.plus")
-                            .font(.system(size: 44))
-                            .foregroundStyle(.secondary)
-                        Text("Nenhum vídeo na biblioteca")
-                            .font(.headline)
-                        Text("Importe um vídeo para usar como \(track.shortLabel.lowercased()).")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                        Button(action: onImport) {
-                            Label("Importar vídeo", systemImage: "plus")
+            ZStack {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        actionTiles
+                        if let message = errorMessage {
+                            Text(message)
+                                .font(.caption)
+                                .foregroundStyle(.red)
                         }
-                            .buttonStyle(.borderedProminent)
-                    }
-                    .padding()
-                } else {
-                    ScrollView {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
-                            ForEach(assets) { asset in
-                                Button {
-                                    trimRequest = AssetTrimRequest(asset: asset, track: track)
-                                } label: {
-                                    assetTile(asset)
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Vídeos do projeto e da biblioteca")
+                                .font(.subheadline.weight(.semibold))
+                            if displayAssets.isEmpty {
+                                Text("Nenhum vídeo disponível. Use as opções acima para trazer um vídeo da galeria, de arquivos, transformar uma imagem em clipe ou gravar uma vinheta.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .padding()
+                                    .frame(maxWidth: .infinity)
+                                    .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+                            } else {
+                                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
+                                    ForEach(displayAssets) { asset in
+                                        Button {
+                                            trimRequest = AssetTrimRequest(asset: asset, track: track)
+                                        } label: {
+                                            assetTile(asset)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
                                 }
-                                .buttonStyle(.plain)
                             }
                         }
-                        .padding()
+                    }
+                    .padding()
+                }
+                if let message = busyMessage {
+                    ZStack {
+                        Color.black.opacity(0.35).ignoresSafeArea()
+                        VStack(spacing: 10) {
+                            ProgressView()
+                            Text(message)
+                                .font(.caption.weight(.medium))
+                        }
+                        .padding(20)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
                     }
                 }
             }
@@ -988,11 +1096,6 @@ struct ClipAssetPickerSheet: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancelar") { dismiss() }
                 }
-                ToolbarItem(placement: .primaryAction) {
-                    Button(action: onImport) {
-                        Label("Importar", systemImage: "plus")
-                    }
-                }
             }
             .sheet(item: $trimRequest) { request in
                 AssetTrimSheet(asset: request.asset, track: request.track) { selection in
@@ -1001,9 +1104,89 @@ struct ClipAssetPickerSheet: View {
                 }
             }
             .sheet(isPresented: $showingImport) {
-                AssetImportSheet { asset in onImportAsset(asset) }
+                AssetImportSheet { asset in
+                    importedAssets.append(asset)
+                    onImportAsset(asset)
+                }
+            }
+            .sheet(item: $imageClipRequest) { request in
+                ImageClipSheet(image: request.image, name: request.name, canvasSize: canvasSize) { url in
+                    makeImageAsset(from: url, name: request.name)
+                }
+            }
+            .fullScreenCover(isPresented: $showingCamera) {
+                CameraVideoPicker { url in
+                    importRecordedVideo(url)
+                }
+            }
+            .confirmationDialog("Imagem para o clipe", isPresented: $showingImageSourceDialog) {
+                Button("Escolher na galeria") {
+                    galleryKind = .image
+                    showingGallery = true
+                }
+                Button("Escolher em arquivos") {
+                    fileImportKind = .image
+                }
+            }
+            .fileImporter(
+                isPresented: Binding(
+                    get: { fileImportKind != nil },
+                    set: { if !$0 { fileImportKind = nil } }
+                ),
+                allowedContentTypes: fileImportKind?.allowedTypes ?? VideoImporter.supportedVideoTypes,
+                allowsMultipleSelection: false
+            ) { result in
+                handleFileImport(result)
+            }
+            .photosPicker(
+                isPresented: $showingGallery,
+                selection: $gallerySelection,
+                matching: galleryKind == .video ? .videos : .images
+            )
+            .onChange(of: gallerySelection) { item in
+                guard let item = item else { return }
+                if galleryKind == .image {
+                    importGalleryImage(item)
+                } else {
+                    importGalleryVideo(item)
+                }
             }
         }
+    }
+
+    private var actionTiles: some View {
+        HStack(spacing: 10) {
+            actionTile("Galeria", icon: "photo.on.rectangle") {
+                galleryKind = .video
+                showingGallery = true
+            }
+            actionTile("Arquivos", icon: "folder") {
+                fileImportKind = .video
+            }
+            actionTile("Imagem", icon: "photo") {
+                showingImageSourceDialog = true
+            }
+            if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                actionTile("Gravar", icon: "video") {
+                    showingCamera = true
+                }
+            }
+        }
+    }
+
+    private func actionTile(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 20))
+                Text(title)
+                    .font(.caption.weight(.medium))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 14)
+            .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
     }
 
     private func assetTile(_ asset: MediaAsset) -> some View {
@@ -1023,12 +1206,278 @@ struct ClipAssetPickerSheet: View {
                     .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 4))
                     .foregroundStyle(.white)
                     .padding(6)
+                if projectSourceAssetIDs.contains(asset.id) {
+                    Text("Vídeo do projeto")
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.white.opacity(0.9), in: Capsule())
+                        .foregroundStyle(.black)
+                        .padding(6)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
             }
             .aspectRatio(16 / 9, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: 8))
             Text(asset.name)
                 .font(.caption.weight(.medium))
                 .lineLimit(1)
+        }
+    }
+
+    private func importGalleryVideo(_ item: PhotosPickerItem) {
+        Task {
+            busyMessage = "Importando…"
+            errorMessage = nil
+            defer {
+                busyMessage = nil
+                gallerySelection = nil
+            }
+            do {
+                guard let video = try await item.loadTransferable(type: GalleryVideo.self) else {
+                    errorMessage = "Não foi possível ler o vídeo selecionado."
+                    return
+                }
+                defer { try? FileManager.default.removeItem(at: video.url) }
+                let asset = try await importer.importMediaAsset(from: video.url, type: .video)
+                importedAssets.append(asset)
+                onImportAsset(asset)
+                trimRequest = AssetTrimRequest(asset: asset, track: track)
+            } catch {
+                errorMessage = "Erro ao importar vídeo da galeria: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func importGalleryImage(_ item: PhotosPickerItem) {
+        Task {
+            busyMessage = "Importando…"
+            errorMessage = nil
+            defer {
+                busyMessage = nil
+                gallerySelection = nil
+            }
+            do {
+                guard let data = try await item.loadTransferable(type: Data.self),
+                      let image = UIImage(data: data) else {
+                    errorMessage = "Não foi possível ler a imagem selecionada."
+                    return
+                }
+                imageClipRequest = ImageClipRequest(image: image, name: "Imagem da galeria")
+            } catch {
+                errorMessage = "Erro ao importar imagem: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func handleFileImport(_ result: Result<[URL], Error>) {
+        let kind = fileImportKind
+        fileImportKind = nil
+        switch result {
+        case .failure(let error):
+            errorMessage = "Erro ao importar: \(error.localizedDescription)"
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            if kind == .image {
+                guard let data = try? Data(contentsOf: url),
+                      let image = UIImage(data: data) else {
+                    errorMessage = "Não foi possível ler a imagem selecionada."
+                    return
+                }
+                imageClipRequest = ImageClipRequest(image: image, name: url.deletingPathExtension().lastPathComponent)
+            } else {
+                importFileVideo(url)
+            }
+        }
+    }
+
+    private func importFileVideo(_ url: URL) {
+        Task {
+            busyMessage = "Importando…"
+            errorMessage = nil
+            defer { busyMessage = nil }
+            do {
+                let asset = try await importer.importMediaAsset(from: url, type: .video)
+                importedAssets.append(asset)
+                onImportAsset(asset)
+                trimRequest = AssetTrimRequest(asset: asset, track: track)
+            } catch {
+                errorMessage = "Erro ao importar vídeo: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func importRecordedVideo(_ url: URL) {
+        Task {
+            busyMessage = "Importando…"
+            errorMessage = nil
+            defer { busyMessage = nil }
+            do {
+                let asset = try await importer.importMediaAsset(from: url, type: .video)
+                try? FileManager.default.removeItem(at: url)
+                importedAssets.append(asset)
+                onImportAsset(asset)
+                trimRequest = AssetTrimRequest(asset: asset, track: track)
+            } catch {
+                errorMessage = "Erro ao importar gravação: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func makeImageAsset(from url: URL, name: String) {
+        Task {
+            busyMessage = "Importando…"
+            errorMessage = nil
+            defer { busyMessage = nil }
+            do {
+                var asset = try await importer.importMediaAsset(from: url, type: .video)
+                try? FileManager.default.removeItem(at: url)
+                let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                let label = trimmed.isEmpty ? "Logo" : trimmed
+                asset.name = "Imagem • \(label)"
+                importedAssets.append(asset)
+                onImportAsset(asset)
+                onAssign(asset, ClipSelection(startTime: 0, endTime: asset.duration, narration: nil, clipVolume: 1))
+                dismiss()
+            } catch {
+                errorMessage = "Erro ao criar clipe da imagem: \(error.localizedDescription)"
+            }
+        }
+    }
+}
+
+// MARK: - Image clip sheet
+
+/// Picks a still image and a duration, then renders it into a video clip.
+struct ImageClipSheet: View {
+    let image: UIImage
+    let name: String
+    let canvasSize: CGSize
+    let onCreate: (URL) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var duration = 3.0
+    @State private var isCreating = false
+    @State private var errorMessage: String?
+
+    private let durations: [Double] = [2, 3, 5, 8]
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 18) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxHeight: 260)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .padding(.top)
+
+                Text("Duração do clipe")
+                    .font(.subheadline.weight(.semibold))
+                HStack(spacing: 8) {
+                    ForEach(durations, id: \.self) { seconds in
+                        Button {
+                            duration = seconds
+                        } label: {
+                            Text("\(Int(seconds)) s")
+                                .font(.caption.weight(.medium))
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(
+                                    duration == seconds ? Color.accentColor.opacity(0.2) : Color(uiColor: .tertiarySystemGroupedBackground),
+                                    in: Capsule()
+                                )
+                                .foregroundStyle(duration == seconds ? Color.accentColor : Color.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                if let message = errorMessage {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+                Spacer()
+            }
+            .padding(.horizontal)
+            .navigationTitle("Imagem em clipe")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancelar") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button {
+                        create()
+                    } label: {
+                        if isCreating {
+                            ProgressView()
+                        } else {
+                            Text("Criar")
+                        }
+                    }
+                    .disabled(isCreating)
+                }
+            }
+        }
+    }
+
+    private func create() {
+        isCreating = true
+        errorMessage = nil
+        Task {
+            do {
+                let url = try await ImageClipWriter.makeClip(image: image, duration: duration, canvasSize: canvasSize)
+                await MainActor.run {
+                    onCreate(url)
+                    dismiss()
+                }
+            } catch {
+                await MainActor.run {
+                    errorMessage = error.localizedDescription
+                    isCreating = false
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Camera picker
+
+/// Minimal UIImagePickerController wrapper for recording short vinheta videos.
+struct CameraVideoPicker: UIViewControllerRepresentable {
+    let onRecorded: (URL) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.mediaTypes = [UTType.movie.identifier]
+        picker.videoQuality = .typeHigh
+        picker.cameraCaptureMode = .video
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+
+    final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        let parent: CameraVideoPicker
+
+        init(_ parent: CameraVideoPicker) { self.parent = parent }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            parent.dismiss()
+        }
+
+        func imagePickerController(_ picker: UIImagePickerController,
+                                   didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            parent.dismiss()
+            guard let url = info[.mediaURL] as? URL else { return }
+            parent.onRecorded(url)
         }
     }
 }
@@ -2535,8 +2984,8 @@ class EditorViewModel: ObservableObject {
             project.seriesTitle = seriesInput
         }
         project.recapSettings = RecapSettings(enabled: plan.recap, mode: .automatic, duration: plan.recapDuration)
-        project.introTemplate = vinhetaTemplate(for: plan.introAssetID, track: .intro)
-        project.outroTemplate = vinhetaTemplate(for: plan.outroAssetID, track: .outro)
+        project.introTemplate = vinhetaTemplate(for: plan.intro, track: .intro)
+        project.outroTemplate = vinhetaTemplate(for: plan.outro, track: .outro)
         project.createSequentialEpisodes(at: cuts)
         episodes = project.episodes
         let format = request.formats.first ?? .original
@@ -2577,17 +3026,19 @@ class EditorViewModel: ObservableObject {
         Task { await persistProjectChanges() }
     }
 
-    private func vinhetaTemplate(for assetID: UUID?, track: TrackType) -> SegmentTemplate? {
-        guard let assetID = assetID,
-              let asset = mediaAssets.first(where: { $0.id == assetID && $0.type == .video }) else { return nil }
-        return SegmentTemplate(
+    private func vinhetaTemplate(for choice: VinhetaChoice?, track: TrackType) -> SegmentTemplate? {
+        guard let choice = choice,
+              let asset = mediaAssets.first(where: { $0.id == choice.assetID && $0.type == .video }) else { return nil }
+        var template = SegmentTemplate(
             name: asset.name,
             sourceType: track == .intro ? .introAsset : .outroAsset,
             assetID: asset.id,
-            startTime: 0,
-            endTime: asset.duration,
+            startTime: max(0, min(choice.start, asset.duration)),
+            endTime: max(0, min(choice.end, asset.duration)),
             targetTrack: track
         )
+        template.clipVolume = choice.clipVolume
+        return template
     }
 
     private func partCard(text: String, start: Double, duration: Double, positionY: Double = 0.15) -> TextOverlay {
@@ -2918,7 +3369,8 @@ class EditorViewModel: ObservableObject {
         _ ranges: [ClosedRange<Double>],
         captions: Bool = false,
         dynamicCaptions: Bool = false,
-        wholeClip: Bool = false
+        wholeClip: Bool = false,
+        episodeIDs: Set<UUID>? = nil
     ) {
         let merged = Self.merge(ranges)
         guard !merged.isEmpty else { return }
@@ -2930,6 +3382,7 @@ class EditorViewModel: ObservableObject {
         var changed = 0
         for index in episodes.indices {
             var episode = episodes[index]
+            if let episodeIDs = episodeIDs, !episodeIDs.contains(episode.id) { continue }
             let items = episode.storyline()
             var removedTimeline: [ClosedRange<Double>] = []
             var clips: [VideoSegment] = []
@@ -2980,6 +3433,14 @@ class EditorViewModel: ObservableObject {
             applyCaptions(cues, dynamic: captions ? dynamicCaptions : captionsAreDynamic, recordUndo: false)
         }
         Task { await persistProjectChanges() }
+    }
+
+    /// Global source-sequence ranges covered by an episode's non-freeze main clips, merged.
+    func sourceCoverage(of episode: Episode) -> [ClosedRange<Double>] {
+        let ranges = episode.mainClips
+            .filter { !$0.isFreezeFrame }
+            .map { ($0.sequenceStartTime + $0.startTime)...($0.sequenceStartTime + $0.endTime) }
+        return Self.merge(ranges)
     }
 
     static func merge(_ ranges: [ClosedRange<Double>]) -> [ClosedRange<Double>] {

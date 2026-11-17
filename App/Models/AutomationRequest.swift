@@ -162,8 +162,18 @@ struct EpisodePlanSettings: Codable, Hashable {
     var outroCard = true
     var recap = false
     var recapDuration: Double = 6
-    var introAssetID: UUID?
-    var outroAssetID: UUID?
+    var intro: VinhetaChoice?
+    var outro: VinhetaChoice?
+}
+
+/// A picked piece of a media asset used as opening/closing vinheta.
+struct VinhetaChoice: Codable, Hashable {
+    var assetID: UUID
+    var start: Double
+    var end: Double
+    var clipVolume: Float? = nil
+
+    var duration: Double { max(0, end - start) }
 }
 
 struct CaptionAutomationSettings: Codable, Hashable {

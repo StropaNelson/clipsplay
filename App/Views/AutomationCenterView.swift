@@ -13,6 +13,7 @@ struct AutomationCenterView: View {
     let onOpenTranscript: () -> Void
     let onOpenTranscriptEditor: (ProjectOperation) -> Void
     let onSeek: (Double) -> Void
+    let onImportAsset: (MediaAsset) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var operation: ProjectOperation
@@ -29,6 +30,9 @@ struct AutomationCenterView: View {
     @State private var analysisStart: Date?
     @State private var episodeCuts: [EpisodeCut] = []
     @State private var computingPlan = false
+    @State private var importedAssets: [MediaAsset] = []
+    @State private var vinhetaPickRequest: TrackType?
+    @State private var episodeThumbnails: [Int: UIImage] = [:]
 
     private let coordinator = AnalysisCoordinator.shared
     private let languages: [AutomationLanguage] = [
@@ -47,7 +51,8 @@ struct AutomationCenterView: View {
         onCreateEpisodes: @escaping ([Double], AutomationRequest) -> Void,
         onOpenTranscript: @escaping () -> Void,
         onOpenTranscriptEditor: @escaping (ProjectOperation) -> Void,
-        onSeek: @escaping (Double) -> Void
+        onSeek: @escaping (Double) -> Void,
+        onImportAsset: @escaping (MediaAsset) -> Void = { _ in }
     ) {
         let resolved = operation ?? project.operation ?? .multiply
         var initial = AutomationRequest.default(for: resolved)
@@ -60,6 +65,7 @@ struct AutomationCenterView: View {
         self.onOpenTranscript = onOpenTranscript
         self.onOpenTranscriptEditor = onOpenTranscriptEditor
         self.onSeek = onSeek
+        self.onImportAsset = onImportAsset
         _operation = State(initialValue: resolved)
         _request = State(initialValue: initial)
         _selectedKind = State(initialValue: initial.clipKinds.first ?? .clips)
@@ -71,11 +77,22 @@ struct AutomationCenterView: View {
                 VStack(spacing: 16) {
                     hero
                     configurationCard
-                    analysisCard
                     if operation == .episodes {
-                        episodePlanSection
-                    } else if let analysis = analysis {
-                        resultSection(analysis)
+                        if analysis == nil && !isAnalyzing {
+                            compactAnalysisBanner
+                        } else {
+                            analysisCard
+                        }
+                        episodeSeriesCard
+                        episodeRhythmCard
+                        episodeStructureCard
+                        episodeExtrasCard
+                        episodePreviewCard
+                    } else {
+                        analysisCard
+                        if let analysis = analysis {
+                            resultSection(analysis)
+                        }
                     }
                 }
                 .padding()
@@ -96,6 +113,31 @@ struct AutomationCenterView: View {
             .task { await loadCachedAnalysis() }
             .task(id: episodePlanKey) {
                 await computeEpisodePlan()
+            }
+            .sheet(item: $vinhetaPickRequest) { track in
+                ClipAssetPickerSheet(
+                    track: track,
+                    assets: videoAssets,
+                    project: project,
+                    canvasSize: vinhetaCanvasSize,
+                    onImportAsset: { asset in
+                        importedAssets.append(asset)
+                        onImportAsset(asset)
+                    },
+                    onAssign: { asset, selection in
+                        let choice = VinhetaChoice(
+                            assetID: asset.id,
+                            start: selection.startTime,
+                            end: selection.endTime,
+                            clipVolume: selection.clipVolume
+                        )
+                        if track == .intro {
+                            request.episodePlan.intro = choice
+                        } else {
+                            request.episodePlan.outro = choice
+                        }
+                    }
+                )
             }
             .onChange(of: operation) { newOperation in
                 let locale = request.localeIdentifier
@@ -267,8 +309,6 @@ struct AutomationCenterView: View {
                 Toggle(operation == .speechEdit ? "Cortar pausas de fala automaticamente" : "Remover pausas longas", isOn: $request.removeSilences)
                 Toggle("Remover vícios de linguagem", isOn: $request.removeFillers)
                 Toggle(operation == .speechEdit ? "Atualizar legendas do clipe" : "Legendas na saída", isOn: $request.captions.enabled)
-            } else {
-                episodeConfiguration
             }
         }
         .padding()
@@ -282,7 +322,11 @@ struct AutomationCenterView: View {
     }
 
     private var videoAssets: [MediaAsset] {
-        project.mediaAssets.filter { $0.type == .video }
+        var merged = project.mediaAssets
+        for asset in importedAssets where !merged.contains(where: { $0.id == asset.id }) {
+            merged.append(asset)
+        }
+        return merged.filter { $0.type == .video }
     }
 
     private var hasTranscriptWords: Bool {
@@ -310,30 +354,75 @@ struct AutomationCenterView: View {
         seconds < 60 ? "30 s" : "\(Int(seconds / 60)) min"
     }
 
-    private var episodeConfiguration: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            TextField("Título da série", text: $request.episodePlan.seriesTitle)
+    // MARK: - Episodes page sections
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Formato de saída")
-                    .font(.footnote.weight(.medium))
-                HStack(spacing: 8) {
-                    ForEach([AspectRatio.portrait9_16, .landscape16_9, .square1_1, .original]) { ratio in
-                        Button {
-                            request.formats = [ratio]
-                        } label: {
-                            Text(ratio.rawValue)
-                                .font(.caption.weight(.medium))
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 7)
-                                .background(request.formats.first == ratio ? Color.accentColor.opacity(0.2) : Color(uiColor: .tertiarySystemGroupedBackground), in: Capsule())
-                                .foregroundStyle(request.formats.first == ratio ? Color.accentColor : Color.secondary)
-                        }
-                        .buttonStyle(.plain)
+    private var vinhetaCanvasSize: CGSize {
+        let format = request.formats.first ?? .original
+        if let size = ClipAssetPickerSheet.canvasSize(for: format) { return size }
+        let oriented = project.sourceVideoNaturalSize.cgSize
+            .applying(project.sourceVideoTransform.cgAffineTransform)
+        var width = abs(oriented.width)
+        var height = abs(oriented.height)
+        if width <= 0 || height <= 0 {
+            width = 1920
+            height = 1080
+        }
+        let scale = min(1, 1920 / max(width, height))
+        return CGSize(
+            width: (width * scale / 2).rounded() * 2,
+            height: (height * scale / 2).rounded() * 2
+        )
+    }
+
+    private func episodeSectionCard<Content: View>(title: String, hint: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: icon)
+                .font(.headline)
+            Text(hint)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            content()
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private var episodeSeriesCard: some View {
+        episodeSectionCard(title: "Série", hint: "Nome da série e formato de cada episódio.", icon: "rectangle.stack") {
+            TextField("Título da série", text: $request.episodePlan.seriesTitle)
+                .textFieldStyle(.roundedBorder)
+
+            HStack(spacing: 8) {
+                ForEach([AspectRatio.portrait9_16, .landscape16_9, .square1_1, .original]) { ratio in
+                    Button {
+                        request.formats = [ratio]
+                    } label: {
+                        Label(ratio.rawValue, systemImage: episodeFormatIcon(ratio))
+                            .font(.caption.weight(.medium))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .background(request.formats.first == ratio ? Color.accentColor.opacity(0.2) : Color(uiColor: .tertiarySystemGroupedBackground), in: Capsule())
+                            .foregroundStyle(request.formats.first == ratio ? Color.accentColor : Color.secondary)
                     }
+                    .buttonStyle(.plain)
                 }
             }
+        }
+    }
 
+    private func episodeFormatIcon(_ ratio: AspectRatio) -> String {
+        switch ratio {
+        case .portrait9_16: return "rectangle.portrait"
+        case .landscape16_9: return "rectangle"
+        case .square1_1: return "square"
+        case .original: return "film"
+        default: return "rectangle"
+        }
+    }
+
+    private var episodeRhythmCard: some View {
+        episodeSectionCard(title: "Ritmo", hint: "Quanto dura cada parte; os cortes caem perto de pausas naturais.", icon: "metronome") {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Duração por episódio")
                     .font(.footnote.weight(.medium))
@@ -342,31 +431,33 @@ struct AutomationCenterView: View {
                     format: request.formats.first ?? .original,
                     sourceIsPortrait: sourceIsPortrait
                 )
-                HStack(spacing: 8) {
-                    ForEach([30.0, 60, 120, 180, 300, 600], id: \.self) { length in
-                        Button {
-                            request.episodePlan.targetLength = length
-                        } label: {
-                            VStack(spacing: 2) {
-                                Text(durationChipLabel(length))
-                                    .font(.caption.weight(.medium))
-                                if abs(length - suggested) < 0.5 {
-                                    Text("Sugerido")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach([30.0, 60, 120, 180, 300, 600], id: \.self) { length in
+                            Button {
+                                request.episodePlan.targetLength = length
+                            } label: {
+                                VStack(spacing: 2) {
+                                    Text(durationChipLabel(length))
+                                        .font(.caption.weight(.medium))
+                                    if abs(length - suggested) < 0.5 {
+                                        Text("Sugerido")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .background(
+                                    request.episodePlan.targetLength == length || (request.episodePlan.targetLength == 0 && abs(length - suggested) < 0.5)
+                                        ? Color.accentColor.opacity(0.2)
+                                        : Color(uiColor: .tertiarySystemGroupedBackground),
+                                    in: Capsule()
+                                )
+                                .foregroundStyle(request.episodePlan.targetLength == length ? Color.accentColor : Color.secondary)
                             }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 7)
-                            .background(
-                                request.episodePlan.targetLength == length || (request.episodePlan.targetLength == 0 && abs(length - suggested) < 0.5)
-                                    ? Color.accentColor.opacity(0.2)
-                                    : Color(uiColor: .tertiarySystemGroupedBackground),
-                                in: Capsule()
-                            )
-                            .foregroundStyle(request.episodePlan.targetLength == length ? Color.accentColor : Color.secondary)
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
             }
@@ -388,39 +479,172 @@ struct AutomationCenterView: View {
             Text("Duração total \(clock(project.sequenceSourceDuration)) → \(plannedEpisodeCount) episódios de ~\(clock(project.sequenceSourceDuration / Double(max(1, plannedEpisodeCount))))")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
 
-            Toggle("Cartão de abertura (Parte N de M)", isOn: $request.episodePlan.introCard)
+    private var episodeStructureCard: some View {
+        episodeSectionCard(title: "Estrutura de cada episódio", hint: "Toque nos espaços para escolher as vinhetas de abertura e encerramento.", icon: "rectangle.split.3x1") {
+            episodeDiagram
 
-            Picker("Vinheta de abertura", selection: $request.episodePlan.introAssetID) {
-                Text("Nenhuma").tag(UUID?.none)
-                ForEach(videoAssets) { asset in
-                    Text(asset.name).tag(UUID?.some(asset.id))
+            HStack(spacing: 10) {
+                vinhetaSlotTile(track: .intro, title: "Abertura", choice: request.episodePlan.intro)
+                vinhetaSlotTile(track: .outro, title: "Encerramento", choice: request.episodePlan.outro)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Cartão \"Parte N de M\"", isOn: $request.episodePlan.introCard)
+                if request.episodePlan.introCard {
+                    cardMock(text: "\(seriesCardTitle)\nParte 1 de \(plannedEpisodeCount)")
+                }
+                Toggle("Cartão \"Continua na Parte N+1\"", isOn: $request.episodePlan.outroCard)
+                if request.episodePlan.outroCard {
+                    cardMock(text: "Continua na Parte 2")
+                }
+                Toggle("Anteriormente (resumo do episódio anterior)", isOn: $request.episodePlan.recap)
+                if request.episodePlan.recap {
+                    Picker("Duração do resumo", selection: $request.episodePlan.recapDuration) {
+                        ForEach([4.0, 6, 8, 10], id: \.self) { seconds in
+                            Text("\(Int(seconds)) s").tag(seconds)
+                        }
+                    }
+                    .pickerStyle(.segmented)
                 }
             }
-            .disabled(videoAssets.isEmpty)
+        }
+    }
 
-            Toggle("Anteriormente (resumo do episódio anterior)", isOn: $request.episodePlan.recap)
-            if request.episodePlan.recap {
-                Picker("Duração do resumo", selection: $request.episodePlan.recapDuration) {
-                    ForEach([4.0, 6, 8, 10], id: \.self) { seconds in
-                        Text("\(Int(seconds)) s").tag(seconds)
+    private var seriesCardTitle: String {
+        let title = request.episodePlan.seriesTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? project.name : title
+    }
+
+    private func cardMock(text: String) -> some View {
+        Text(text)
+            .font(.caption.weight(.semibold))
+            .multilineTextAlignment(.center)
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 14)
+            .background(Color.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var episodeDiagram: some View {
+        let introLength = request.episodePlan.intro?.duration ?? 0
+        let outroLength = request.episodePlan.outro?.duration ?? 0
+        let recapLength = request.episodePlan.recap ? request.episodePlan.recapDuration : 0
+        let contentLength = episodeTargetLength
+        let weights: [(String, Double, Bool)] = [
+            ("Abertura", max(introLength, 0.5), introLength > 0),
+            ("Anteriormente", max(recapLength, 0.5), recapLength > 0),
+            ("Conteúdo", contentLength, true),
+            ("Encerramento", max(outroLength, 0.5), outroLength > 0)
+        ]
+        let totalWeight = weights.reduce(0.0) { $0 + $1.1 }
+        return GeometryReader { geo in
+            HStack(spacing: 4) {
+                ForEach(weights.indices, id: \.self) { index in
+                    let item = weights[index]
+                    let pickTrack: TrackType? = index == 0 ? .intro : (index == 3 ? .outro : nil)
+                    VStack(spacing: 2) {
+                        Text(item.0)
+                            .font(.caption2.weight(.medium))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.6)
+                        Text(item.0 == "Conteúdo" ? "~\(clock(contentLength))" : (item.2 ? "\(Int(item.1)) s" : "—"))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(width: max(56, geo.size.width * CGFloat(item.1 / totalWeight) - 4))
+                    .padding(.vertical, 8)
+                    .background(
+                        item.2 ? Color.accentColor.opacity(0.15) : Color(uiColor: .tertiarySystemGroupedBackground),
+                        in: RoundedRectangle(cornerRadius: 8)
+                    )
+                    .overlay {
+                        if !item.2 {
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(style: StrokeStyle(lineWidth: 1, dash: [4]))
+                                .foregroundStyle(Color.secondary.opacity(0.6))
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        if let pickTrack = pickTrack {
+                            vinhetaPickRequest = pickTrack
+                        }
                     }
                 }
-                .pickerStyle(.segmented)
             }
+        }
+        .frame(height: 52)
+    }
 
-            Toggle("Cartão de fechamento (Continua na Parte N)", isOn: $request.episodePlan.outroCard)
-
-            Picker("Vinheta de encerramento", selection: $request.episodePlan.outroAssetID) {
-                Text("Nenhuma").tag(UUID?.none)
-                ForEach(videoAssets) { asset in
-                    Text(asset.name).tag(UUID?.some(asset.id))
+    private func vinhetaSlotTile(track: TrackType, title: String, choice: VinhetaChoice?) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.footnote.weight(.semibold))
+            if let choice = choice,
+               let asset = videoAssets.first(where: { $0.id == choice.assetID }) {
+                ZStack(alignment: .bottomTrailing) {
+                    if let thumbnail = asset.thumbnailFileURL,
+                       let image = UIImage(contentsOfFile: thumbnail.path) {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        Color.black
+                    }
                 }
+                .aspectRatio(16 / 9, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                Text(asset.name)
+                    .font(.caption.weight(.medium))
+                    .lineLimit(1)
+                Text("\(clock(choice.start))–\(clock(choice.end)) · \(String(format: "%.1f", choice.duration)) s")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("Trocar") { vinhetaPickRequest = track }
+                        .font(.caption)
+                    Spacer()
+                    Button("Remover") {
+                        if track == .intro {
+                            request.episodePlan.intro = nil
+                        } else {
+                            request.episodePlan.outro = nil
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                }
+            } else {
+                Button {
+                    vinhetaPickRequest = track
+                } label: {
+                    VStack(spacing: 6) {
+                        Image(systemName: "plus")
+                            .font(.title3)
+                        Text("Adicionar")
+                            .font(.caption)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 26)
+                    .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(style: StrokeStyle(lineWidth: 1, dash: [4]))
+                            .foregroundStyle(Color.secondary.opacity(0.6))
+                    }
+                }
+                .buttonStyle(.plain)
             }
-            .disabled(videoAssets.isEmpty)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 
+    private var episodeExtrasCard: some View {
+        episodeSectionCard(title: "Extras", hint: "Capas e legendas aplicadas a todos os episódios.", icon: "sparkles") {
             Toggle("Gerar capas dos episódios", isOn: $request.generateCovers)
-
             Toggle("Legendas nos episódios", isOn: $request.captions.enabled)
                 .disabled(!hasTranscriptWords)
             if !hasTranscriptWords {
@@ -429,6 +653,134 @@ struct AutomationCenterView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var compactAnalysisBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "wand.and.stars")
+                .foregroundStyle(.secondary)
+            Text("Opcional: analise o vídeo para cortar em fim de frase")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("Analisar") { startAnalysis() }
+                .font(.caption.weight(.semibold))
+        }
+        .padding()
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private var episodePreviewCard: some View {
+        episodeSectionCard(title: "Prévia da série", hint: "Toque em uma parte para pular para ela no vídeo.", icon: "film.stack") {
+            if computingPlan {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                    Text("Calculando pontos de corte…")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                let parts = episodeParts()
+                seriesBar(parts: parts)
+                    .frame(height: 14)
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(parts.indices, id: \.self) { index in
+                            episodeCard(part: parts[index], index: index)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func seriesBar(parts: [(Double, Double, String)]) -> some View {
+        let total = max(0.001, project.sequenceSourceDuration)
+        return GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.accentColor.opacity(0.2))
+                ForEach(episodeCuts, id: \.time) { cut in
+                    Rectangle()
+                        .fill(Color.accentColor)
+                        .frame(width: 2)
+                        .offset(x: geo.size.width * CGFloat(cut.time / total) - 1)
+                }
+            }
+        }
+    }
+
+    private func episodeCard(part: (Double, Double, String), index: Int) -> some View {
+        Button {
+            onSeek(part.0)
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                ZStack {
+                    Color.black
+                    if let image = episodeThumbnails[index] {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                    }
+                }
+                .frame(width: 132, height: 74)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                Text("Parte \(index + 1)")
+                    .font(.caption.weight(.semibold))
+                Text("\(clock(part.0))–\(clock(part.1))")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Text("Total ~\(clock(episodeDisplayDuration(part: part, index: index)))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text(part.2)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(width: 132, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Episode length on screen: content + chosen vinhetas + recap (skipped on part 1).
+    private func episodeDisplayDuration(part: (Double, Double, String), index: Int) -> Double {
+        var total = part.1 - part.0
+        total += request.episodePlan.intro?.duration ?? 0
+        total += request.episodePlan.outro?.duration ?? 0
+        if request.episodePlan.recap, index > 0 {
+            total += request.episodePlan.recapDuration
+        }
+        return total
+    }
+
+    private func generateEpisodeThumbnails(parts: [(Double, Double, String)]) async {
+        var jobs: [(Int, URL, Double)] = []
+        for (index, part) in parts.enumerated() {
+            if let location = project.sourceLocation(at: part.0 + 0.05) {
+                jobs.append((index, location.url, location.time))
+            }
+        }
+        let images = await Task.detached(priority: .utility) { () -> [Int: UIImage] in
+            var images: [Int: UIImage] = [:]
+            for (index, url, time) in jobs {
+                guard !Task.isCancelled else { break }
+                let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+                generator.appliesPreferredTrackTransform = true
+                generator.maximumSize = CGSize(width: 320, height: 320)
+                if let cgImage = try? generator.copyCGImage(
+                    at: CMTime(seconds: time, preferredTimescale: 600),
+                    actualTime: nil
+                ) {
+                    images[index] = UIImage(cgImage: cgImage)
+                }
+            }
+            return images
+        }.value
+        guard !Task.isCancelled else { return }
+        episodeThumbnails = images
     }
 
     private var analysisCard: some View {
@@ -575,43 +927,6 @@ struct AutomationCenterView: View {
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
     }
 
-    private var episodePlanSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label("Plano dos episódios", systemImage: "rectangle.split.3x1")
-                .font(.headline)
-
-            if computingPlan {
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .scaleEffect(0.8)
-                    Text("Calculando pontos de corte…")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            } else {
-                let parts = episodeParts()
-                ForEach(parts.indices, id: \.self) { index in
-                    Button { onSeek(parts[index].0) } label: {
-                        HStack {
-                            Text("Parte \(index + 1)")
-                                .font(.footnote.weight(.semibold))
-                            Text("\(clock(parts[index].0))–\(clock(parts[index].1))")
-                                .font(.footnote.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Text(parts[index].2)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-        .padding()
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
-    }
-
     /// (start, end, label of the cut that ends the part) for the current plan.
     private func episodeParts() -> [(Double, Double, String)] {
         let total = project.sequenceSourceDuration
@@ -650,6 +965,7 @@ struct AutomationCenterView: View {
             quietPoints: quietPoints,
             hardBoundaries: hardBoundaries
         )
+        await generateEpisodeThumbnails(parts: episodeParts())
     }
 
     private var actionBar: some View {

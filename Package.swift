@@ -27,7 +27,8 @@ let package = Package(
             ],
             capabilities: [
                 .fileAccess(.userSelectedFiles, mode: .readWrite),
-                .microphone(purposeString: "O ClipStudio usa o microfone para gravar narrações dos seus vídeos.")
+                .microphone(purposeString: "O ClipStudio usa o microfone para gravar narrações dos seus vídeos."),
+                .camera(purposeString: "O ClipStudio usa a câmera para gravar aberturas e encerramentos.")
             ],
             additionalInfoPlistContentFilePath: "Info.plist"
         )
