@@ -25,9 +25,15 @@ struct Project: Codable, Identifiable {
     var recapSettings: RecapSettings
     var coverSettings: CoverSettings
     var transcriptSRT: String?
-    /// Word timings of the transcript, against the source video.
+    /// Word timings of the transcript, against the source video sequence.
     var transcriptWords: [TranscriptWord]?
+    /// Source-sequence duration known to be covered by the saved transcript.
+    /// nil means legacy data, which is only trusted for single-video projects.
+    var transcriptSequenceDuration: Double?
     var sceneCuts: [Double]?
+    /// Original source clips concatenated for analysis/transcription. Each clip keeps
+    /// its own source range plus the offset where it starts in the sequence.
+    var storedSourceClips: [VideoSegment]?
     var storedGlobalOverlays: [TextOverlay]?
     var storedGlobalAudioClips: [AudioClip]?
     /// Reusable text style templates ("identidade") saved by the user.
@@ -65,10 +71,133 @@ struct Project: Codable, Identifiable {
         self.outroTemplate = nil
         self.recapSettings = RecapSettings()
         self.coverSettings = CoverSettings()
+        self.storedSourceClips = nil
     }
     
     var sourceVideoFileURL: URL {
         StoredFileLocator.resolve(sourceVideoURL)
+    }
+
+    /// Media used as the source for analysis/transcription. A single-video project
+    /// falls back to the recorded source; multi-video imports store all parts here.
+    var sourceClips: [VideoSegment] {
+        get {
+            if let clips = storedSourceClips, !clips.isEmpty { return clips }
+            let episodeClips = episodes.first?.mainClips ?? []
+            guard episodeClips.contains(where: { $0.sourceType == .clipAsset || $0.sequenceStartTime > 0.001 }) else {
+                return [VideoSegment(
+                    startTime: 0,
+                    endTime: sourceVideoDuration,
+                    sourceType: .mainVideo,
+                    sequenceStart: 0
+                )]
+            }
+
+            var result = [VideoSegment(
+                startTime: 0,
+                endTime: sourceVideoDuration,
+                sourceType: .mainVideo,
+                sequenceStart: 0
+            )]
+            var cursor = sourceVideoDuration
+            var seenAssets: Set<UUID> = []
+            for clip in episodeClips where clip.sourceType == .clipAsset {
+                guard let assetID = clip.assetID, !seenAssets.contains(assetID) else { continue }
+                seenAssets.insert(assetID)
+                let assetDuration = mediaAssets.first { $0.id == assetID }?.duration ?? clip.endTime
+                let base = clip.sequenceStartTime > 0.001 ? clip.sequenceStartTime : cursor
+                result.append(VideoSegment(
+                    startTime: 0,
+                    endTime: assetDuration,
+                    sourceType: .clipAsset,
+                    assetID: assetID,
+                    sequenceStart: base
+                ))
+                cursor = max(cursor, base + assetDuration)
+            }
+            return result.count > 1 ? result : [VideoSegment(
+                startTime: 0,
+                endTime: sourceVideoDuration,
+                sourceType: .mainVideo,
+                sequenceStart: 0
+            )]
+        }
+        set { storedSourceClips = newValue.isEmpty ? nil : newValue }
+    }
+
+    var sequenceSourceDuration: Double {
+        max(sourceVideoDuration, sourceClips.map(\.sequenceEndTime).max() ?? 0)
+    }
+
+    func sourceURL(for clip: VideoSegment) -> URL? {
+        if clip.sourceType == .mainVideo { return sourceVideoFileURL }
+        guard let assetID = clip.assetID else { return nil }
+        return mediaAssets.first { $0.id == assetID }?.url
+    }
+
+    func sourceLocation(at sequenceTime: Double) -> (url: URL, time: Double)? {
+        guard let clip = sourceClips.first(where: {
+            sequenceTime >= $0.sequenceStartTime + $0.startTime && sequenceTime < $0.sequenceStartTime + $0.endTime
+        }) ?? sourceClips.last,
+              let url = sourceURL(for: clip) else { return nil }
+        let local = min(clip.endTime, max(clip.startTime, sequenceTime - clip.sequenceStartTime))
+        return (url, local)
+    }
+
+    var transcriptionSources: [TranscriptionSource] {
+        sourceClips.compactMap { clip in
+            guard let url = sourceURL(for: clip) else { return nil }
+            return TranscriptionSource(
+                name: url.lastPathComponent,
+                url: url,
+                offset: clip.sequenceStartTime,
+                startTime: clip.startTime,
+                endTime: clip.endTime
+            )
+        }
+    }
+
+    /// Returns the offset where this asset starts in the transcript sequence, adding
+    /// it to the source list when a library clip is used as main content.
+    mutating func registerSourceClip(for asset: MediaAsset) -> Double {
+        if asset.url.path == sourceVideoFileURL.path { return 0 }
+        if let existing = sourceClips.first(where: { $0.assetID == asset.id }) {
+            return existing.sequenceStartTime
+        }
+        let offset = sequenceSourceDuration
+        var clips = sourceClips
+        clips.append(VideoSegment(
+            startTime: 0,
+            endTime: asset.duration,
+            sourceType: .clipAsset,
+            assetID: asset.id,
+            sequenceStart: offset
+        ))
+        sourceClips = clips
+        return offset
+    }
+
+    /// Converts a range in the concatenated source sequence into playable timeline clips.
+    func sourceSegments(in range: ClosedRange<Double>) -> [VideoSegment] {
+        sourceClips.compactMap { source in
+            let sourceOffset = source.sequenceStartTime
+            let clipSequenceStart = sourceOffset + source.startTime
+            let clipSequenceEnd = sourceOffset + source.endTime
+            guard range.upperBound > clipSequenceStart, range.lowerBound < clipSequenceEnd else { return nil }
+            let localStart = max(source.startTime, range.lowerBound - sourceOffset)
+            let localEnd = min(source.endTime, range.upperBound - sourceOffset)
+            guard localEnd - localStart > 0.05 else { return nil }
+            var piece = VideoSegment(
+                startTime: localStart,
+                endTime: localEnd,
+                sourceType: source.sourceType,
+                assetID: source.assetID,
+                sequenceStart: sourceOffset
+            )
+            piece.clipTransform = source.clipTransform
+            piece.adjustments = source.adjustments
+            return piece
+        }
     }
     
     mutating func updateTimestamp() {
@@ -76,25 +205,27 @@ struct Project: Codable, Identifiable {
     }
     
     mutating func regenerateEpisodes() {
+        let sequenceDuration = sequenceSourceDuration
         if operation == .speechEdit {
             var episode = Episode(
                 index: 0,
                 mainStart: 0,
-                mainEnd: sourceVideoDuration,
+                mainEnd: sequenceDuration,
                 introTemplate: introTemplate,
                 outroTemplate: outroTemplate,
                 recapSettings: recapSettings
             )
             episode.displayTitle = "Clipe inteiro"
+            episode.mainClips = sourceSegments(in: 0...sequenceDuration)
             episodes = [episode]
             updateTimestamp()
             return
         }
-        let count = Int(ceil(sourceVideoDuration / episodeLength))
+        let count = Int(ceil(sequenceDuration / episodeLength))
         episodes = (0..<count).map { index in
             let start = Double(index) * episodeLength
-            let end = min(sourceVideoDuration, start + episodeLength)
-            return Episode(
+            let end = min(sequenceDuration, start + episodeLength)
+            var episode = Episode(
                 index: index,
                 mainStart: start,
                 mainEnd: end,
@@ -102,6 +233,11 @@ struct Project: Codable, Identifiable {
                 outroTemplate: outroTemplate,
                 recapSettings: recapSettings
             )
+            episode.mainClips = sourceSegments(in: start...end)
+            if let recap = episode.recapSegments.first, recap.sourceType == .mainVideo {
+                episode.recapSegments = sourceSegments(in: recap.startTime...recap.endTime)
+            }
+            return episode
         }
         updateTimestamp()
     }
@@ -112,9 +248,10 @@ struct Project: Codable, Identifiable {
     @discardableResult
     mutating func createEpisodes(at boundaries: [Double]) -> Int {
         let minimum = 5.0
+        let sequenceDuration = sequenceSourceDuration
         var cuts = boundaries
             .sorted()
-            .filter { $0 > minimum && $0 < sourceVideoDuration - minimum }
+            .filter { $0 > minimum && $0 < sequenceDuration - minimum }
         var merged: [Double] = []
         for cut in cuts {
             if let last = merged.last, cut - last < minimum { continue }
@@ -128,9 +265,9 @@ struct Project: Codable, Identifiable {
             ranges.append((cursor, cut))
             cursor = cut
         }
-        ranges.append((cursor, sourceVideoDuration))
+        ranges.append((cursor, sequenceDuration))
         episodes = ranges.enumerated().map { index, range in
-            Episode(
+            var episode = Episode(
                 index: index,
                 mainStart: range.0,
                 mainEnd: range.1,
@@ -138,6 +275,11 @@ struct Project: Codable, Identifiable {
                 outroTemplate: outroTemplate,
                 recapSettings: recapSettings
             )
+            episode.mainClips = sourceSegments(in: range.0...range.1)
+            if let recap = episode.recapSegments.first, recap.sourceType == .mainVideo {
+                episode.recapSegments = sourceSegments(in: recap.startTime...recap.endTime)
+            }
+            return episode
         }
         updateTimestamp()
         return cuts.count
@@ -330,6 +472,9 @@ struct VideoSegment: Codable, Identifiable, Hashable {
     var transformOffsetX: Double?
     var transformOffsetY: Double?
     var adjustments: ClipAdjustments?
+    /// Offset of this clip's source inside the concatenated project source sequence.
+    /// nil means the primary video, which starts at zero.
+    var sequenceStart: Double?
     
     init(
         id: UUID = UUID(),
@@ -342,7 +487,8 @@ struct VideoSegment: Codable, Identifiable, Hashable {
         timelineStartTime: Double? = nil,
         transitionStyle: TransitionStyle? = nil,
         narrationAssetID: UUID? = nil,
-        volume: Float? = nil
+        volume: Float? = nil,
+        sequenceStart: Double? = nil
     ) {
         self.id = id
         self.startTime = startTime
@@ -355,6 +501,7 @@ struct VideoSegment: Codable, Identifiable, Hashable {
         self.transitionStyle = transitionStyle
         self.narrationAssetID = narrationAssetID
         self.volume = volume
+        self.sequenceStart = sequenceStart
     }
     
     var duration: Double { max(0, endTime - startTime) }

@@ -133,27 +133,28 @@ actor TimelineEngine {
     func validateTimeline(_ episode: Episode, project: Project) -> [ValidationIssue] {
         var issues: [ValidationIssue] = []
         
+        let sourceLimit = project.sequenceSourceDuration
         if let intro = episode.effectiveIntro {
             if intro.duration <= 0 { issues.append(.zeroDuration(track: .intro)) }
-            if intro.endTime > project.sourceVideoDuration && intro.sourceType == .mainVideo {
-                issues.append(.outOfBounds(track: .intro, max: project.sourceVideoDuration))
+            if intro.endTime > sourceLimit && intro.sourceType == .mainVideo {
+                issues.append(.outOfBounds(track: .intro, max: sourceLimit))
             }
         }
         
         for recap in episode.effectiveRecaps {
             if recap.duration <= 0 { issues.append(.zeroDuration(track: .recap)) }
-            if recap.endTime > project.sourceVideoDuration && recap.sourceType == .mainVideo {
-                issues.append(.outOfBounds(track: .recap, max: project.sourceVideoDuration))
+            if recap.endTime > sourceLimit && recap.sourceType == .mainVideo {
+                issues.append(.outOfBounds(track: .recap, max: sourceLimit))
             }
         }
         
         if episode.mainDuration <= 0 { issues.append(.zeroDuration(track: .main)) }
-        if episode.mainEnd > project.sourceVideoDuration { issues.append(.outOfBounds(track: .main, max: project.sourceVideoDuration)) }
+        if episode.mainEnd > sourceLimit { issues.append(.outOfBounds(track: .main, max: sourceLimit)) }
         
         if let outro = episode.effectiveOutro {
             if outro.duration <= 0 { issues.append(.zeroDuration(track: .outro)) }
-            if outro.endTime > project.sourceVideoDuration && outro.sourceType == .mainVideo {
-                issues.append(.outOfBounds(track: .outro, max: project.sourceVideoDuration))
+            if outro.endTime > sourceLimit && outro.sourceType == .mainVideo {
+                issues.append(.outOfBounds(track: .outro, max: sourceLimit))
             }
         }
         

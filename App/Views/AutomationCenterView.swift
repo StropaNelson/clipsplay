@@ -340,9 +340,11 @@ struct AutomationCenterView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 ForEach(suggestions) { suggestion in
+                    let frame = project.sourceLocation(at: (suggestion.start + suggestion.end) / 2)
                     OutputCandidateCard(
                         suggestion: suggestion,
-                        sourceURL: project.sourceVideoFileURL,
+                        sourceURL: frame?.url ?? project.sourceVideoFileURL,
+                        sourceTime: frame?.time ?? (suggestion.start + suggestion.end) / 2,
                         selected: selectedSuggestions.contains(suggestion.id),
                         onToggle: { toggleSuggestion(suggestion.id) },
                         onSeek: { onSeek(suggestion.start) }
@@ -580,6 +582,7 @@ struct AutomationCenterView: View {
 private struct OutputCandidateCard: View {
     let suggestion: ClipSuggestion
     let sourceURL: URL
+    let sourceTime: Double
     let selected: Bool
     let onToggle: () -> Void
     let onSeek: () -> Void
@@ -593,7 +596,7 @@ private struct OutputCandidateCard: View {
             }
             .buttonStyle(.plain)
 
-            SourceFrameView(sourceURL: sourceURL, time: (suggestion.start + suggestion.end) / 2)
+            SourceFrameView(sourceURL: sourceURL, time: sourceTime)
                 .frame(width: 96, height: 56)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
 

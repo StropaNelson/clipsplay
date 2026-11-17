@@ -10,6 +10,7 @@ actor VisualAnalysisService {
 
     func detectSceneCuts(
         in videoURL: URL,
+        startTime: Double = 0,
         duration: Double,
         sampleInterval: Double = 1.5
     ) async -> [Double] {
@@ -22,6 +23,7 @@ actor VisualAnalysisService {
             generator.requestedTimeToleranceAfter = CMTime(seconds: 0.25, preferredTimescale: 600)
 
             let safeDuration = max(0, duration)
+            let safeStart = max(0, startTime)
             guard safeDuration > 2 else { return [Double]() }
             let interval = max(0.75, sampleInterval)
             let count = min(600, max(2, Int(ceil(safeDuration / interval))))
@@ -29,7 +31,7 @@ actor VisualAnalysisService {
             var times: [Double] = []
 
             for index in 0..<count {
-                let time = min(safeDuration - 0.05, Double(index) * safeDuration / Double(max(1, count - 1)))
+                let time = safeStart + min(safeDuration - 0.05, Double(index) * safeDuration / Double(max(1, count - 1)))
                 guard time >= 0 else { continue }
                 autoreleasepool {
                     if let image = try? generator.copyCGImage(

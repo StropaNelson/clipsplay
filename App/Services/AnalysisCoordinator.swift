@@ -71,34 +71,62 @@ actor AnalysisCoordinator {
         let cached = matchingStored
 
         var warnings: [String] = []
-        let discardProjectTranscript = sourceChanged || staleLocale
+        let sourceDuration = project.sequenceSourceDuration
+        let sourceClips = project.sourceClips
+        let transcriptCoversSequence = project.transcriptSequenceDuration.map {
+            abs($0 - sourceDuration) < 0.5
+        } ?? (sourceClips.count <= 1)
+        let discardProjectTranscript = sourceChanged || staleLocale || !transcriptCoversSequence
+        if !transcriptCoversSequence, project.transcriptSRT != nil || project.transcriptWords != nil {
+            warnings.append("A transcrição salva cobria outra sequência de vídeos e não foi reutilizada.")
+        }
         var transcriptSRT = discardProjectTranscript ? nil : project.transcriptSRT
         var words = discardProjectTranscript ? [] : (project.transcriptWords ?? [])
         var transcriptionWasGenerated = false
         let transcriptionLocale = cached?.transcriptionLocale
         let cachedSceneCuts = cached?.sceneCuts ?? []
+        let transcriptionSources = project.transcriptionSources
 
         progress(AnalysisProgress(stage: .preparing, message: "Verificando vídeo e índice anterior…", fraction: 0.05))
 
-        if words.isEmpty,
-           let srt = transcriptSRT,
+        if transcriptionSources.count < sourceClips.count {
+            warnings.append("Alguns clipes da sequência não foram encontrados e ficaram fora da análise.")
+        }
+        if transcriptionSources.isEmpty {
+            warnings.append("Nenhum clipe da sequência está disponível para transcrição.")
+        }
+
+        if let srt = transcriptSRT,
            let cues = try? SubtitleFile.parse(srt) {
-            words = cues.flatMap { $0.words.isEmpty ? TranscriptWord.spread($0.text, from: $0.startTime, to: $0.endTime) : $0.words }
+            let cueWords = cues.flatMap {
+                $0.words.isEmpty ? TranscriptWord.spread($0.text, from: $0.startTime, to: $0.endTime) : $0.words
+            }
+            let cueText = Self.normalized(cues.map(\.text).joined(separator: " "))
+            let storedText = Self.normalized(words.map(\.text).joined(separator: " "))
+            if words.isEmpty || storedText != cueText {
+                words = cueWords
+            }
         }
 
         if words.isEmpty {
-            progress(AnalysisProgress(stage: .transcribing, message: "Transcrevendo no dispositivo…", fraction: 0.15))
+            progress(AnalysisProgress(
+                stage: .transcribing,
+                message: transcriptionSources.count > 1 ? "Transcrevendo \(transcriptionSources.count) vídeos no dispositivo…" : "Transcrevendo no dispositivo…",
+                fraction: 0.15
+            ))
             do {
-                let cues = try await transcription.transcribeVideo(
-                    at: project.sourceVideoFileURL,
+                let result = try await transcription.transcribeVideoSequence(
+                    transcriptionSources,
                     localeIdentifier: request.localeIdentifier,
                     allowServer: request.allowServerTranscription
                 )
+                let cues = result.cues
                 transcriptSRT = SubtitleFile.srt(from: cues)
                 words = cues.flatMap(\.words)
                 if words.isEmpty {
                     words = cues.flatMap { TranscriptWord.spread($0.text, from: $0.startTime, to: $0.endTime) }
                 }
+                warnings.append(contentsOf: result.skippedClips.map { "Transcrição pulada em \($0)" })
                 transcriptionWasGenerated = true
             } catch {
                 transcriptSRT = discardProjectTranscript ? nil : project.transcriptSRT
@@ -115,10 +143,17 @@ actor AnalysisCoordinator {
         var sceneCuts = sourceChanged ? [] : (project.sceneCuts ?? cachedSceneCuts)
         if request.analyzeScenes && sceneCuts.isEmpty {
             progress(AnalysisProgress(stage: .detectingScenes, message: "Detectando cortes visuais…", fraction: 0.55))
-            sceneCuts = await visualAnalysis.detectSceneCuts(
-                in: project.sourceVideoFileURL,
-                duration: project.sourceVideoDuration
-            )
+            var detected: [Double] = []
+            for clip in sourceClips {
+                guard let url = project.sourceURL(for: clip) else { continue }
+                let cuts = await visualAnalysis.detectSceneCuts(
+                    in: url,
+                    startTime: clip.startTime,
+                    duration: clip.duration
+                )
+                detected.append(contentsOf: cuts.map { clip.sequenceStartTime + $0 })
+            }
+            sceneCuts = detected.sorted()
             if sceneCuts.isEmpty {
                 warnings.append("Nenhum corte visual forte foi encontrado.")
             }
@@ -128,10 +163,10 @@ actor AnalysisCoordinator {
 
         progress(AnalysisProgress(stage: .indexing, message: "Detectando pausas, vícios e assuntos…", fraction: 0.82))
 
-        let silences = Self.silenceRanges(words: words, duration: project.sourceVideoDuration)
+        let silences = Self.silenceRanges(words: words, duration: sourceDuration)
         let fillers = Self.fillerMatches(words: words)
         let topics = Self.topicBoundaries(words: words, sceneCuts: sceneCuts)
-        let stats = Self.audioStats(words: words, silences: silences, fillers: fillers, duration: project.sourceVideoDuration)
+        let stats = Self.audioStats(words: words, silences: silences, fillers: fillers, duration: sourceDuration)
 
         var resolvedTranscriptionLocale: String? = nil
         if transcriptSRT != nil {
@@ -145,7 +180,7 @@ actor AnalysisCoordinator {
         var analysis = ContentAnalysis(
             projectID: project.id,
             sourceSignature: signature,
-            duration: project.sourceVideoDuration,
+            duration: sourceDuration,
             transcriptSRT: transcriptSRT,
             transcriptWords: words,
             sceneCuts: sceneCuts,
@@ -172,6 +207,11 @@ actor AnalysisCoordinator {
     private func reusable(_ analysis: ContentAnalysis, for project: Project) -> Bool {
         if analysis.transcriptWords.isEmpty,
            analysis.warnings.contains(where: { $0.hasPrefix("Transcrição indisponível") }) { return false }
+        if let savedDuration = project.transcriptSequenceDuration,
+           abs(savedDuration - analysis.duration) > 0.5 { return false }
+        if project.transcriptSequenceDuration == nil,
+           project.sourceClips.count > 1,
+           project.transcriptSRT != nil || project.transcriptWords != nil { return false }
         if let transcript = project.transcriptSRT, transcript != analysis.transcriptSRT { return false }
         if let words = project.transcriptWords, words != analysis.transcriptWords { return false }
         if let sceneCuts = project.sceneCuts, sceneCuts != analysis.sceneCuts { return false }
@@ -179,11 +219,21 @@ actor AnalysisCoordinator {
     }
 
     nonisolated func sourceSignature(for project: Project) -> String {
-        let url = project.sourceVideoFileURL
-        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
-        let size = attrs?[.size] as? Int64 ?? -1
-        let modified = attrs?[.modificationDate] as? Date ?? .distantPast
-        return "\(url.lastPathComponent)|\(Int(project.sourceVideoDuration * 1000))|\(size)|\(modified.timeIntervalSince1970)"
+        project.sourceClips.map { clip in
+            let url = project.sourceURL(for: clip)
+            let attrs = url.flatMap { try? FileManager.default.attributesOfItem(atPath: $0.path) }
+            let size = attrs?[.size] as? Int64 ?? -1
+            let modified = attrs?[.modificationDate] as? Date ?? .distantPast
+            let name = url?.lastPathComponent ?? clip.assetID?.uuidString ?? clip.sourceType.rawValue
+            return "\(name)|\(Int(clip.sequenceStartTime * 1000))|\(Int(clip.startTime * 1000))|\(Int(clip.endTime * 1000))|\(size)|\(modified.timeIntervalSince1970)"
+        }.joined(separator: "||")
+    }
+
+    private static func normalized(_ text: String) -> String {
+        text.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     private static func cues(from words: [TranscriptWord]) -> [TranscriptCue] {

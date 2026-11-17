@@ -76,7 +76,6 @@ actor VideoImporter {
         )
         project.mediaAssets.append(assetItem)
         
-        try await storage.saveProject(project)
         return project
     }
     

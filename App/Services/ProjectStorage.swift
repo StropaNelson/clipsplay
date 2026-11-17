@@ -34,7 +34,7 @@ actor ProjectStorage {
                     id: project.id,
                     name: project.name,
                     episodeCount: project.episodes.count,
-                    sourceDuration: max(project.sourceVideoDuration, project.episodes.map(\.totalDuration).max() ?? 0),
+                    sourceDuration: project.sequenceSourceDuration,
                     updatedAt: modDate,
                     fileSize: size,
                     fileURL: file,

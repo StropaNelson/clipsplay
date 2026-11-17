@@ -139,12 +139,13 @@ actor CoverGenerator {
     }
     
     private func captureFrameCover(project: Project, episode: Episode, captureTime: Double) async throws -> Data {
-        let asset = AVURLAsset(url: project.sourceVideoFileURL)
+        let location = project.sourceLocation(at: captureTime)
+        let asset = AVURLAsset(url: location?.url ?? project.sourceVideoFileURL)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = CGSize(width: 1920, height: 1920)
         
-        let time = CMTime(seconds: captureTime, preferredTimescale: 600)
+        let time = CMTime(seconds: location?.time ?? captureTime, preferredTimescale: 600)
         let cgImage = try generator.copyCGImage(at: time, actualTime: nil)
         let image = UIImage(cgImage: cgImage)
         
@@ -229,19 +230,38 @@ enum CoverError: LocalizedError {
 
 extension CoverGenerator {
     func generateThumbnails(for project: Project, count: Int = 20) async throws -> [Data] {
-        let asset = AVURLAsset(url: project.sourceVideoFileURL)
-        let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
-        generator.maximumSize = CGSize(width: 320, height: 180)
-        
+        var generators: [UUID?: (asset: AVURLAsset, generator: AVAssetImageGenerator)] = [:]
+        func imageGenerator(for clip: VideoSegment) -> AVAssetImageGenerator? {
+            let key = clip.assetID
+            if let cached = generators[key] { return cached.generator }
+            guard let url = project.sourceURL(for: clip) else { return nil }
+            let asset = AVURLAsset(url: url)
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: 320, height: 180)
+            generators[key] = (asset, generator)
+            return generator
+        }
+
         var thumbnails: [Data] = []
-        let duration = project.sourceVideoDuration
+        let duration = project.sequenceSourceDuration
         let interval = duration / Double(count)
         
         for i in 0..<count {
-            let time = CMTime(seconds: Double(i) * interval, preferredTimescale: 600)
+            let sequenceTime = Double(i) * interval
+            let clip = project.sourceClips.first {
+                sequenceTime >= $0.sequenceStartTime && sequenceTime < $0.sequenceEndTime
+            } ?? project.sourceClips.last
+            let localTime = max(clip?.startTime ?? 0, sequenceTime - (clip?.sequenceStartTime ?? 0))
             do {
-                let cgImage = try generator.copyCGImage(at: time, actualTime: nil)
+                guard let clip = clip, let generator = imageGenerator(for: clip) else {
+                    thumbnails.append(generatePlaceholderCover(size: CGSize(width: 320, height: 180)))
+                    continue
+                }
+                let cgImage = try generator.copyCGImage(
+                    at: CMTime(seconds: min(localTime, clip.endTime), preferredTimescale: 600),
+                    actualTime: nil
+                )
                 let image = UIImage(cgImage: cgImage)
                 if let data = image.jpegData(compressionQuality: 0.7) {
                     thumbnails.append(data)

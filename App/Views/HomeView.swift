@@ -14,7 +14,6 @@ struct HomeView: View {
     @State private var newProjectName = ""
     @State private var pendingProjectName: String?
     @State private var pendingOperation: ProjectOperation?
-    @State private var pendingSequentialLoad = false
     
     var body: some View {
         NavigationStack {
@@ -50,10 +49,9 @@ struct HomeView: View {
                     showingVideoSource = true
                 }
             }) {
-                NewProjectSheet(onCreate: { name, operation, sequential in
+                NewProjectSheet(onCreate: { name, operation in
                     pendingProjectName = name
                     pendingOperation = operation
-                    pendingSequentialLoad = sequential
                     showingNewProject = false
                 })
             }
@@ -79,20 +77,15 @@ struct HomeView: View {
                     guard !urls.isEmpty, let name = pendingProjectName else {
                         pendingProjectName = nil
                         pendingOperation = nil
-                        pendingSequentialLoad = false
                         return
                     }
                     pendingProjectName = nil
                     let operation = pendingOperation ?? .multiply
-                    let sequential = pendingSequentialLoad
                     pendingOperation = nil
-                    pendingSequentialLoad = false
-                    let ordered = urls.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-                    Task { await viewModel.createProject(name: name, from: ordered, operation: operation, sequential: sequential) }
+                    Task { await viewModel.createProject(name: name, from: urls, operation: operation) }
                 case .failure(let error):
                     pendingProjectName = nil
                     pendingOperation = nil
-                    pendingSequentialLoad = false
                     if (error as NSError).code != NSUserCancelledError {
                         viewModel.errorMessage = "Erro ao selecionar vídeo: \(error.localizedDescription)"
                     }
@@ -218,7 +211,6 @@ struct HomeView: View {
         } else {
             pendingProjectName = nil
             pendingOperation = nil
-            pendingSequentialLoad = false
         }
     }
 
@@ -226,10 +218,8 @@ struct HomeView: View {
         guard !items.isEmpty, let name = pendingProjectName else { return }
         pendingProjectName = nil
         let operation = pendingOperation ?? .multiply
-        let sequential = pendingSequentialLoad
         pendingOperation = nil
-        pendingSequentialLoad = false
-        Task { await viewModel.createProject(name: name, from: items, operation: operation, sequential: sequential) }
+        Task { await viewModel.createProject(name: name, from: items, operation: operation) }
     }
 }
 
@@ -373,10 +363,9 @@ struct ProjectShareItem: Identifiable {
 }
 
 struct NewProjectSheet: View {
-    let onCreate: (String, ProjectOperation, Bool) -> Void
+    let onCreate: (String, ProjectOperation) -> Void
     @State private var name = ""
     @State private var operation: ProjectOperation = .multiply
-    @State private var sequentialLoad = false
     @Environment(\.dismiss) private var dismiss
     
     var body: some View {
@@ -411,8 +400,7 @@ struct NewProjectSheet: View {
                 }
                 
                 Section("Importação") {
-                    Toggle("Carregar vídeos em sequência", isOn: $sequentialLoad)
-                    Text("Se você escolher mais de um vídeo, eles entram na timeline na ordem selecionada. Sem essa opção, os extras ficam na biblioteca de mídia.")
+                    Text("Ao escolher mais de um vídeo, todos entram na timeline em sequência e são analisados juntos, preservando a ordem da seleção quando o iOS a disponibiliza.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -430,7 +418,7 @@ struct NewProjectSheet: View {
                     Button("Cancelar") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Continuar") { onCreate(name, operation, sequentialLoad) }
+                    Button("Continuar") { onCreate(name, operation) }
                         .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
@@ -491,7 +479,7 @@ class HomeViewModel: ObservableObject {
         }
     }
     
-    func createProject(name: String, from videoURLs: [URL], operation: ProjectOperation, sequential: Bool) async {
+    func createProject(name: String, from videoURLs: [URL], operation: ProjectOperation) async {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty, let primaryURL = videoURLs.first else { return }
 
@@ -505,10 +493,10 @@ class HomeViewModel: ObservableObject {
                 sequenceAssets.append(asset)
             }
             project.operation = operation
-            if sequential && !sequenceAssets.isEmpty {
-                configureSequentialEpisode(&project, assets: sequenceAssets)
-            } else {
+            if sequenceAssets.isEmpty {
                 project.regenerateEpisodes()
+            } else {
+                configureSequentialEpisode(&project, assets: sequenceAssets)
             }
             try await storage.saveProject(project)
             await loadProjects()
@@ -520,35 +508,40 @@ class HomeViewModel: ObservableObject {
     }
 
     private func configureSequentialEpisode(_ project: inout Project, assets: [MediaAsset]) {
+        var sourceClips = [VideoSegment(
+            startTime: 0,
+            endTime: project.sourceVideoDuration,
+            sourceType: .mainVideo,
+            sequenceStart: 0
+        )]
+        var cursor = project.sourceVideoDuration
+        for asset in assets {
+            sourceClips.append(VideoSegment(
+                startTime: 0,
+                endTime: asset.duration,
+                sourceType: .clipAsset,
+                assetID: asset.id,
+                sequenceStart: cursor
+            ))
+            cursor += asset.duration
+        }
+        project.sourceClips = sourceClips
+
         var episode = Episode(
             index: 0,
             mainStart: 0,
-            mainEnd: project.sourceVideoDuration,
+            mainEnd: cursor,
             introTemplate: project.introTemplate,
             outroTemplate: project.outroTemplate,
             recapSettings: project.recapSettings
         )
-        episode.displayTitle = "Clipe em sequência"
-        var clips = [VideoSegment(
-            id: episode.id,
-            startTime: 0,
-            endTime: project.sourceVideoDuration,
-            sourceType: .mainVideo
-        )]
-        for asset in assets {
-            clips.append(VideoSegment(
-                startTime: 0,
-                endTime: asset.duration,
-                sourceType: .clipAsset,
-                assetID: asset.id
-            ))
-        }
-        episode.mainClips = clips
+        episode.displayTitle = project.operation == .speechEdit ? "Clipe inteiro" : "Clipe em sequência"
+        episode.mainClips = sourceClips
         project.episodes = [episode]
         project.updateTimestamp()
     }
 
-    func createProject(name: String, from items: [PhotosPickerItem], operation: ProjectOperation, sequential: Bool) async {
+    func createProject(name: String, from items: [PhotosPickerItem], operation: ProjectOperation) async {
         errorMessage = nil
         var urls: [URL] = []
         defer {
@@ -562,7 +555,7 @@ class HomeViewModel: ObservableObject {
                 }
                 urls.append(video.url)
             }
-            await createProject(name: name, from: urls, operation: operation, sequential: sequential)
+            await createProject(name: name, from: urls, operation: operation)
         } catch {
             errorMessage = "Erro ao importar vídeo da galeria: \(error.localizedDescription)"
         }

@@ -193,8 +193,8 @@ struct EditorView: View {
         .sheet(isPresented: $showingClipSuggestions) {
             ClipSuggestionsView(
                 words: viewModel.editableTranscriptWords,
-                sourceDuration: viewModel.currentProject.sourceVideoDuration,
-                sourceURL: viewModel.currentProject.sourceVideoFileURL,
+                sourceDuration: viewModel.currentProject.sequenceSourceDuration,
+                sceneSources: viewModel.currentProject.transcriptionSources,
                 storedSceneCuts: viewModel.currentProject.sceneCuts ?? [],
                 onSceneCuts: { viewModel.saveSceneCuts($0) },
                 onSeek: { viewModel.seekToSourceTime($0) },
@@ -1312,6 +1312,8 @@ class EditorViewModel: ObservableObject {
         let recapSettings: RecapSettings
         let globalOverlays: [TextOverlay]
         let globalAudioClips: [AudioClip]
+        let sourceClips: [VideoSegment]?
+        let transcriptSequenceDuration: Double?
     }
 
     private func currentUndoState() -> UndoState {
@@ -1322,7 +1324,9 @@ class EditorViewModel: ObservableObject {
             outroTemplate: project.outroTemplate,
             recapSettings: project.recapSettings,
             globalOverlays: project.globalOverlays,
-            globalAudioClips: project.globalAudioClips
+            globalAudioClips: project.globalAudioClips,
+            sourceClips: project.storedSourceClips,
+            transcriptSequenceDuration: project.transcriptSequenceDuration
         )
     }
 
@@ -1356,6 +1360,8 @@ class EditorViewModel: ObservableObject {
         project.recapSettings = state.recapSettings
         project.globalOverlays = state.globalOverlays
         project.globalAudioClips = state.globalAudioClips
+        project.storedSourceClips = state.sourceClips
+        project.transcriptSequenceDuration = state.transcriptSequenceDuration
         Task { await persistProjectChanges() }
     }
 
@@ -1551,6 +1557,7 @@ class EditorViewModel: ObservableObject {
             freeze.playbackSpeed = frame / seconds
             freeze.adjustments = original.adjustments
             freeze.clipTransform = original.clipTransform
+            freeze.sequenceStart = original.sequenceStart
             freezeID = freeze.id
             var replacement: [VideoSegment] = []
             if cut - original.startTime > 0.05 {
@@ -1588,6 +1595,7 @@ class EditorViewModel: ObservableObject {
                 copy.speed = original.speed
                 copy.clipTransform = original.clipTransform
                 copy.adjustments = original.adjustments
+                copy.sequenceStart = original.sequenceStart
                 clips.insert(copy, at: index + 1)
                 episode.mainClips = clips
             }
@@ -1702,18 +1710,33 @@ class EditorViewModel: ObservableObject {
 
     /// Word timings for text-based editing; estimated from the subtitle text when none were recognized.
     var editableTranscriptWords: [TranscriptWord] {
-        if let words = project.transcriptWords, !words.isEmpty { return words }
-        guard let srt = project.transcriptSRT, let cues = try? SubtitleFile.parse(srt) else { return [] }
-        return cues.flatMap { TranscriptWord.spread($0.text, from: $0.startTime, to: $0.endTime) }
+        let stored = project.transcriptWords ?? []
+        guard let srt = project.transcriptSRT,
+              let cues = try? SubtitleFile.parse(srt) else { return stored }
+        let cueWords = cues.flatMap {
+            $0.words.isEmpty ? TranscriptWord.spread($0.text, from: $0.startTime, to: $0.endTime) : $0.words
+        }
+        let cueText = normalizedTranscriptText(cues.map(\.text).joined(separator: " "))
+        let storedText = normalizedTranscriptText(stored.map(\.text).joined(separator: " "))
+        return stored.isEmpty || storedText != cueText ? cueWords : stored
+    }
+
+    private func normalizedTranscriptText(_ text: String) -> String {
+        text.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     func saveTranscriptWords(_ words: [TranscriptWord]) {
         project.transcriptWords = words
+        project.transcriptSequenceDuration = project.sequenceSourceDuration
         Task { await persistProjectChanges(reloadPreview: false) }
     }
 
     func saveTranscript(_ text: String) {
         project.transcriptSRT = text
+        project.transcriptSequenceDuration = project.sequenceSourceDuration
         transcriptSaveTask?.cancel()
         transcriptSaveTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 800_000_000)
@@ -1726,6 +1749,7 @@ class EditorViewModel: ObservableObject {
     func applyCorrectedTranscript(_ srt: String, words: [TranscriptWord]) {
         project.transcriptSRT = srt
         project.transcriptWords = words
+        project.transcriptSequenceDuration = project.sequenceSourceDuration
         transcriptSaveTask?.cancel()
         let hasCaptions = episodes.contains {
             $0.textOverlays.contains { $0.isCaption == true }
@@ -1741,31 +1765,34 @@ class EditorViewModel: ObservableObject {
         applyCaptions(cues, dynamic: dynamic, recordUndo: false)
     }
 
-    /// Converts transcript cues (timed against the source video) into caption overlays in every
-    /// episode, following each main clip's position on that episode's timeline.
+    /// Converts transcript cues (timed in the concatenated source sequence) into caption
+    /// overlays in every episode, following each main clip's position on that timeline.
     func applyCaptions(_ cues: [TranscriptCue], dynamic: Bool = false, recordUndo: Bool = true) {
         if recordUndo { checkpoint() }
         let words = project.transcriptWords ?? []
         var total = 0
         for index in episodes.indices {
             var overlays = episodes[index].textOverlays.filter { $0.isCaption != true }
-            for item in episodes[index].storyline() where item.track == .main && item.segment.sourceType == .mainVideo {
+            for item in episodes[index].storyline() where item.track == .main {
                 let clip = item.segment
+                guard !clip.isFreezeFrame else { continue }
+                let sourceStart = clip.sequenceStartTime + clip.startTime
+                let sourceEnd = clip.sequenceStartTime + clip.endTime
                 let speed = clip.playbackSpeed
-                func timeline(_ source: Double) -> Double { item.start + (source - clip.startTime) / speed }
-                for cue in cues where cue.endTime > clip.startTime && cue.startTime < clip.endTime {
-                    let start = max(cue.startTime, clip.startTime)
-                    let end = min(cue.endTime, clip.endTime)
+                func timeline(_ source: Double) -> Double { item.start + (source - sourceStart) / speed }
+                for cue in cues where cue.endTime > sourceStart && cue.startTime < sourceEnd {
+                    let start = max(cue.startTime, sourceStart)
+                    let end = min(cue.endTime, sourceEnd)
                     guard end - start >= 0.2 else { continue }
                     // Keep words with a meaningful part inside the clip (cuts remove whole words plus padding).
                     let cueWords = Self.words(for: cue, recognized: words).filter { word in
-                        let overlap = min(word.end, clip.endTime) - max(word.start, clip.startTime)
+                        let overlap = min(word.end, sourceEnd) - max(word.start, sourceStart)
                         return overlap > min(0.08, (word.end - word.start) / 2)
                     }
                     if dynamic {
                         for group in Self.captionGroups(cueWords) {
-                            let groupStart = max(group[0].start, clip.startTime)
-                            let groupEnd = min(group[group.count - 1].end, clip.endTime)
+                            let groupStart = max(group[0].start, sourceStart)
+                            let groupEnd = min(group[group.count - 1].end, sourceEnd)
                             guard groupEnd > groupStart else { continue }
                             var overlay = Self.captionOverlay(
                                 text: group.map(\.text).joined(separator: " "),
@@ -1784,7 +1811,7 @@ class EditorViewModel: ObservableObject {
                         }
                     } else {
                         // A cue split by a cut only shows the words that remain in this clip.
-                        let isWhole = cue.startTime >= clip.startTime && cue.endTime <= clip.endTime
+                        let isWhole = cue.startTime >= sourceStart && cue.endTime <= sourceEnd
                         let text = isWhole ? cue.text : cueWords.map(\.text).joined(separator: " ")
                         guard !text.isEmpty else { continue }
                         overlays.append(Self.captionOverlay(text: text, start: timeline(start), duration: (end - start) / speed))
@@ -2057,7 +2084,7 @@ class EditorViewModel: ObservableObject {
             mediaAssets.append(narration)
         }
         let time = currentTime
-        let clip = VideoSegment(
+        var clip = VideoSegment(
             startTime: start,
             endTime: end,
             sourceType: .clipAsset,
@@ -2066,6 +2093,7 @@ class EditorViewModel: ObservableObject {
             volume: selection.clipVolume < 0.999 ? selection.clipVolume : nil
         )
         mutateSelectedEpisode { episode in
+            clip.sequenceStart = project.registerSourceClip(for: asset)
             var clips = episode.mainClips
             let current = episode.storyline().last { $0.track == .main && $0.start <= time }
             let index = current.flatMap { item in clips.firstIndex { $0.id == item.segment.id } }.map { $0 + 1 } ?? clips.count
@@ -2461,9 +2489,10 @@ class EditorViewModel: ObservableObject {
         var times: [Double] = []
         for item in episode.storyline() where item.track == .main {
             let clip = item.segment
-            guard clip.sourceType == .mainVideo else { continue }
-            for source in sourceTimes where clip.startTime <= source && source < clip.endTime {
-                times.append(item.start + (source - clip.startTime) / clip.playbackSpeed)
+            let sourceStart = clip.sequenceStartTime + clip.startTime
+            let sourceEnd = clip.sequenceStartTime + clip.endTime
+            for source in sourceTimes where sourceStart <= source && source < sourceEnd {
+                times.append(item.start + (source - sourceStart) / clip.playbackSpeed)
             }
         }
         guard !times.isEmpty else {
@@ -2517,6 +2546,10 @@ class EditorViewModel: ObservableObject {
             project.transcriptWords = newWords
             changed = true
         }
+        if project.transcriptSequenceDuration != analysis.duration {
+            project.transcriptSequenceDuration = analysis.duration
+            changed = true
+        }
         let newSceneCuts = analysis.sceneCuts
         if project.sceneCuts != newSceneCuts {
             project.sceneCuts = newSceneCuts
@@ -2553,10 +2586,23 @@ class EditorViewModel: ObservableObject {
                 outputCounts[kind] = max(outputCounts[kind] ?? 0, number)
             }
         }
+        let sequenceDuration = project.sequenceSourceDuration
         for suggestion in suggestions.sorted(by: { $0.start < $1.start }) {
-            let start = max(0, min(suggestion.start, project.sourceVideoDuration))
-            let end = max(start, min(suggestion.end, project.sourceVideoDuration))
+            let start = max(0, min(suggestion.start, sequenceDuration))
+            let end = max(start, min(suggestion.end, sequenceDuration))
             guard end - start > 0.2 else { continue }
+            var mainPieces = project.sourceSegments(in: start...end)
+            guard !mainPieces.isEmpty else { continue }
+            if autoFraming {
+                for index in mainPieces.indices {
+                    var adjustments = mainPieces[index].clipAdjustments
+                    adjustments.autoFraming = true
+                    mainPieces[index].clipAdjustments = adjustments
+                }
+            }
+            for index in mainPieces.indices {
+                mainPieces[index].transition = .none
+            }
             let outputNumber = (outputCounts[suggestion.kind] ?? 0) + 1
             outputCounts[suggestion.kind] = outputNumber
             for format in outputFormats {
@@ -2568,18 +2614,7 @@ class EditorViewModel: ObservableObject {
                     outroTemplate: nil,
                     recapSettings: RecapSettings(enabled: false)
                 )
-                var clip = VideoSegment(
-                    startTime: start,
-                    endTime: end,
-                    sourceType: .mainVideo,
-                    transitionStyle: TransitionStyle.none
-                )
-                if autoFraming {
-                    var adjustments = clip.clipAdjustments
-                    adjustments.autoFraming = true
-                    clip.clipAdjustments = adjustments
-                }
-                episode.mainClips = [clip]
+                episode.mainClips = mainPieces
                 episode.outputAspectRatio = format == .original ? nil : format
                 let suffix = outputFormats.count > 1 ? " • \(format.rawValue)" : ""
                 episode.displayTitle = "\(suggestion.kind.outputName) \(outputNumber)\(suffix)"
@@ -2659,10 +2694,10 @@ class EditorViewModel: ObservableObject {
         func target(in episode: Episode) -> Double? {
             for item in episode.storyline() where item.track == .main {
                 let clip = item.segment
-                // Only the recorded video's clips carry source-video timestamps; library clips don't.
-                guard clip.sourceType == .mainVideo,
-                      clip.startTime <= source, source < clip.endTime else { continue }
-                return item.start + (source - clip.startTime) / clip.playbackSpeed
+                let sourceStart = clip.sequenceStartTime + clip.startTime
+                let sourceEnd = clip.sequenceStartTime + clip.endTime
+                guard sourceStart <= source, source < sourceEnd else { continue }
+                return item.start + (source - sourceStart) / clip.playbackSpeed
             }
             return nil
         }
@@ -2684,7 +2719,7 @@ class EditorViewModel: ObservableObject {
 
     /// Speech-edit mode works on one continuous clip instead of output slices.
     func useWholeClipForSpeechEdit() {
-        guard project.sourceVideoDuration > 0, !isWholeClipEpisode else { return }
+        guard project.sequenceSourceDuration > 0, !isWholeClipEpisode else { return }
         checkpoint()
         replaceWithWholeClipEpisode()
         Task { await persistProjectChanges() }
@@ -2692,19 +2727,20 @@ class EditorViewModel: ObservableObject {
 
     private var isWholeClipEpisode: Bool {
         guard episodes.count == 1, let episode = episodes.first else { return false }
-        return abs(episode.mainStart) < 0.05 && abs(episode.mainEnd - project.sourceVideoDuration) < 0.05
+        return abs(episode.mainStart) < 0.05 && abs(episode.mainEnd - project.sequenceSourceDuration) < 0.05
     }
 
     private func replaceWithWholeClipEpisode() {
         var episode = Episode(
             index: 0,
             mainStart: 0,
-            mainEnd: project.sourceVideoDuration,
+            mainEnd: project.sequenceSourceDuration,
             introTemplate: project.introTemplate,
             outroTemplate: project.outroTemplate,
             recapSettings: project.recapSettings
         )
         episode.displayTitle = "Clipe inteiro"
+        episode.mainClips = project.sourceSegments(in: 0...project.sequenceSourceDuration)
         episodes = [episode]
         selectedEpisode = episode
         selectedSegmentID = nil
@@ -2732,18 +2768,20 @@ class EditorViewModel: ObservableObject {
             var removedTimeline: [ClosedRange<Double>] = []
             var clips: [VideoSegment] = []
             for clip in episode.mainClips {
-                guard clip.sourceType == .mainVideo, !clip.isFreezeFrame,
+                guard !clip.isFreezeFrame,
                       let item = items.first(where: { $0.segment.id == clip.id }) else {
                     clips.append(clip)
                     continue
                 }
+                let sourceStart = clip.sequenceStartTime + clip.startTime
+                let sourceEnd = clip.sequenceStartTime + clip.endTime
                 let speed = clip.playbackSpeed
                 var cursor = clip.startTime
                 var touched = false
                 var pieces: [VideoSegment] = []
-                for range in merged where range.upperBound > clip.startTime && range.lowerBound < clip.endTime {
-                    let lower = max(range.lowerBound, clip.startTime)
-                    let upper = min(range.upperBound, clip.endTime)
+                for range in merged where range.upperBound > sourceStart && range.lowerBound < sourceEnd {
+                    let lower = max(range.lowerBound, sourceStart) - clip.sequenceStartTime
+                    let upper = min(range.upperBound, sourceEnd) - clip.sequenceStartTime
                     if lower - cursor > 0.05 {
                         var piece = cursor == clip.startTime ? clip : clip.continuation(from: cursor)
                         piece.endTime = lower

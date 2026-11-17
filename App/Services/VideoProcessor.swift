@@ -63,7 +63,7 @@ actor VideoProcessor {
         try await exportComposition(composition, to: outputURL, preset: AVAssetExportPresetHighestQuality)
     }
 
-    func bestAudioTrackIndex(from sourceURL: URL, duration: Double, languageCode: String? = nil) async throws -> Int {
+    func bestAudioTrackIndex(from sourceURL: URL, startTime: Double = 0, duration: Double, languageCode: String? = nil) async throws -> Int {
         let asset = AVURLAsset(url: sourceURL)
         let tracks = try await asset.loadTracks(withMediaType: .audio)
         guard !tracks.isEmpty else { throw ProcessorError.noAudioTrack }
@@ -94,7 +94,7 @@ actor VideoProcessor {
         guard candidates.count > 1 else { return candidates.first?.index ?? 0 }
 
         let sampleStarts = [0.05, 0.35, 0.65]
-            .map { min(max(0, duration * $0), max(0, duration - 2)) }
+            .map { startTime + min(max(0, duration * $0), max(0, duration - 2)) }
         var bestIndex = candidates.first?.index ?? 0
         var bestEnergy = -1.0
         for candidate in candidates {
@@ -1172,12 +1172,13 @@ actor VideoProcessor {
     }
     
     private func captureFrameCover(project: Project, episode: Episode, captureTime: Double) async throws -> Data {
-        let asset = AVURLAsset(url: project.sourceVideoFileURL)
+        let location = project.sourceLocation(at: captureTime)
+        let asset = AVURLAsset(url: location?.url ?? project.sourceVideoFileURL)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = CGSize(width: 1920, height: 1920)
         
-        let time = CMTime(seconds: captureTime, preferredTimescale: 600)
+        let time = CMTime(seconds: location?.time ?? captureTime, preferredTimescale: 600)
         let cgImage = try generator.copyCGImage(at: time, actualTime: nil)
         return resizedCoverData(image: UIImage(cgImage: cgImage), targetSize: coverSize(for: project))
     }

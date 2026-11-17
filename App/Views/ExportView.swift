@@ -56,7 +56,7 @@ struct ExportView: View {
                             HStack {
                                 Text("Tempo de captura")
                                 Spacer()
-                                Slider(value: $settings.coverCaptureTime, in: 0...project.sourceVideoDuration, step: 1)
+                                Slider(value: $settings.coverCaptureTime, in: 0...project.sequenceSourceDuration, step: 1)
                                 Text(formatTime(settings.coverCaptureTime))
                                     .font(.caption.monospacedDigit())
                                     .frame(width: 50)

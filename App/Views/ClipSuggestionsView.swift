@@ -3,7 +3,7 @@ import SwiftUI
 struct ClipSuggestionsView: View {
     let words: [TranscriptWord]
     let sourceDuration: Double
-    let sourceURL: URL
+    let sceneSources: [TranscriptionSource]
     let onSceneCuts: ([Double]) -> Void
     let onSeek: (Double) -> Void
     let onCreate: ([ClipSuggestion], Bool) -> Void
@@ -22,7 +22,7 @@ struct ClipSuggestionsView: View {
     init(
         words: [TranscriptWord],
         sourceDuration: Double,
-        sourceURL: URL,
+        sceneSources: [TranscriptionSource],
         storedSceneCuts: [Double],
         onSceneCuts: @escaping ([Double]) -> Void,
         onSeek: @escaping (Double) -> Void,
@@ -30,7 +30,7 @@ struct ClipSuggestionsView: View {
     ) {
         self.words = words
         self.sourceDuration = sourceDuration
-        self.sourceURL = sourceURL
+        self.sceneSources = sceneSources
         self.onSceneCuts = onSceneCuts
         self.onSeek = onSeek
         self.onCreate = onCreate
@@ -252,10 +252,16 @@ struct ClipSuggestionsView: View {
         isAnalyzingScenes = true
         errorMessage = nil
         defer { isAnalyzingScenes = false }
-        let cuts = await VisualAnalysisService.shared.detectSceneCuts(
-            in: sourceURL,
-            duration: sourceDuration
-        )
+        var cuts: [Double] = []
+        for source in sceneSources {
+            let localCuts = await VisualAnalysisService.shared.detectSceneCuts(
+                in: source.url,
+                startTime: source.startTime,
+                duration: source.duration
+            )
+            cuts.append(contentsOf: localCuts.map { source.offset + $0 })
+        }
+        cuts.sort()
         sceneCuts = cuts
         onSceneCuts(cuts)
         if cuts.isEmpty {

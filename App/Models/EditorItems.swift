@@ -308,6 +308,14 @@ extension VideoSegment {
     /// Length on the timeline after applying the playback speed.
     var timelineDuration: Double { duration / playbackSpeed }
 
+    /// Time in the concatenated source sequence (used by transcript/analysis).
+    var sequenceStartTime: Double {
+        get { sequenceStart ?? 0 }
+        set { sequenceStart = newValue }
+    }
+
+    var sequenceEndTime: Double { sequenceStartTime + endTime }
+
     var clipAdjustments: ClipAdjustments {
         get { adjustments ?? .identity }
         set { adjustments = newValue.isIdentity ? nil : newValue }
@@ -346,6 +354,7 @@ extension VideoSegment {
         piece.speed = speed
         piece.clipTransform = clipTransform
         piece.adjustments = adjustments
+        piece.sequenceStart = sequenceStart
         return piece
     }
 

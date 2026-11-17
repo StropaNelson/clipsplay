@@ -73,7 +73,7 @@ struct EpisodeListView: View {
                             Text("segundos").foregroundStyle(.secondary)
                         }
 
-                        Text("\(episodes.count) \(outputsCountLabel) • \(formatDuration(project.sourceVideoDuration)) total")
+                        Text("\(episodes.count) \(outputsCountLabel) • \(formatDuration(project.sequenceSourceDuration)) total")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -504,8 +504,9 @@ struct EpisodeDetailView: View {
         episode.mainEnd = mainEnd
         if episode.mainClips.count == 1 {
             var clips = episode.mainClips
-            clips[0].startTime = mainStart
-            clips[0].endTime = mainEnd
+            let sourceOffset = clips[0].sequenceStartTime
+            clips[0].startTime = max(0, mainStart - sourceOffset)
+            clips[0].endTime = max(clips[0].startTime + 0.05, mainEnd - sourceOffset)
             episode.mainClips = clips
         }
         
@@ -587,8 +588,25 @@ struct EpisodeDetailView: View {
         episode.customRecapSegments = []
         if recapMode == .manual {
             let recapChanged = recapSegments != episode.effectiveRecaps
-            episode.recapSegments = recapSegments
-            episode.useGlobalRecap = !recapSegments.isEmpty
+            var resolvedRecaps: [VideoSegment] = []
+            for recap in recapSegments {
+                guard recap.sourceType == .mainVideo, recap.endTime > recap.startTime else {
+                    resolvedRecaps.append(recap)
+                    continue
+                }
+                var pieces = project.sourceSegments(in: recap.startTime...recap.endTime)
+                if pieces.isEmpty { pieces = [recap] }
+                for index in pieces.indices {
+                    pieces[index].narrationAssetID = recap.narrationAssetID
+                    pieces[index].narrationVolume = recap.narrationVolume
+                    pieces[index].narrationOffset = recap.narrationOffset
+                    pieces[index].volume = recap.volume
+                    pieces[index].adjustments = recap.adjustments
+                }
+                resolvedRecaps.append(contentsOf: pieces)
+            }
+            episode.recapSegments = resolvedRecaps
+            episode.useGlobalRecap = !resolvedRecaps.isEmpty
             episode.usesCustomRecapSegments = wasCustom || recapChanged || recapMode != initialRecapMode ? true : nil
         } else {
             var recapSettings = project.recapSettings
@@ -598,7 +616,9 @@ struct EpisodeDetailView: View {
                 .filter { $0.index < episode.index }
                 .max { $0.index < $1.index }
             if let previousEnd = previousEpisode?.mainEnd {
-                episode.regenerateRecap(previousEpisodeEnd: previousEnd, settings: recapSettings)
+                let end = min(previousEnd, episode.mainEnd)
+                let start = max(0, end - recapSettings.duration)
+                episode.recapSegments = end - start > 0.05 ? project.sourceSegments(in: start...end) : []
             } else {
                 episode.recapSegments = []
             }

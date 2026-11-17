@@ -185,13 +185,16 @@ struct TranscriptionView: View {
         defer { isTranscribing = false }
 
         do {
-            let cues = try await TranscriptionService.shared.transcribeVideo(
-                at: project.sourceVideoFileURL,
+            let result = try await TranscriptionService.shared.transcribeVideoSequence(
+                project.transcriptionSources,
                 localeIdentifier: localeIdentifier,
                 allowServer: allowServer
             )
-            transcript = SubtitleFile.srt(from: cues)
-            onWords(cues.flatMap(\.words))
+            transcript = SubtitleFile.srt(from: result.cues)
+            onWords(result.cues.flatMap(\.words))
+            if !result.skippedClips.isEmpty {
+                errorMessage = "Alguns clipes não tinham fala/áudio e foram pulados: \(result.skippedClips.joined(separator: "; "))"
+            }
         } catch {
             errorMessage = "Falha na transcrição: \(error.localizedDescription)"
         }

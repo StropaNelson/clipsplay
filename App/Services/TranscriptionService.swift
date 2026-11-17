@@ -10,12 +10,37 @@ struct TranscriptCue: Identifiable {
     var words: [TranscriptWord] = []
 }
 
+/// One file/range in the project's concatenated source sequence.
+struct TranscriptionSource {
+    let name: String
+    let url: URL
+    /// Sequence offset that corresponds to local file time zero.
+    let offset: Double
+    /// Local time range inside the file that belongs to the sequence.
+    let startTime: Double
+    let endTime: Double
+
+    var duration: Double { max(0, endTime - startTime) }
+}
+
+struct TranscriptionSequenceResult {
+    let cues: [TranscriptCue]
+    /// Clips without usable speech/audio are skipped and reported here.
+    let skippedClips: [String]
+}
+
 actor TranscriptionService {
     static let shared = TranscriptionService()
 
     private init() {}
 
-    func transcribeVideo(at url: URL, localeIdentifier: String = "pt-BR", allowServer: Bool = false) async throws -> [TranscriptCue] {
+    func transcribeVideo(
+        at url: URL,
+        startTime: Double = 0,
+        duration requestedDuration: Double? = nil,
+        localeIdentifier: String = "pt-BR",
+        allowServer: Bool = false
+    ) async throws -> [TranscriptCue] {
         let authorization = await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { status in
                 continuation.resume(returning: status)
@@ -32,8 +57,10 @@ actor TranscriptionService {
             throw TranscriptionError.recognizerUnavailable
         }
 
-        let duration = try await AVURLAsset(url: url).load(.duration).seconds
-        guard duration.isFinite, duration > 0 else { throw TranscriptionError.noSpeechDetected }
+        let sourceDuration = try await AVURLAsset(url: url).load(.duration).seconds
+        let start = max(0, min(startTime, sourceDuration))
+        let duration = min(requestedDuration ?? (sourceDuration - start), sourceDuration - start)
+        guard sourceDuration.isFinite, duration.isFinite, duration > 0 else { throw TranscriptionError.noSpeechDetected }
 
         // Prefer the offline model; Apple's server is only used when the user opts in.
         var modes: [Bool] = []
@@ -43,13 +70,57 @@ actor TranscriptionService {
 
         let audioTrackIndex = try await VideoProcessor.shared.bestAudioTrackIndex(
             from: url,
+            startTime: start,
             duration: duration,
             languageCode: localeIdentifier
         )
-        return try await transcribe(url: url, duration: duration, recognizer: recognizer, modes: modes, audioTrackIndex: audioTrackIndex)
+        return try await transcribe(
+            url: url,
+            startTime: start,
+            duration: duration,
+            recognizer: recognizer,
+            modes: modes,
+            audioTrackIndex: audioTrackIndex
+        )
     }
 
-    private func transcribe(url: URL, duration: Double, recognizer: SFSpeechRecognizer, modes: [Bool], audioTrackIndex: Int) async throws -> [TranscriptCue] {
+    /// Transcribes every source range and offsets the result into the project's
+    /// concatenated sequence. Clips without speech/audio are skipped, while
+    /// permission/locale failures still stop the run.
+    func transcribeVideoSequence(
+        _ sources: [TranscriptionSource],
+        localeIdentifier: String = "pt-BR",
+        allowServer: Bool = false
+    ) async throws -> TranscriptionSequenceResult {
+        var allCues: [TranscriptCue] = []
+        var skipped: [String] = []
+        var lastError: Error?
+
+        for source in sources where source.duration > 0.05 {
+            do {
+                let cues = try await transcribeVideo(
+                    at: source.url,
+                    startTime: source.startTime,
+                    duration: source.duration,
+                    localeIdentifier: localeIdentifier,
+                    allowServer: allowServer
+                )
+                allCues.append(contentsOf: cues.map { Self.shifted($0, by: source.offset) })
+            } catch {
+                if Self.isFatal(error) { throw error }
+                lastError = error
+                skipped.append("\(source.name): \(Self.describe(error))")
+            }
+        }
+
+        guard !allCues.isEmpty else {
+            throw lastError ?? TranscriptionError.noSpeechDetected
+        }
+        allCues.sort { $0.startTime < $1.startTime }
+        return TranscriptionSequenceResult(cues: allCues, skippedClips: skipped)
+    }
+
+    private func transcribe(url: URL, startTime: Double, duration: Double, recognizer: SFSpeechRecognizer, modes: [Bool], audioTrackIndex: Int) async throws -> [TranscriptCue] {
         let chunkDuration = 30.0
         let overlap = 0.75
         var allCues: [TranscriptCue] = []
@@ -68,7 +139,7 @@ actor TranscriptionService {
             try await VideoProcessor.shared.extractAudioForTranscription(
                 from: url,
                 to: audioURL,
-                startTime: extractStart,
+                startTime: startTime + extractStart,
                 duration: extractDuration,
                 audioTrackIndex: audioTrackIndex
             )
@@ -99,7 +170,7 @@ actor TranscriptionService {
                 return midpoint >= ownedStart && midpoint < ownedEnd
             }
             let localDuration = untimed ? ownedEnd - ownedStart : extractDuration
-            let timeOffset = untimed ? chunkStart : extractStart
+            let timeOffset = startTime + (untimed ? chunkStart : extractStart)
             allCues.append(contentsOf: Self.makeCues(from: ownedSegments, chunkDuration: localDuration).map {
                 TranscriptCue(
                     startTime: $0.startTime + timeOffset,
@@ -257,6 +328,34 @@ actor TranscriptionService {
         }
         let nsError = error as NSError
         return nsError.domain == "kAFAssistantErrorDomain" && [203, 1110].contains(nsError.code)
+    }
+
+    nonisolated private static func isFatal(_ error: Error) -> Bool {
+        guard let error = error as? TranscriptionError else { return false }
+        switch error {
+        case .permissionDenied, .localeUnavailable, .recognizerUnavailable, .onDeviceRecognitionUnavailable:
+            return true
+        case .invalidSubtitleFile, .noSpeechDetected:
+            return false
+        }
+    }
+
+    nonisolated private static func describe(_ error: Error) -> String {
+        if let localized = error as? LocalizedError, let description = localized.errorDescription {
+            return description
+        }
+        return error.localizedDescription
+    }
+
+    private static func shifted(_ cue: TranscriptCue, by offset: Double) -> TranscriptCue {
+        TranscriptCue(
+            startTime: cue.startTime + offset,
+            endTime: cue.endTime + offset,
+            text: cue.text,
+            words: cue.words.map {
+                TranscriptWord(text: $0.text, start: $0.start + offset, end: $0.end + offset)
+            }
+        )
     }
 
     private static func makeCues(from segments: [SFTranscriptionSegment], chunkDuration: Double) -> [TranscriptCue] {
