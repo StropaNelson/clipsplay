@@ -354,7 +354,7 @@ struct AIEditSection: View {
             if !hasAPIKey {
                 Text("Adicione sua chave de API nas configurações.")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Color.orange)
             }
             requestEditor
             sendControls
@@ -417,7 +417,7 @@ struct AIEditSection: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(AIPlanService.appleIntelligenceLabel)
                 .font(.caption)
-                .foregroundStyle(AIPlanService.appleIntelligenceReady ? .secondary : .orange)
+                .foregroundStyle(AIPlanService.appleIntelligenceReady ? Color.secondary : Color.orange)
             requestEditor
             sendControls
             Text("Com Apple Intelligence, a análise fica neste iPad.")
