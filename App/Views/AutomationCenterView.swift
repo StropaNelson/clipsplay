@@ -10,6 +10,7 @@ struct AutomationCenterView: View {
     let onCreateOutputs: ([ClipSuggestion], AutomationRequest) -> Void
     let onApplyCuts: ([ClosedRange<Double>], AutomationRequest) -> Void
     let onCreateEpisodes: ([Double], AutomationRequest) -> Void
+    let onApplyPlan: (ClipPlan, ClipBrief?) -> Void
     let onOpenTranscript: () -> Void
     let onOpenTranscriptEditor: (ProjectOperation) -> Void
     let onSeek: (Double) -> Void
@@ -49,6 +50,7 @@ struct AutomationCenterView: View {
         onCreateOutputs: @escaping ([ClipSuggestion], AutomationRequest) -> Void,
         onApplyCuts: @escaping ([ClosedRange<Double>], AutomationRequest) -> Void,
         onCreateEpisodes: @escaping ([Double], AutomationRequest) -> Void,
+        onApplyPlan: @escaping (ClipPlan, ClipBrief?) -> Void,
         onOpenTranscript: @escaping () -> Void,
         onOpenTranscriptEditor: @escaping (ProjectOperation) -> Void,
         onSeek: @escaping (Double) -> Void,
@@ -62,6 +64,7 @@ struct AutomationCenterView: View {
         self.onCreateOutputs = onCreateOutputs
         self.onApplyCuts = onApplyCuts
         self.onCreateEpisodes = onCreateEpisodes
+        self.onApplyPlan = onApplyPlan
         self.onOpenTranscript = onOpenTranscript
         self.onOpenTranscriptEditor = onOpenTranscriptEditor
         self.onSeek = onSeek
@@ -88,6 +91,9 @@ struct AutomationCenterView: View {
                         episodeStructureCard
                         episodeExtrasCard
                         episodePreviewCard
+                    } else if operation == .aiEdit {
+                        analysisCard
+                        aiEditSection
                     } else {
                         analysisCard
                         if let analysis = analysis {
@@ -174,6 +180,7 @@ struct AutomationCenterView: View {
         switch operation {
         case .speechEdit: return "Edite o clipe inteiro pelo texto."
         case .episodes: return "Transforme um vídeo longo em uma série."
+        case .aiEdit: return "Descreva a edição, receba o plano."
         default: return "Um vídeo entra. Uma biblioteca sai."
         }
     }
@@ -184,6 +191,8 @@ struct AutomationCenterView: View {
             return "A análise roda localmente uma vez. Você revisa a fala e aplica cortes no clipe inteiro, sem criar saídas."
         case .episodes:
             return "Divide em ordem, sem pular trechos, com abertura, resumo e fechamento."
+        case .aiEdit:
+            return "Exporte um pacote com a análise, peça o plano ao ChatGPT/Copilot e aplique aqui. O vídeo não sai do iPad."
         default:
             return "A análise roda localmente no iPad e é reutilizada pelas próximas saídas. As decisões automáticas continuam editáveis na timeline."
         }
@@ -193,6 +202,7 @@ struct AutomationCenterView: View {
         switch operation {
         case .speechEdit: return "text.badge.minus"
         case .episodes: return "film.stack"
+        case .aiEdit: return "sparkles.bubble"
         default: return "sparkles.rectangle.stack"
         }
     }
@@ -248,7 +258,10 @@ struct AutomationCenterView: View {
 
     private var configurationCard: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Label(operation == .speechEdit ? "Configurar autoedição" : "Configurar produção", systemImage: "slider.horizontal.3")
+            Label(
+                operation == .speechEdit ? "Configurar autoedição" : (operation == .aiEdit ? "Configurar análise" : "Configurar produção"),
+                systemImage: "slider.horizontal.3"
+            )
                 .font(.headline)
 
             Picker("Idioma da fala", selection: $request.localeIdentifier) {
@@ -973,9 +986,27 @@ struct AutomationCenterView: View {
             opportunitiesSection(analysis)
         case .podcast, .speechEdit:
             speechCleanupSection(analysis)
+        case .aiEdit:
+            aiEditSection
         case .episodes:
             EmptyView()
         }
+    }
+
+    /// "Editar com IA": package generation, plan import/review and apply.
+    /// Works without analysis (the package just gets thinner).
+    private var aiEditSection: some View {
+        AIEditSection(
+            project: project,
+            analysis: analysis,
+            importedAssets: importedAssets,
+            isAnalyzing: isAnalyzing,
+            onAnalyze: { startAnalysis() },
+            onApplyPlan: { plan, brief in
+                onApplyPlan(plan, brief)
+                dismiss()
+            }
+        )
     }
 
     private func opportunitiesSection(_ analysis: ContentAnalysis) -> some View {
@@ -1080,7 +1111,12 @@ struct AutomationCenterView: View {
 
     private var actionBar: some View {
         VStack(spacing: 8) {
-            if operation == .episodes {
+            if operation == .aiEdit {
+                Text("O vídeo nunca sai do iPad — só a análise é compartilhada.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            } else if operation == .episodes {
                 Button {
                     onCreateEpisodes(episodeCuts.map(\.time), request)
                     dismiss()
@@ -1244,7 +1280,7 @@ struct AutomationCenterView: View {
     }
 
     private func refreshSuggestions() {
-        guard let analysis = analysis else {
+        guard operation != .aiEdit, let analysis = analysis else {
             suggestions = []
             selectedSuggestions = []
             return

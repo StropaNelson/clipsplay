@@ -112,6 +112,17 @@ struct AutomationRequest: Codable {
                 generateCovers: true,
                 outputPreset: .series
             )
+        case .aiEdit:
+            return AutomationRequest(
+                operation: operation,
+                clipKinds: [.segments],
+                resultCount: 4,
+                formats: [.original],
+                captions: CaptionAutomationSettings(enabled: false, dynamic: true),
+                autoFraming: false,
+                generateCovers: false,
+                outputPreset: .balanced
+            )
         }
     }
 }

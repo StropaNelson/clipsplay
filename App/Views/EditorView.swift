@@ -173,6 +173,10 @@ struct EditorView: View {
                     viewModel.setOperation(request.operation)
                     viewModel.createSequentialEpisodes(cuts: times, request: request)
                 },
+                onApplyPlan: { plan, brief in
+                    viewModel.setOperation(.aiEdit)
+                    viewModel.applyClipPlan(plan, brief: brief)
+                },
                 onOpenTranscript: { showingTranscription = true },
                 onOpenTranscriptEditor: { operation in openTranscriptEditing(operation: operation) },
                 onSeek: { viewModel.seekToSourceTime($0) },
@@ -3165,6 +3169,561 @@ class EditorViewModel: ObservableObject {
         Task { await persistProjectChanges() }
     }
 
+    /// "Editar com IA": one new episode per validated output (segments of the source
+    /// sequence, optional vinhetas/cards/captions). `operations` plans are applied
+    /// in place over the existing episodes by `applyClipPlanOperations`.
+    /// Returns the number of episodes created / operations applied.
+    @discardableResult
+    func applyClipPlan(_ plan: ClipPlan, brief: ClipBrief?) -> Int {
+        if let outputs = plan.normalized().outputs, !outputs.isEmpty {
+            let errors = ClipPlanValidator.validate(plan.normalized(), project: currentProject)
+            guard errors.isEmpty else {
+                errorMessage = ClipPlanExecutor.validationFailed(errors)
+                return 0
+            }
+            checkpoint()
+            var selected: Episode?
+            var nextIndex = (episodes.map(\.index).max() ?? -1) + 1
+            var aiCount = 0
+            for episode in episodes where episode.displayTitle?.hasPrefix("IA ") == true {
+                let suffix = episode.displayTitle?.dropFirst("IA ".count).trimmingCharacters(in: .whitespaces) ?? ""
+                aiCount = max(aiCount, Int(suffix.prefix { $0.isNumber }) ?? 0)
+            }
+            let sequenceDuration = project.sequenceSourceDuration
+            var newEpisodeIDs = Set<UUID>()
+            var dynamicCaptionIDs = Set<UUID>()
+            var staticCaptionIDs = Set<UUID>()
+            for output in outputs {
+                let merged = ClipPlanExecutor.mergedSourceRanges(of: output, sequenceDuration: sequenceDuration)
+                guard !merged.isEmpty else { continue }
+                var mainPieces: [VideoSegment] = []
+                for range in merged {
+                    mainPieces.append(contentsOf: project.sourceSegments(in: range))
+                }
+                guard !mainPieces.isEmpty else { continue }
+                let format = Self.planAspectRatio(output.format)
+                if output.auto_framing == true && format != .landscape16_9 {
+                    for index in mainPieces.indices {
+                        var adjustments = mainPieces[index].clipAdjustments
+                        adjustments.autoFraming = true
+                        mainPieces[index].clipAdjustments = adjustments
+                    }
+                }
+                for index in mainPieces.indices {
+                    mainPieces[index].transition = .none
+                }
+                var episode = Episode(
+                    index: nextIndex,
+                    mainStart: merged.first?.lowerBound ?? 0,
+                    mainEnd: merged.last?.upperBound ?? 0,
+                    introTemplate: nil,
+                    outroTemplate: nil,
+                    recapSettings: RecapSettings(enabled: false)
+                )
+                episode.mainClips = mainPieces
+                episode.outputAspectRatio = format == .original ? nil : format
+                aiCount += 1
+                let trimmedTitle = (output.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                episode.displayTitle = trimmedTitle.isEmpty ? "IA \(aiCount)" : String(trimmedTitle.prefix(80))
+                episode.useGlobalIntro = false
+                episode.useGlobalOutro = false
+                episode.useGlobalRecap = false
+                if let intro = output.intro,
+                   let assetID = UUID(uuidString: intro.asset_id),
+                   let template = vinhetaTemplate(
+                       for: VinhetaChoice(
+                           assetID: assetID,
+                           start: Double(intro.in_ms) / 1000,
+                           end: Double(intro.out_ms) / 1000
+                       ),
+                       track: .intro
+                   ) {
+                    episode.customIntroTemplate = template
+                }
+                if let outro = output.outro,
+                   let assetID = UUID(uuidString: outro.asset_id),
+                   let template = vinhetaTemplate(
+                       for: VinhetaChoice(
+                           assetID: assetID,
+                           start: Double(outro.in_ms) / 1000,
+                           end: Double(outro.out_ms) / 1000
+                       ),
+                       track: .outro
+                   ) {
+                    episode.customOutroTemplate = template
+                }
+                var overlays: [TextOverlay] = []
+                for spec in output.texts ?? [] {
+                    overlays.append(Self.planTextOverlay(spec))
+                }
+                episode.textOverlays = overlays
+                episodes.append(episode)
+                newEpisodeIDs.insert(episode.id)
+                if output.captions?.enabled == true {
+                    if (output.captions?.style ?? "static") == "dynamic" {
+                        dynamicCaptionIDs.insert(episode.id)
+                    } else {
+                        staticCaptionIDs.insert(episode.id)
+                    }
+                }
+                selected = episode
+                nextIndex += 1
+            }
+            guard let selected = selected else { return 0 }
+            selectedEpisode = selected
+            if let srt = project.transcriptSRT, let cues = try? SubtitleFile.parse(srt) {
+                if !dynamicCaptionIDs.isEmpty {
+                    applyCaptions(cues, dynamic: true, recordUndo: false, episodeIDs: dynamicCaptionIDs)
+                }
+                if !staticCaptionIDs.isEmpty {
+                    applyCaptions(cues, dynamic: false, recordUndo: false, episodeIDs: staticCaptionIDs)
+                }
+            }
+            Task { await persistProjectChanges() }
+            return newEpisodeIDs.count
+        }
+        if let operations = plan.normalized().operations, !operations.isEmpty {
+            let errors = ClipPlanValidator.validate(plan.normalized(), project: currentProject)
+            guard errors.isEmpty else {
+                errorMessage = ClipPlanExecutor.validationFailed(errors)
+                return 0
+            }
+            return applyClipPlanOperations(operations, brief: brief)
+        }
+        errorMessage = ClipPlanExecutor.emptyPlan
+        return 0
+    }
+
+    // MARK: - ClipPlan operations
+
+    /// Where a "seg_N" id pointed when the plan started, so a piece removed by
+    /// an earlier cut simply fails to resolve instead of hitting the wrong clip.
+    private enum PlanSegmentSlot {
+        case intro
+        case recap(Int)         // ordinal inside the episode's effective recaps
+        case main(UUID)         // mainClips element id
+        case outro
+    }
+
+    /// Ids of one episode's pieces as the plan saw them (same numbering
+    /// ClipBriefBuilder.episodeStates uses: storyline order, textOverlays order,
+    /// resolvedAudioClips order).
+    private struct PlanTargetMaps {
+        var segments: [String: PlanSegmentSlot] = [:]
+        var texts: [String: UUID] = [:]
+        var audio: [String: UUID] = [:]
+        var coverage: [ClosedRange<Double>] = []
+        var hadCaptions = false
+        var hadDynamicCaptions = false
+    }
+
+    /// Applies an `operations` plan in place over the existing episodes.
+    /// One checkpoint covers the whole plan; ops whose targets disappeared
+    /// (e.g. a segment removed by a cut in the same plan) are skipped.
+    /// Returns the number of operations applied.
+    @discardableResult
+    func applyClipPlanOperations(_ ops: [ClipPlanOperation], brief: ClipBrief?) -> Int {
+        // Rebuild a minimal plan so the validator stays the single entry point.
+        let plan = ClipPlan(clipplan_version: ClipPlanContract.planVersion, outputs: nil, operations: ops)
+        let errors = ClipPlanValidator.validate(plan, project: currentProject)
+        guard errors.isEmpty else {
+            errorMessage = ClipPlanExecutor.validationFailed(errors)
+            return 0
+        }
+        guard !ops.isEmpty else {
+            errorMessage = ClipPlanExecutor.emptyPlan
+            return 0
+        }
+        checkpoint()
+
+        // Resolve every id against the ORIGINAL episodes: ep_N is the array
+        // index at plan time; seg_N/txt_N/aud_N index into each episode's own
+        // snapshot (storyline / textOverlays / resolvedAudioClips order).
+        var targetMaps: [Int: PlanTargetMaps] = [:]
+        for operation in ops {
+            guard let episodeIndex = ClipPlanExecutor.planIndex(operation.target, prefix: "ep"),
+                  episodes.indices.contains(episodeIndex),
+                  targetMaps[episodeIndex] == nil else { continue }
+            targetMaps[episodeIndex] = planTargetMaps(for: episodes[episodeIndex])
+        }
+
+        // Cuts are grouped per episode and applied once after all other ops:
+        // the AI authored the plan against the original episodes, so ids and
+        // timeline positions must keep resolving to the pre-edit state.
+        var pendingCuts: [Int: [ClosedRange<Double>]] = [:]
+        var cutOpIndices: [Int: [Int]] = [:]
+        var applied = 0
+        var skipped = 0
+
+        for (opIndex, operation) in ops.enumerated() {
+            guard let episodeIndex = ClipPlanExecutor.planIndex(operation.target, prefix: "ep"),
+                  episodes.indices.contains(episodeIndex),
+                  let maps = targetMaps[episodeIndex] else {
+                skipped += 1
+                continue
+            }
+            var episode = episodes[episodeIndex]
+
+            switch operation.op {
+            case "cut_range":
+                guard let inMs = operation.in_ms, let outMs = operation.out_ms, outMs > inMs else {
+                    skipped += 1
+                    continue
+                }
+                let start = max(0, min(Double(inMs) / 1000, project.sequenceSourceDuration))
+                let end = max(start, min(Double(outMs) / 1000, project.sequenceSourceDuration))
+                guard end - start > 0.05 else {
+                    skipped += 1
+                    continue
+                }
+                pendingCuts[episodeIndex, default: []].append(start...end)
+                cutOpIndices[episodeIndex, default: []].append(opIndex)
+                applied += 1
+            case "remove_silences":
+                let ranges = planSilenceRanges(
+                    coverage: maps.coverage,
+                    minPause: ClipPlanExecutor.minPauseSeconds(operation)
+                )
+                guard !ranges.isEmpty else {
+                    skipped += 1
+                    continue
+                }
+                pendingCuts[episodeIndex, default: []].append(contentsOf: ranges)
+                cutOpIndices[episodeIndex, default: []].append(opIndex)
+                applied += 1
+            case "set_volume":
+                var changed = false
+                if let segmentID = operation.segment_id,
+                   let slot = maps.segments[segmentID],
+                   let volume = operation.volume,
+                   mutatePlanSegment(slot, in: &episode, { $0.clipVolume = Float(volume) }) {
+                    changed = true
+                }
+                if let audioID = operation.audio_id,
+                   let uuid = maps.audio[audioID],
+                   let volume = operation.volume,
+                   setPlanAudioVolume(uuid, in: &episode, volume: Float(volume)) {
+                    changed = true
+                }
+                if changed { applied += 1 } else { skipped += 1 }
+            case "move_text":
+                if let textID = operation.text_id,
+                   let uuid = maps.texts[textID],
+                   let index = episode.textOverlays.firstIndex(where: { $0.id == uuid }) {
+                    episode.textOverlays[index].positionY = Self.planPositionY(operation.position)
+                    applied += 1
+                } else {
+                    skipped += 1
+                }
+            case "set_text_style":
+                if let textID = operation.text_id,
+                   let uuid = maps.texts[textID],
+                   let index = episode.textOverlays.firstIndex(where: { $0.id == uuid }) {
+                    var overlay = episode.textOverlays[index]
+                    if let style = operation.style { overlay.style = Self.planOverlayStyle(style) }
+                    if let color = operation.color { overlay.color = Self.planOverlayColor(color) }
+                    if let size = operation.size { overlay.fontScale = ClipPlanExecutor.textFontScale(size) }
+                    episode.textOverlays[index] = overlay
+                    applied += 1
+                } else {
+                    skipped += 1
+                }
+            case "set_aspect":
+                guard let format = operation.format else {
+                    skipped += 1
+                    continue
+                }
+                let ratio = Self.planAspectRatio(format)
+                episode.outputAspectRatio = ratio == .original ? nil : ratio
+                applied += 1
+            case "set_transition":
+                if let segmentID = operation.segment_id,
+                   let slot = maps.segments[segmentID],
+                   let style = operation.style {
+                    if mutatePlanSegment(slot, in: &episode, { $0.transition = Self.planTransition(style) }) {
+                        applied += 1
+                    } else {
+                        skipped += 1
+                    }
+                } else {
+                    skipped += 1
+                }
+            case "add_text":
+                guard let text = operation.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      let startMs = operation.start_ms, let durationMs = operation.duration_ms else {
+                    skipped += 1
+                    continue
+                }
+                let spec = ClipPlanText(
+                    text: text,
+                    start_ms: startMs,
+                    duration_ms: durationMs,
+                    position: operation.position,
+                    style: operation.style,
+                    color: operation.color
+                )
+                episode.textOverlays.append(Self.planTextOverlay(spec))
+                applied += 1
+            case "set_captions":
+                if operation.enabled == false {
+                    episode.textOverlays = episode.textOverlays.filter { $0.isCaption != true }
+                    applied += 1
+                } else if operation.enabled == true,
+                          let srt = project.transcriptSRT,
+                          let cues = try? SubtitleFile.parse(srt), !cues.isEmpty {
+                    // applyCaptions reads the episodes array — write pending edits back first.
+                    episodes[episodeIndex] = episode
+                    applyCaptions(cues, dynamic: operation.style == "dynamic", recordUndo: false, episodeIDs: [episode.id])
+                    episode = episodes[episodeIndex]
+                    applied += 1
+                } else {
+                    skipped += 1
+                }
+            case "auto_framing":
+                guard let enabled = operation.enabled else {
+                    skipped += 1
+                    continue
+                }
+                var clips = episode.mainClips
+                for index in clips.indices {
+                    var adjustments = clips[index].clipAdjustments
+                    adjustments.autoFraming = enabled
+                    clips[index].clipAdjustments = adjustments
+                }
+                episode.mainClips = clips
+                applied += 1
+            case "set_vinheta":
+                guard let track = operation.track,
+                      let assetString = operation.asset_id,
+                      let assetID = UUID(uuidString: assetString),
+                      let inMs = operation.in_ms, let outMs = operation.out_ms,
+                      let template = vinhetaTemplate(
+                          for: VinhetaChoice(assetID: assetID, start: Double(inMs) / 1000, end: Double(outMs) / 1000),
+                          track: track == "intro" ? .intro : .outro
+                      ) else {
+                    skipped += 1
+                    continue
+                }
+                // A custom template wins over the global one in storyline(); the
+                // flag stays false so dropping the custom never falls back silently.
+                if track == "intro" {
+                    episode.customIntroTemplate = template
+                    episode.useGlobalIntro = false
+                } else {
+                    episode.customOutroTemplate = template
+                    episode.useGlobalOutro = false
+                }
+                applied += 1
+            default:
+                skipped += 1
+            }
+            episodes[episodeIndex] = episode
+        }
+
+        // Grouped cuts, once per episode, then captions regenerated where needed.
+        var captionRefresh: [Int: Bool] = [:]
+        for episodeIndex in pendingCuts.keys.sorted() {
+            guard let ranges = pendingCuts[episodeIndex] else { continue }
+            let merged = Self.merge(ranges)
+            guard !merged.isEmpty else { continue }
+            if removeMergedRanges(merged, fromEpisodeAt: episodeIndex) {
+                captionRefresh[episodeIndex] = true
+            } else {
+                // Nothing intersected (or the episode would empty out): the ops
+                // that contributed these ranges count as skipped.
+                let count = cutOpIndices[episodeIndex]?.count ?? 0
+                applied -= count
+                skipped += count
+            }
+        }
+
+        // Episodes whose captions should still exist get them re-rendered on the
+        // post-cut timeline (closeGaps only shifts overlays; it can't re-split cues).
+        if let srt = project.transcriptSRT, let cues = try? SubtitleFile.parse(srt), !cues.isEmpty {
+            for episodeIndex in captionRefresh.keys.sorted() {
+                guard let maps = targetMaps[episodeIndex] else { continue }
+                let overlays = episodes[episodeIndex].textOverlays
+                let hasCaptions = overlays.contains { $0.isCaption == true }
+                guard hasCaptions || maps.hadCaptions else { continue }
+                let dynamic = overlays.contains { $0.isCaption == true && !($0.words?.isEmpty ?? true) }
+                    || maps.hadDynamicCaptions
+                applyCaptions(cues, dynamic: dynamic, recordUndo: false, episodeIDs: [episodes[episodeIndex].id])
+            }
+        }
+
+        if let index = selectedEpisodeIndex { selectedEpisode = episodes[index] }
+        if applied > 0 {
+            // Mid-plan helpers (e.g. applyCaptions on an episode with no cues)
+            // may have surfaced a warning; the plan as a whole succeeded.
+            errorMessage = nil
+        } else {
+            errorMessage = skipped > 0
+                ? "Nenhuma das \(skipped) edições do plano pôde ser aplicada."
+                : "Nenhuma edição do plano pôde ser aplicada."
+        }
+        Task { await persistProjectChanges() }
+        return applied
+    }
+
+    /// Id maps of one episode at plan start (pre-mutation), matching
+    /// ClipBriefBuilder.episodeStates numbering.
+    private func planTargetMaps(for episode: Episode) -> PlanTargetMaps {
+        var maps = PlanTargetMaps()
+        var recapOrdinal = 0
+        for (index, item) in episode.storyline().enumerated() {
+            switch item.track {
+            case .intro:
+                maps.segments["seg_\(index + 1)"] = .intro
+            case .outro:
+                maps.segments["seg_\(index + 1)"] = .outro
+            case .recap:
+                maps.segments["seg_\(index + 1)"] = .recap(recapOrdinal)
+                recapOrdinal += 1
+            default:
+                maps.segments["seg_\(index + 1)"] = .main(item.segment.id)
+            }
+        }
+        for (index, overlay) in episode.textOverlays.enumerated() {
+            maps.texts["txt_\(index + 1)"] = overlay.id
+        }
+        for (index, clip) in episode.resolvedAudioClips(global: project.globalAudioClips).enumerated() {
+            maps.audio["aud_\(index + 1)"] = clip.id
+        }
+        maps.coverage = sourceCoverage(of: episode)
+        maps.hadCaptions = episode.textOverlays.contains { $0.isCaption == true }
+        maps.hadDynamicCaptions = episode.textOverlays.contains { $0.isCaption == true && !($0.words?.isEmpty ?? true) }
+        return maps
+    }
+
+    /// Mutates the segment a seg_N id pointed at in the original snapshot.
+    /// Returns false when that piece no longer exists (e.g. removed by a cut).
+    private func mutatePlanSegment(_ slot: PlanSegmentSlot, in episode: inout Episode, _ body: (inout VideoSegment) -> Void) -> Bool {
+        switch slot {
+        case .main(let id):
+            var clips = episode.mainClips
+            guard let index = clips.firstIndex(where: { $0.id == id }) else { return false }
+            body(&clips[index])
+            episode.mainClips = clips
+            return true
+        case .recap(let ordinal):
+            if !episode.customRecapSegments.isEmpty {
+                guard ordinal < episode.customRecapSegments.count else { return false }
+                body(&episode.customRecapSegments[ordinal])
+                episode.usesCustomRecapSegments = true
+                return true
+            }
+            guard ordinal < episode.recapSegments.count else { return false }
+            body(&episode.recapSegments[ordinal])
+            episode.usesCustomRecapSegments = true
+            return true
+        case .intro:
+            if episode.customIntroTemplate != nil { episode.normalizeCustomTemplates() }
+            guard episode.useGlobalIntro, var intro = episode.introSegment else { return false }
+            body(&intro)
+            episode.introSegment = intro
+            return true
+        case .outro:
+            if episode.customOutroTemplate != nil { episode.normalizeCustomTemplates() }
+            guard episode.useGlobalOutro, var outro = episode.outroSegment else { return false }
+            body(&outro)
+            episode.outroSegment = outro
+            return true
+        }
+    }
+
+    /// Volume on an aud_N target: episode clips first, then project-wide ones
+    /// (resolvedAudioClips merges both; the id tells which list owns it).
+    private func setPlanAudioVolume(_ uuid: UUID, in episode: inout Episode, volume: Float) -> Bool {
+        if let index = episode.audioClips.firstIndex(where: { $0.id == uuid }) {
+            var clips = episode.audioClips
+            clips[index].volume = volume
+            episode.audioClips = clips
+            return true
+        }
+        if let index = project.globalAudioClips.firstIndex(where: { $0.id == uuid }) {
+            project.globalAudioClips[index].volume = volume
+            return true
+        }
+        return false
+    }
+
+    /// Pause ranges (source-sequence seconds) inside one episode's coverage,
+    /// from the transcript alone — same word-gap detection as "Remover pausas",
+    /// kept synchronous so the whole plan applies under a single checkpoint.
+    private func planSilenceRanges(coverage: [ClosedRange<Double>], minPause: Double) -> [ClosedRange<Double>] {
+        guard let words = project.transcriptWords, !words.isEmpty,
+              let transcriptDuration = project.transcriptSequenceDuration,
+              abs(transcriptDuration - project.sequenceSourceDuration) <= 0.5 else { return [] }
+        return PauseDetector.detect(
+            words: words,
+            energy: [],
+            interval: 0.5,
+            totalDuration: project.sequenceSourceDuration,
+            minPause: minPause,
+            margin: 0.15,
+            coverage: coverage
+        ).map { $0.start...$0.end }
+    }
+
+    private static func planPositionY(_ position: String?) -> Double {
+        switch position {
+        case "top": return EpisodeCardPosition.top.positionY
+        case "center": return EpisodeCardPosition.center.positionY
+        default: return EpisodeCardPosition.bottom.positionY
+        }
+    }
+
+    private static func planOverlayStyle(_ style: String?) -> TextOverlayStyle {
+        switch style {
+        case "plain": return .plain
+        case "shadow": return .shadow
+        default: return .box
+        }
+    }
+
+    private static func planOverlayColor(_ color: String?) -> RGBAColor {
+        switch color {
+        case "yellow": return EpisodeCardColor.yellow.rgba
+        case "black": return EpisodeCardColor.black.rgba
+        default: return EpisodeCardColor.white.rgba
+        }
+    }
+
+    private static func planTransition(_ style: String) -> TransitionStyle {
+        switch style {
+        case "none": return .none
+        case "fadeBlack": return .fadeBlack
+        case "fadeWhite": return .fadeWhite
+        default: return .dissolve
+        }
+    }
+
+    private static func planAspectRatio(_ format: String) -> AspectRatio {
+        switch format {
+        case "16:9": return .landscape16_9
+        case "9:16": return .portrait9_16
+        case "1:1": return .square1_1
+        case "4:5": return .portrait4_5
+        default: return .original
+        }
+    }
+
+    /// Maps a plan text card to a timeline overlay (same look as the part cards).
+    private static func planTextOverlay(_ spec: ClipPlanText) -> TextOverlay {
+        var overlay = TextOverlay(
+            text: spec.text,
+            startTime: Double(spec.start_ms) / 1000,
+            duration: max(0.5, Double(spec.duration_ms) / 1000)
+        )
+        overlay.positionY = planPositionY(spec.position ?? "bottom")
+        overlay.fontScale = EpisodeCardSize.medium.fontScale
+        overlay.style = planOverlayStyle(spec.style ?? "box")
+        overlay.color = planOverlayColor(spec.color ?? "white")
+        overlay.animation = .fade
+        overlay.exitAnimation = .fade
+        return overlay
+    }
+
     /// Rebuilds the project's episodes at detected topic boundaries (source times).
     func createEpisodesAtTopics(_ sourceTimes: [Double], request: AutomationRequest? = nil) {
         var workingProject = project
@@ -3425,48 +3984,8 @@ class EditorViewModel: ObservableObject {
         let shouldApplyCaptions = captions || episodes.contains { $0.textOverlays.contains { $0.isCaption == true } }
         var changed = 0
         for index in episodes.indices {
-            var episode = episodes[index]
-            if let episodeIDs = episodeIDs, !episodeIDs.contains(episode.id) { continue }
-            let items = episode.storyline()
-            var removedTimeline: [ClosedRange<Double>] = []
-            var clips: [VideoSegment] = []
-            for clip in episode.mainClips {
-                guard !clip.isFreezeFrame,
-                      let item = items.first(where: { $0.segment.id == clip.id }) else {
-                    clips.append(clip)
-                    continue
-                }
-                let sourceStart = clip.sequenceStartTime + clip.startTime
-                let sourceEnd = clip.sequenceStartTime + clip.endTime
-                let speed = clip.playbackSpeed
-                var cursor = clip.startTime
-                var touched = false
-                var pieces: [VideoSegment] = []
-                for range in merged where range.upperBound > sourceStart && range.lowerBound < sourceEnd {
-                    let lower = max(range.lowerBound, sourceStart) - clip.sequenceStartTime
-                    let upper = min(range.upperBound, sourceEnd) - clip.sequenceStartTime
-                    if lower - cursor > 0.05 {
-                        var piece = cursor == clip.startTime ? clip : clip.continuation(from: cursor)
-                        piece.endTime = lower
-                        pieces.append(piece)
-                    }
-                    removedTimeline.append((item.start + (lower - clip.startTime) / speed)...(item.start + (upper - clip.startTime) / speed))
-                    cursor = upper
-                    touched = true
-                }
-                guard touched else {
-                    clips.append(clip)
-                    continue
-                }
-                if clip.endTime - cursor > 0.05 { pieces.append(clip.continuation(from: cursor)) }
-                clips.append(contentsOf: pieces)
-            }
-            guard !removedTimeline.isEmpty, !clips.isEmpty else { continue }
-            episode.mainClips = clips
-            Self.closeGaps(in: &episode, removing: removedTimeline)
-            episode.clearTimelinePins()
-            episodes[index] = episode
-            changed += 1
+            if let episodeIDs = episodeIDs, !episodeIDs.contains(episodes[index].id) { continue }
+            if removeMergedRanges(merged, fromEpisodeAt: index) { changed += 1 }
         }
         guard changed > 0 else {
             errorMessage = "Os trechos escolhidos não estão no conteúdo principal dos episódios."
@@ -3477,6 +3996,55 @@ class EditorViewModel: ObservableObject {
             applyCaptions(cues, dynamic: captions ? dynamicCaptions : captionsAreDynamic, recordUndo: false)
         }
         Task { await persistProjectChanges() }
+    }
+
+    /// Cuts merged source-sequence ranges out of one episode's main clips and
+    /// closes the resulting timeline gaps (overlays/audio/markers shift too).
+    /// Returns false when nothing would be removed or the episode would empty out.
+    /// Mutates `episodes[index]` without checkpointing — the caller owns undo.
+    @discardableResult
+    private func removeMergedRanges(_ merged: [ClosedRange<Double>], fromEpisodeAt index: Int) -> Bool {
+        var episode = episodes[index]
+        let items = episode.storyline()
+        var removedTimeline: [ClosedRange<Double>] = []
+        var clips: [VideoSegment] = []
+        for clip in episode.mainClips {
+            guard !clip.isFreezeFrame,
+                  let item = items.first(where: { $0.segment.id == clip.id }) else {
+                clips.append(clip)
+                continue
+            }
+            let sourceStart = clip.sequenceStartTime + clip.startTime
+            let sourceEnd = clip.sequenceStartTime + clip.endTime
+            let speed = clip.playbackSpeed
+            var cursor = clip.startTime
+            var touched = false
+            var pieces: [VideoSegment] = []
+            for range in merged where range.upperBound > sourceStart && range.lowerBound < sourceEnd {
+                let lower = max(range.lowerBound, sourceStart) - clip.sequenceStartTime
+                let upper = min(range.upperBound, sourceEnd) - clip.sequenceStartTime
+                if lower - cursor > 0.05 {
+                    var piece = cursor == clip.startTime ? clip : clip.continuation(from: cursor)
+                    piece.endTime = lower
+                    pieces.append(piece)
+                }
+                removedTimeline.append((item.start + (lower - clip.startTime) / speed)...(item.start + (upper - clip.startTime) / speed))
+                cursor = upper
+                touched = true
+            }
+            guard touched else {
+                clips.append(clip)
+                continue
+            }
+            if clip.endTime - cursor > 0.05 { pieces.append(clip.continuation(from: cursor)) }
+            clips.append(contentsOf: pieces)
+        }
+        guard !removedTimeline.isEmpty, !clips.isEmpty else { return false }
+        episode.mainClips = clips
+        Self.closeGaps(in: &episode, removing: removedTimeline)
+        episode.clearTimelinePins()
+        episodes[index] = episode
+        return true
     }
 
     /// Global source-sequence ranges covered by an episode's non-freeze main clips, merged.
