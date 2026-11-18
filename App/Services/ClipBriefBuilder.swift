@@ -90,7 +90,9 @@ enum ClipBriefBuilder {
                 text_colors: ClipPlanContract.textColors,
                 transition_styles: ClipPlanContract.transitionStyles,
                 operation_kinds: ClipPlanContract.operationKinds,
-                operations_executable: true
+                operations_executable: true,
+                operations: ClipPlanContract.operationSpecs,
+                notes: ClipPlanContract.capabilityNotes
             )
         )
     }
@@ -135,6 +137,46 @@ enum ClipBriefBuilder {
     static func briefFileName(project: Project) -> String {
         let safe = project.name.replacingOccurrences(of: "/", with: "-")
         return "\(safe)_brief.clipbrief"
+    }
+
+    /// Shrinks a brief for small context windows (the on-device model): keeps
+    /// the ids and states a plan needs — source, scene cuts, topics, hooks
+    /// (≤5), energy_peaks (≤5), episodes_state (each per-episode list capped
+    /// at 40), assets, vocabulary, a slim capabilities — and drops transcript
+    /// and pauses, so requests keyed on speech content may come back imprecise.
+    static func compact(_ brief: ClipBrief) -> ClipBrief {
+        var copy = brief
+        copy.transcript = []
+        copy.pauses = []
+        copy.energy_peaks = Array(brief.energy_peaks.prefix(5))
+        copy.hooks = Array(brief.hooks.prefix(5))
+        copy.episodes_state = brief.episodes_state?.map { episode in
+            var capped = episode
+            capped.segments = Array(episode.segments.prefix(40))
+            capped.texts = Array(episode.texts.prefix(40))
+            capped.audio = Array(episode.audio.prefix(40))
+            if let overlays = episode.overlays { capped.overlays = Array(overlays.prefix(40)) }
+            if let markers = episode.markers { capped.markers = Array(markers.prefix(40)) }
+            return capped
+        }
+        copy.capabilities = ClipBriefCapabilities(
+            plan_version: brief.capabilities.plan_version,
+            scope: brief.capabilities.scope,
+            max_outputs: brief.capabilities.max_outputs,
+            max_operations: brief.capabilities.max_operations,
+            time_unit: brief.capabilities.time_unit,
+            formats: brief.capabilities.formats,
+            caption_styles: [],
+            text_positions: [],
+            text_styles: [],
+            text_colors: [],
+            transition_styles: brief.capabilities.transition_styles,
+            operation_kinds: brief.capabilities.operation_kinds,
+            operations_executable: brief.capabilities.operations_executable,
+            operations: nil,
+            notes: brief.capabilities.notes
+        )
+        return copy
     }
 
     // MARK: - Transcript sentences
@@ -231,11 +273,14 @@ enum ClipBriefBuilder {
 
     // MARK: - Episode state
 
-    /// Snapshot of every episode's storyline/texts/audio with the stable ids
-    /// that ClipPlan operations reference (ep_N, seg_N, txt_N, aud_N).
+    /// Snapshot of every episode's storyline/texts/audio/overlays/markers with
+    /// the stable ids that ClipPlan operations reference
+    /// (ep_N, seg_N, txt_N, aud_N, ovl_N). Each seg_N also reports where it
+    /// sits on the episode timeline so the AI can place edits in time.
     static func episodeStates(project: Project) -> [ClipBriefEpisodeState] {
         project.episodes.enumerated().map { index, episode in
-            let segments = episode.storyline().enumerated().map { itemIndex, item -> ClipBriefSegmentState in
+            let items = episode.storyline()
+            let segments = items.enumerated().map { itemIndex, item -> ClipBriefSegmentState in
                 let clip = item.segment
                 // Main clips are addressed in source-sequence ms; vinhetas are
                 // addressed inside their own asset.
@@ -249,7 +294,9 @@ enum ClipBriefBuilder {
                     id: "seg_\(itemIndex + 1)",
                     track: trackName(item.track),
                     source_in_ms: ms(inSeconds),
-                    source_out_ms: ms(outSeconds)
+                    source_out_ms: ms(outSeconds),
+                    timeline_in_ms: ms(item.start),
+                    timeline_out_ms: ms(item.end)
                 )
             }
             let texts = episode.textOverlays.enumerated().map { itemIndex, overlay -> ClipBriefTextState in
@@ -272,12 +319,24 @@ enum ClipBriefBuilder {
                         end_ms: ms(clip.endTime)
                     )
                 }
+            let overlays = episode.mediaOverlays.enumerated().map { itemIndex, overlay -> ClipBriefOverlayState in
+                ClipBriefOverlayState(
+                    id: "ovl_\(itemIndex + 1)",
+                    asset_id: overlay.assetID.uuidString,
+                    start_ms: ms(overlay.startTime),
+                    duration_ms: ms(overlay.duration)
+                )
+            }
+            let markers = episode.markers.map { ms($0.time) }
             return ClipBriefEpisodeState(
                 episode_id: episodeStateID(forIndex: index),
                 title: episode.title,
                 segments: segments,
                 texts: texts,
-                audio: audio
+                audio: audio,
+                overlays: overlays,
+                markers: markers,
+                duration_ms: ms(items.last?.end ?? 0)
             )
         }
     }

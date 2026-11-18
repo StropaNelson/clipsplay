@@ -3253,8 +3253,17 @@ class EditorViewModel: ObservableObject {
                     episode.customOutroTemplate = template
                 }
                 var overlays: [TextOverlay] = []
+                let anchorRanges = ClipPlanExecutor.cumulativeRanges(of: merged)
+                let outputDuration = ClipPlanExecutor.outputDuration(output, sequenceDuration: sequenceDuration)
                 for spec in output.texts ?? [] {
-                    overlays.append(Self.planTextOverlay(spec))
+                    let start = ClipPlanExecutor.resolveStart(
+                        startMs: spec.start_ms,
+                        atSegment: spec.at_segment,
+                        at: spec.at,
+                        anchorRanges: anchorRanges,
+                        timelineDuration: outputDuration
+                    )
+                    overlays.append(Self.planTextOverlay(spec, start: start))
                 }
                 episode.textOverlays = overlays
                 episodes.append(episode)
@@ -3303,15 +3312,25 @@ class EditorViewModel: ObservableObject {
         case recap(Int)         // ordinal inside the episode's effective recaps
         case main(UUID)         // mainClips element id
         case outro
+
+        var isMain: Bool {
+            if case .main = self { return true }
+            return false
+        }
     }
 
     /// Ids of one episode's pieces as the plan saw them (same numbering
     /// ClipBriefBuilder.episodeStates uses: storyline order, textOverlays order,
-    /// resolvedAudioClips order).
+    /// resolvedAudioClips order, mediaOverlays order).
     private struct PlanTargetMaps {
         var segments: [String: PlanSegmentSlot] = [:]
         var texts: [String: UUID] = [:]
         var audio: [String: UUID] = [:]
+        var overlays: [String: UUID] = [:]
+        /// Storyline time ranges of seg_1...seg_N (for at_segment anchors).
+        var segmentRanges: [ClosedRange<Double>] = []
+        /// Storyline end of the episode (for negative start_ms resolution).
+        var timelineDuration: Double = 0
         var coverage: [ClosedRange<Double>] = []
         var hadCaptions = false
         var hadDynamicCaptions = false
@@ -3352,6 +3371,9 @@ class EditorViewModel: ObservableObject {
         // timeline positions must keep resolving to the pre-edit state.
         var pendingCuts: [Int: [ClosedRange<Double>]] = [:]
         var cutOpIndices: [Int: [Int]] = [:]
+        /// ep indices a delete_episode op claimed — later ops on them skip,
+        /// and the episodes are actually removed after everything else.
+        var deletedTargets: Set<Int> = []
         var applied = 0
         var skipped = 0
 
@@ -3359,6 +3381,10 @@ class EditorViewModel: ObservableObject {
             guard let episodeIndex = ClipPlanExecutor.planIndex(operation.target, prefix: "ep"),
                   episodes.indices.contains(episodeIndex),
                   let maps = targetMaps[episodeIndex] else {
+                skipped += 1
+                continue
+            }
+            guard !deletedTargets.contains(episodeIndex) else {
                 skipped += 1
                 continue
             }
@@ -3450,19 +3476,27 @@ class EditorViewModel: ObservableObject {
                 }
             case "add_text":
                 guard let text = operation.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                      let startMs = operation.start_ms, let durationMs = operation.duration_ms else {
+                      let durationMs = operation.duration_ms,
+                      operation.start_ms != nil || operation.at_segment != nil else {
                     skipped += 1
                     continue
                 }
+                let start = ClipPlanExecutor.resolveStart(
+                    startMs: operation.start_ms,
+                    atSegment: operation.at_segment,
+                    at: operation.at,
+                    anchorRanges: maps.segmentRanges,
+                    timelineDuration: maps.timelineDuration
+                )
                 let spec = ClipPlanText(
                     text: text,
-                    start_ms: startMs,
+                    start_ms: nil,
                     duration_ms: durationMs,
                     position: operation.position,
                     style: operation.style,
                     color: operation.color
                 )
-                episode.textOverlays.append(Self.planTextOverlay(spec))
+                episode.textOverlays.append(Self.planTextOverlay(spec, start: start))
                 applied += 1
             case "set_captions":
                 if operation.enabled == false {
@@ -3514,6 +3548,394 @@ class EditorViewModel: ObservableObject {
                     episode.useGlobalOutro = false
                 }
                 applied += 1
+            case "set_speed":
+                guard let segmentID = operation.segment_id,
+                      let slot = maps.segments[segmentID],
+                      let speed = operation.speed,
+                      mutatePlanSegment(slot, in: &episode, { $0.playbackSpeed = speed }) else {
+                    skipped += 1
+                    continue
+                }
+                episode.clearTimelinePins()
+                applied += 1
+            case "set_adjustments":
+                guard let segmentID = operation.segment_id,
+                      let slot = maps.segments[segmentID],
+                      mutatePlanSegment(slot, in: &episode, { segment in
+                          var adjustments = segment.clipAdjustments
+                          if let brightness = operation.brightness { adjustments.brightness = brightness }
+                          if let contrast = operation.contrast { adjustments.contrast = contrast }
+                          if let saturation = operation.saturation { adjustments.saturation = saturation }
+                          if let warmth = operation.warmth { adjustments.warmth = warmth }
+                          if let vignette = operation.vignette { adjustments.vignette = vignette }
+                          if let removeBackground = operation.remove_background { adjustments.removeBackground = removeBackground }
+                          segment.clipAdjustments = adjustments
+                      }) else {
+                    skipped += 1
+                    continue
+                }
+                applied += 1
+            case "set_transform":
+                guard let segmentID = operation.segment_id,
+                      let slot = maps.segments[segmentID],
+                      mutatePlanSegment(slot, in: &episode, { segment in
+                          var transform = segment.clipTransform
+                          if let scale = operation.scale { transform.scale = scale }
+                          if let rotation = operation.rotation { transform.rotation = rotation }
+                          if let offsetX = operation.offset_x { transform.offsetX = offsetX }
+                          if let offsetY = operation.offset_y { transform.offsetY = offsetY }
+                          segment.clipTransform = transform
+                      }) else {
+                    skipped += 1
+                    continue
+                }
+                applied += 1
+            case "trim_segment":
+                guard let segmentID = operation.segment_id,
+                      let slot = maps.segments[segmentID],
+                      operation.in_ms != nil || operation.out_ms != nil else {
+                    skipped += 1
+                    continue
+                }
+                var trimmed = false
+                let resolved = mutatePlanSegment(slot, in: &episode) { segment in
+                    // Main slots trim in source-sequence ms; vinheta slots in
+                    // asset-local ms (same convention as the brief).
+                    let seqOffset = slot.isMain ? segment.sequenceStartTime : 0
+                    let limit = planSourceLimit(for: segment, slot: slot)
+                    if let inMs = operation.in_ms {
+                        segment.startTime = min(limit, max(0, Double(inMs) / 1000 - seqOffset))
+                    }
+                    if let outMs = operation.out_ms {
+                        segment.endTime = min(limit, max(0, Double(outMs) / 1000 - seqOffset))
+                    }
+                    if segment.endTime - segment.startTime <= 0.05 {
+                        segment.endTime = min(limit, segment.startTime + 0.051)
+                    }
+                    if segment.endTime - segment.startTime <= 0.05 {
+                        segment.startTime = max(0, segment.endTime - 0.051)
+                    }
+                    trimmed = segment.endTime - segment.startTime > 0.05
+                }
+                if resolved && trimmed {
+                    episode.clearTimelinePins()
+                    applied += 1
+                } else {
+                    skipped += 1
+                }
+            case "split":
+                guard let segmentID = operation.segment_id,
+                      let slot = maps.segments[segmentID],
+                      case .main(let uuid) = slot,
+                      let atMs = operation.at_ms else {
+                    skipped += 1
+                    continue
+                }
+                var clips = episode.mainClips
+                guard let clipIndex = clips.firstIndex(where: { $0.id == uuid }) else {
+                    skipped += 1
+                    continue
+                }
+                let clip = clips[clipIndex]
+                let localSplit = Double(atMs) / 1000 - clip.sequenceStartTime
+                guard localSplit - clip.startTime > 0.05, clip.endTime - localSplit > 0.05 else {
+                    skipped += 1
+                    continue
+                }
+                var first = clip
+                first.endTime = localSplit
+                // The transition moves to the second piece: it plays at the
+                // split point (the first piece keeps the clip's entrance cut).
+                var second = clip.continuation(from: localSplit)
+                second.transitionStyle = clip.transitionStyle
+                first.transitionStyle = TransitionStyle.none
+                clips.replaceSubrange(clipIndex...clipIndex, with: [first, second])
+                episode.mainClips = clips
+                applied += 1
+            case "remove_segment":
+                guard let segmentID = operation.segment_id,
+                      let slot = maps.segments[segmentID] else {
+                    skipped += 1
+                    continue
+                }
+                switch slot {
+                case .main(let uuid):
+                    guard let clip = episode.mainClips.first(where: { $0.id == uuid }) else {
+                        skipped += 1
+                        continue
+                    }
+                    // Removing a main clip = cutting its source coverage; the
+                    // grouped pass below closes the timeline gap.
+                    let range = (clip.sequenceStartTime + clip.startTime)...(clip.sequenceStartTime + clip.endTime)
+                    pendingCuts[episodeIndex, default: []].append(range)
+                    cutOpIndices[episodeIndex, default: []].append(opIndex)
+                    applied += 1
+                case .intro:
+                    episode.normalizeCustomTemplates()
+                    episode.introSegment = nil
+                    episode.useGlobalIntro = false
+                    applied += 1
+                case .outro:
+                    episode.normalizeCustomTemplates()
+                    episode.outroSegment = nil
+                    episode.useGlobalOutro = false
+                    applied += 1
+                case .recap(let ordinal):
+                    if !episode.customRecapSegments.isEmpty {
+                        guard ordinal < episode.customRecapSegments.count else {
+                            skipped += 1
+                            continue
+                        }
+                        episode.customRecapSegments.remove(at: ordinal)
+                    } else {
+                        guard ordinal < episode.recapSegments.count else {
+                            skipped += 1
+                            continue
+                        }
+                        episode.recapSegments.remove(at: ordinal)
+                        episode.useGlobalRecap = !episode.recapSegments.isEmpty
+                    }
+                    episode.usesCustomRecapSegments = true
+                    applied += 1
+                }
+            case "reorder":
+                guard let ids = operation.order, !ids.isEmpty else {
+                    skipped += 1
+                    continue
+                }
+                var uuids: [UUID] = []
+                var badID = false
+                for segmentID in ids {
+                    guard let slot = maps.segments[segmentID], case .main(let uuid) = slot else {
+                        badID = true
+                        break
+                    }
+                    uuids.append(uuid)
+                }
+                let current = episode.mainClips
+                guard !badID,
+                      uuids.count == current.count,
+                      Set(uuids) == Set(current.map(\.id)) else {
+                    skipped += 1
+                    continue
+                }
+                episode.mainClips = uuids.compactMap { uuid in current.first(where: { $0.id == uuid }) }
+                episode.clearTimelinePins()
+                applied += 1
+            case "rename":
+                guard let title = operation.title,
+                      !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    skipped += 1
+                    continue
+                }
+                episode.displayTitle = String(title.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
+                applied += 1
+            case "delete_episode":
+                deletedTargets.insert(episodeIndex)
+                applied += 1
+            case "set_audio":
+                guard let audioID = operation.audio_id,
+                      let uuid = maps.audio[audioID],
+                      mutatePlanAudio(uuid, in: &episode, { clip in
+                          if let volume = operation.volume { clip.volume = Float(volume) }
+                          if let fadeIn = operation.fade_in_ms { clip.fadeIn = Double(fadeIn) / 1000 }
+                          if let fadeOut = operation.fade_out_ms { clip.fadeOut = Double(fadeOut) / 1000 }
+                          if let duckLevel = operation.duck_level { clip.duckLevel = Float(duckLevel) }
+                      }) else {
+                    skipped += 1
+                    continue
+                }
+                applied += 1
+            case "remove_audio":
+                guard let audioID = operation.audio_id,
+                      let uuid = maps.audio[audioID] else {
+                    skipped += 1
+                    continue
+                }
+                if let index = episode.audioClips.firstIndex(where: { $0.id == uuid }) {
+                    var clips = episode.audioClips
+                    clips.remove(at: index)
+                    episode.audioClips = clips
+                    applied += 1
+                } else if let index = project.globalAudioClips.firstIndex(where: { $0.id == uuid }) {
+                    project.globalAudioClips.remove(at: index)
+                    applied += 1
+                } else {
+                    skipped += 1
+                }
+            case "add_audio":
+                guard let assetString = operation.asset_id,
+                      let assetID = UUID(uuidString: assetString),
+                      let asset = mediaAssets.first(where: { $0.id == assetID }),
+                      asset.type != .image else {
+                    skipped += 1
+                    continue
+                }
+                let sourceStart = max(0, min(Double(operation.source_in_ms ?? 0) / 1000, asset.duration))
+                let sourceEnd = operation.source_out_ms
+                    .map { max(0, min(Double($0) / 1000, asset.duration)) } ?? asset.duration
+                guard sourceEnd - sourceStart > 0.05 else {
+                    skipped += 1
+                    continue
+                }
+                var clip = AudioClip(
+                    assetID: asset.id,
+                    name: asset.name,
+                    kind: Self.planAudioKind(operation.kind),
+                    timelineStart: ClipPlanExecutor.resolveStart(
+                        startMs: operation.start_ms,
+                        atSegment: nil,
+                        at: nil,
+                        anchorRanges: [],
+                        timelineDuration: maps.timelineDuration
+                    ),
+                    sourceStart: sourceStart,
+                    sourceEnd: sourceEnd,
+                    volume: Float(operation.volume ?? 0.5)
+                )
+                if let fadeIn = operation.fade_in_ms { clip.fadeIn = Double(fadeIn) / 1000 }
+                if let fadeOut = operation.fade_out_ms { clip.fadeOut = Double(fadeOut) / 1000 }
+                if let duckLevel = operation.duck_level { clip.duckLevel = Float(duckLevel) }
+                episode.audioClips.append(clip)
+                applied += 1
+            case "add_overlay":
+                guard let assetString = operation.asset_id,
+                      let assetID = UUID(uuidString: assetString),
+                      let asset = mediaAssets.first(where: { $0.id == assetID }),
+                      asset.type != .audio else {
+                    skipped += 1
+                    continue
+                }
+                let isVideo = asset.type == .video
+                let duration = operation.duration_ms
+                    .map { Double($0) / 1000 } ?? (isVideo ? asset.duration : 4)
+                guard duration > 0.05 else {
+                    skipped += 1
+                    continue
+                }
+                var overlay = MediaOverlay(
+                    assetID: asset.id,
+                    name: asset.name,
+                    isVideo: isVideo,
+                    startTime: ClipPlanExecutor.resolveStart(
+                        startMs: operation.start_ms,
+                        atSegment: nil,
+                        at: nil,
+                        anchorRanges: [],
+                        timelineDuration: maps.timelineDuration
+                    ),
+                    duration: duration,
+                    sourceStart: 0
+                )
+                if let centerX = operation.center_x { overlay.centerX = centerX }
+                if let centerY = operation.center_y { overlay.centerY = centerY }
+                if let width = operation.width_fraction { overlay.widthFraction = width }
+                if let volume = operation.volume { overlay.volume = Float(volume) }
+                if let opacity = operation.opacity { overlay.opacity = opacity }
+                if let rotation = operation.rotation { overlay.rotation = rotation }
+                if operation.chroma_enabled == true {
+                    overlay.chromaKey = ChromaKeySettings(enabled: true)
+                }
+                episode.mediaOverlays.append(overlay)
+                applied += 1
+            case "set_overlay":
+                guard let overlayID = operation.overlay_id,
+                      let uuid = maps.overlays[overlayID],
+                      let overlayIndex = episode.mediaOverlays.firstIndex(where: { $0.id == uuid }) else {
+                    skipped += 1
+                    continue
+                }
+                var overlay = episode.mediaOverlays[overlayIndex]
+                if let centerX = operation.center_x { overlay.centerX = centerX }
+                if let centerY = operation.center_y { overlay.centerY = centerY }
+                if let width = operation.width_fraction { overlay.widthFraction = width }
+                if operation.start_ms != nil {
+                    overlay.startTime = ClipPlanExecutor.resolveStart(
+                        startMs: operation.start_ms,
+                        atSegment: nil,
+                        at: nil,
+                        anchorRanges: [],
+                        timelineDuration: maps.timelineDuration
+                    )
+                }
+                if let duration = operation.duration_ms { overlay.duration = Double(duration) / 1000 }
+                if let sourceStart = operation.source_start_ms {
+                    overlay.sourceStart = max(0, Double(sourceStart) / 1000)
+                }
+                if let opacity = operation.opacity { overlay.opacity = opacity }
+                if let rotation = operation.rotation { overlay.rotation = rotation }
+                if let volume = operation.volume { overlay.volume = Float(volume) }
+                let hasChroma = operation.chroma_enabled != nil || operation.chroma_r != nil
+                    || operation.chroma_g != nil || operation.chroma_b != nil
+                    || operation.chroma_tolerance != nil
+                if hasChroma {
+                    var chroma = overlay.chromaKey ?? ChromaKeySettings()
+                    if let enabled = operation.chroma_enabled { chroma.enabled = enabled }
+                    if operation.chroma_r != nil || operation.chroma_g != nil || operation.chroma_b != nil {
+                        chroma.color = RGBAColor(
+                            red: operation.chroma_r ?? chroma.color.red,
+                            green: operation.chroma_g ?? chroma.color.green,
+                            blue: operation.chroma_b ?? chroma.color.blue,
+                            alpha: 1
+                        )
+                    }
+                    if let tolerance = operation.chroma_tolerance { chroma.tolerance = tolerance }
+                    overlay.chromaKey = chroma
+                }
+                episode.mediaOverlays[overlayIndex] = overlay
+                applied += 1
+            case "remove_overlay":
+                guard let overlayID = operation.overlay_id,
+                      let uuid = maps.overlays[overlayID],
+                      let overlayIndex = episode.mediaOverlays.firstIndex(where: { $0.id == uuid }) else {
+                    skipped += 1
+                    continue
+                }
+                episode.mediaOverlays.remove(at: overlayIndex)
+                applied += 1
+            case "set_chroma":
+                // Dedicated chroma op: only ovl_N targets resolve — a seg_N
+                // target is rejected by the validator ("chroma só em overlays").
+                guard let overlayID = operation.overlay_id,
+                      let uuid = maps.overlays[overlayID],
+                      let overlayIndex = episode.mediaOverlays.firstIndex(where: { $0.id == uuid }),
+                      let enabled = operation.enabled else {
+                    skipped += 1
+                    continue
+                }
+                var overlay = episode.mediaOverlays[overlayIndex]
+                var chroma = overlay.chromaKey ?? ChromaKeySettings()
+                chroma.enabled = enabled
+                if let color = operation.color, let parsed = Self.planHexColor(color) {
+                    chroma.color = parsed
+                }
+                if let tolerance = operation.tolerance {
+                    chroma.tolerance = min(1, max(0, tolerance))
+                }
+                overlay.chromaKey = chroma
+                episode.mediaOverlays[overlayIndex] = overlay
+                applied += 1
+            case "add_marker":
+                guard let timeMs = operation.time_ms else {
+                    skipped += 1
+                    continue
+                }
+                episode.markers.append(TimelineMarker(time: Double(timeMs) / 1000))
+                applied += 1
+            case "remove_marker":
+                guard let timeMs = operation.time_ms else {
+                    skipped += 1
+                    continue
+                }
+                let time = Double(timeMs) / 1000
+                guard let nearest = episode.markers
+                    .filter({ abs($0.time - time) <= 0.5 })
+                    .min(by: { abs($0.time - time) < abs($1.time - time) }) else {
+                    skipped += 1
+                    continue
+                }
+                episode.markers = episode.markers.filter { $0.id != nearest.id }
+                applied += 1
             default:
                 skipped += 1
             }
@@ -3521,8 +3943,9 @@ class EditorViewModel: ObservableObject {
         }
 
         // Grouped cuts, once per episode, then captions regenerated where needed.
+        // Episodes a delete_episode claimed are skipped here and removed below.
         var captionRefresh: [Int: Bool] = [:]
-        for episodeIndex in pendingCuts.keys.sorted() {
+        for episodeIndex in pendingCuts.keys.sorted() where !deletedTargets.contains(episodeIndex) {
             guard let ranges = pendingCuts[episodeIndex] else { continue }
             let merged = Self.merge(ranges)
             guard !merged.isEmpty else { continue }
@@ -3540,7 +3963,7 @@ class EditorViewModel: ObservableObject {
         // Episodes whose captions should still exist get them re-rendered on the
         // post-cut timeline (closeGaps only shifts overlays; it can't re-split cues).
         if let srt = project.transcriptSRT, let cues = try? SubtitleFile.parse(srt), !cues.isEmpty {
-            for episodeIndex in captionRefresh.keys.sorted() {
+            for episodeIndex in captionRefresh.keys.sorted() where !deletedTargets.contains(episodeIndex) {
                 guard let maps = targetMaps[episodeIndex] else { continue }
                 let overlays = episodes[episodeIndex].textOverlays
                 let hasCaptions = overlays.contains { $0.isCaption == true }
@@ -3549,6 +3972,15 @@ class EditorViewModel: ObservableObject {
                     || maps.hadDynamicCaptions
                 applyCaptions(cues, dynamic: dynamic, recordUndo: false, episodeIDs: [episodes[episodeIndex].id])
             }
+        }
+
+        // delete_episode ops land last: remove the claimed episodes now.
+        if !deletedTargets.isEmpty {
+            let selectedWasDeleted = selectedEpisodeIndex.map { deletedTargets.contains($0) } ?? false
+            for index in deletedTargets.sorted(by: >) {
+                episodes.remove(at: index)
+            }
+            if selectedWasDeleted { selectedEpisode = episodes.first }
         }
 
         if let index = selectedEpisodeIndex { selectedEpisode = episodes[index] }
@@ -3570,7 +4002,9 @@ class EditorViewModel: ObservableObject {
     private func planTargetMaps(for episode: Episode) -> PlanTargetMaps {
         var maps = PlanTargetMaps()
         var recapOrdinal = 0
-        for (index, item) in episode.storyline().enumerated() {
+        let items = episode.storyline()
+        for (index, item) in items.enumerated() {
+            maps.segmentRanges.append(item.start...item.end)
             switch item.track {
             case .intro:
                 maps.segments["seg_\(index + 1)"] = .intro
@@ -3583,11 +4017,15 @@ class EditorViewModel: ObservableObject {
                 maps.segments["seg_\(index + 1)"] = .main(item.segment.id)
             }
         }
+        maps.timelineDuration = items.last?.end ?? 0
         for (index, overlay) in episode.textOverlays.enumerated() {
             maps.texts["txt_\(index + 1)"] = overlay.id
         }
         for (index, clip) in episode.resolvedAudioClips(global: project.globalAudioClips).enumerated() {
             maps.audio["aud_\(index + 1)"] = clip.id
+        }
+        for (index, overlay) in episode.mediaOverlays.enumerated() {
+            maps.overlays["ovl_\(index + 1)"] = overlay.id
         }
         maps.coverage = sourceCoverage(of: episode)
         maps.hadCaptions = episode.textOverlays.contains { $0.isCaption == true }
@@ -3631,20 +4069,41 @@ class EditorViewModel: ObservableObject {
         }
     }
 
-    /// Volume on an aud_N target: episode clips first, then project-wide ones
+    /// Mutates an aud_N target: episode clips first, then project-wide ones
     /// (resolvedAudioClips merges both; the id tells which list owns it).
-    private func setPlanAudioVolume(_ uuid: UUID, in episode: inout Episode, volume: Float) -> Bool {
+    private func mutatePlanAudio(_ uuid: UUID, in episode: inout Episode, _ body: (inout AudioClip) -> Void) -> Bool {
         if let index = episode.audioClips.firstIndex(where: { $0.id == uuid }) {
             var clips = episode.audioClips
-            clips[index].volume = volume
+            body(&clips[index])
             episode.audioClips = clips
             return true
         }
         if let index = project.globalAudioClips.firstIndex(where: { $0.id == uuid }) {
-            project.globalAudioClips[index].volume = volume
+            var clips = project.globalAudioClips
+            body(&clips[index])
+            project.globalAudioClips = clips
             return true
         }
         return false
+    }
+
+    /// Volume on an aud_N target: episode clips first, then project-wide ones
+    /// (resolvedAudioClips merges both; the id tells which list owns it).
+    private func setPlanAudioVolume(_ uuid: UUID, in episode: inout Episode, volume: Float) -> Bool {
+        mutatePlanAudio(uuid, in: &episode) { $0.volume = volume }
+    }
+
+    /// Clip-local trim ceiling (seconds): main slots trim inside their source
+    /// clip of the sequence; vinheta slots inside the referenced asset.
+    private func planSourceLimit(for segment: VideoSegment, slot: PlanSegmentSlot) -> Double {
+        switch slot {
+        case .main:
+            return project.sourceClips
+                .first(where: { abs($0.sequenceStartTime - segment.sequenceStartTime) < 0.001 })?
+                .duration ?? project.sourceVideoDuration
+        default:
+            return mediaAssets.first(where: { $0.id == segment.assetID })?.duration ?? segment.endTime
+        }
     }
 
     /// Pause ranges (source-sequence seconds) inside one episode's coverage,
@@ -3689,12 +4148,43 @@ class EditorViewModel: ObservableObject {
         }
     }
 
+    /// Plan transition names are TransitionStyle case names, not display names.
     private static func planTransition(_ style: String) -> TransitionStyle {
         switch style {
         case "none": return .none
         case "fadeBlack": return .fadeBlack
         case "fadeWhite": return .fadeWhite
+        case "slideLeft": return .slideLeft
+        case "slideRight": return .slideRight
+        case "slideUp": return .slideUp
+        case "push": return .push
+        case "zoom": return .zoom
+        case "wipe": return .wipe
+        case "iris": return .iris
         default: return .dissolve
+        }
+    }
+
+    /// Parses a plan "#RRGGBB" hex string into an RGBAColor (set_chroma).
+    private static func planHexColor(_ text: String) -> RGBAColor? {
+        var hex = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if hex.hasPrefix("#") { hex.removeFirst() }
+        guard hex.count == 6, hex.allSatisfy({ $0.isHexDigit }) else { return nil }
+        func channel(_ range: Range<String.Index>) -> Double {
+            Double(Int(hex[range], radix: 16) ?? 0) / 255
+        }
+        let r = channel(hex.startIndex..<hex.index(hex.startIndex, offsetBy: 2))
+        let g = channel(hex.index(hex.startIndex, offsetBy: 2)..<hex.index(hex.startIndex, offsetBy: 4))
+        let b = channel(hex.index(hex.startIndex, offsetBy: 4)..<hex.endIndex)
+        return RGBAColor(red: r, green: g, blue: b, alpha: 1)
+    }
+
+    /// Plan audio kinds map straight onto AudioClipKind case names.
+    private static func planAudioKind(_ kind: String?) -> AudioClipKind {
+        switch kind {
+        case "narration": return .narration
+        case "videoSound": return .videoSound
+        default: return .music
         }
     }
 
@@ -3708,11 +4198,12 @@ class EditorViewModel: ObservableObject {
         }
     }
 
-    /// Maps a plan text card to a timeline overlay (same look as the part cards).
-    private static func planTextOverlay(_ spec: ClipPlanText) -> TextOverlay {
+    /// Maps a plan text card to a timeline overlay (same look as the part
+    /// cards) at an already-resolved timeline start in seconds.
+    private static func planTextOverlay(_ spec: ClipPlanText, start: Double) -> TextOverlay {
         var overlay = TextOverlay(
             text: spec.text,
-            startTime: Double(spec.start_ms) / 1000,
+            startTime: max(0, start),
             duration: max(0.5, Double(spec.duration_ms) / 1000)
         )
         overlay.positionY = planPositionY(spec.position ?? "bottom")

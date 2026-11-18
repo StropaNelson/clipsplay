@@ -420,6 +420,12 @@ struct AIEditSection: View {
                 .foregroundStyle(AIPlanService.appleIntelligenceReady ? Color.secondary : Color.orange)
             requestEditor
             sendControls
+            Text("Funciona melhor com comandos diretos sobre os episódios (ex.: \"remova os silêncios do episódio 1\", \"renomeie o episódio 2\"). Para escolher trechos pela fala, use API ou Manual.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("Ideal para pedidos curtos e vídeos pequenos; vídeos longos pedem API ou Manual.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             Text("Com Apple Intelligence, a análise fica neste iPad.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -731,7 +737,10 @@ struct AIEditSection: View {
     }
 
     private func reviewPlan() {
-        let text = planText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Models sometimes answer with prose or a fenced block around the plan;
+        // pull the first balanced JSON object out before decoding.
+        let text = ClipPlanParser.extractJSON(from: planText)
+            ?? planText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, let data = text.data(using: .utf8) else {
             review = AIPlanReview(plan: nil, errors: ["JSON inválido: o texto está vazio."], text: planText)
             return

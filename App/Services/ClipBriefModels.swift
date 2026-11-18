@@ -102,6 +102,13 @@ struct ClipBriefEpisodeState: Codable {
     var segments: [ClipBriefSegmentState]
     var texts: [ClipBriefTextState]
     var audio: [ClipBriefAudioState]
+    /// PiP overlays in mediaOverlays order ("ovl_N"); optional so older briefs decode.
+    var overlays: [ClipBriefOverlayState]?
+    /// Timeline markers in ms (sorted); optional so older briefs decode.
+    var markers: [Int]?
+    /// Storyline end in ms (intro→outro with transition overlaps); optional so
+    /// older briefs decode.
+    var duration_ms: Int?
 }
 
 struct ClipBriefSegmentState: Codable {
@@ -110,6 +117,10 @@ struct ClipBriefSegmentState: Codable {
     /// Main-track clips use source-sequence ms; vinheta tracks use asset-local ms.
     var source_in_ms: Int
     var source_out_ms: Int
+    /// Where the piece sits on the episode timeline (storyline layout, ms).
+    /// Optional so briefs written before these fields existed still decode.
+    var timeline_in_ms: Int?
+    var timeline_out_ms: Int?
 }
 
 struct ClipBriefTextState: Codable {
@@ -126,6 +137,14 @@ struct ClipBriefAudioState: Codable {
     var volume: Double
     var start_ms: Int           // episode timeline
     var end_ms: Int
+}
+
+/// A picture-in-picture image/video overlay on the episode timeline.
+struct ClipBriefOverlayState: Codable {
+    var id: String              // "ovl_N" inside the episode
+    var asset_id: String
+    var start_ms: Int           // episode timeline
+    var duration_ms: Int
 }
 
 /// What the paired ClipPlan may express; mirrored in the prompt so the AI only
@@ -145,4 +164,10 @@ struct ClipBriefCapabilities: Codable {
     var operation_kinds: [String]
     /// Whether this app version applies `operations` plans in place (undoes as one step).
     var operations_executable: Bool
+    /// The full ops vocabulary with parameter signatures — same table the
+    /// prompt prints (both generated from ClipPlanContract.operationSpecs).
+    var operations: [ClipPlanOperationSpec]?
+    /// Extra placement/timing rules the plan may rely on (negative start_ms,
+    /// at_segment anchors, timeline fields in each seg_N).
+    var notes: [String]?
 }

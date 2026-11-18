@@ -90,8 +90,6 @@ enum AIPlanService {
         settings: AIProviderSettings,
         apiKey: String?
     ) async throws -> String {
-        let prompt = ClipPromptGenerator.prompt(for: brief)
-        let user = userMessage(brief: brief, requestText: requestText, previousPlanJSON: previousPlanJSON)
         switch settings.kind {
         case .manual:
             throw AIPlanServiceError.unavailable("Modo manual: copie o pacote no cartão 1 e cole a resposta no cartão 2.")
@@ -100,21 +98,55 @@ enum AIPlanService {
                 baseURL: settings.baseURL,
                 model: settings.model,
                 apiKey: apiKey,
-                systemPrompt: prompt,
-                userMessage: user
+                systemPrompt: ClipPromptGenerator.prompt(for: brief),
+                userMessage: userMessage(brief: brief, requestText: requestText, previousPlanJSON: previousPlanJSON)
             )
         case .appleIntelligence:
+            // The on-device context window (~4k tokens) can't hold the full
+            // brief + prompt: send a compact brief and a mini prompt instead.
+            let compactBrief = ClipBriefBuilder.compact(brief)
+            let miniPrompt = ClipPromptGenerator.miniPrompt(for: compactBrief)
+            let compactUser = compactUserMessage(brief: compactBrief, requestText: requestText)
+            guard miniPrompt.count + compactUser.count <= appleIntelligenceBudget else {
+                throw AIPlanServiceError.unavailable("Pedido muito grande para Apple Intelligence neste vídeo — use API ou Manual.")
+            }
             #if canImport(FoundationModels)
             if #available(iOS 26.0, *) {
-                let content = try await AppleIntelligencePlanProvider.requestPlan(
-                    systemPrompt: prompt,
-                    userMessage: user
-                )
-                return stripCodeFences(content)
+                do {
+                    let content = try await AppleIntelligencePlanProvider.requestPlan(
+                        systemPrompt: miniPrompt,
+                        userMessage: compactUser
+                    )
+                    return ClipPlanParser.extractJSON(from: content) ?? stripCodeFences(content)
+                } catch let error as AIPlanServiceError {
+                    throw error
+                } catch {
+                    try Task.checkCancellation()
+                    // The FoundationModels window-overflow error type isn't
+                    // stable across SDKs — match on the message instead.
+                    let message = error.localizedDescription.lowercased()
+                    if message.contains("context") || message.contains("window") || message.contains("exceed") {
+                        throw AIPlanServiceError.unavailable("O pedido não coube no limite do Apple Intelligence. Use pedidos curtos, desligue a transcrição no cartão 1, ou escolha API/Manual.")
+                    }
+                    throw AIPlanServiceError.unavailable("Apple Intelligence não conseguiu processar este pedido — tente mais curto ou use API/Manual.")
+                }
             }
             #endif
             throw AIPlanServiceError.unavailable("Apple Intelligence indisponível neste iPad.")
         }
+    }
+
+    /// Rough character budget for the mini prompt + compact brief + pedido that
+    /// keeps the whole request inside the on-device model's context window.
+    static let appleIntelligenceBudget = 7000
+
+    /// "user" message for the compact path: just the shrunken brief + pedido.
+    static func compactUserMessage(brief: ClipBrief, requestText: String) -> String {
+        """
+        \(ClipBriefBuilder.encode(brief))
+
+        Pedido: \(requestText)
+        """
     }
 
     // MARK: - OpenAI-compatible API path
@@ -178,7 +210,7 @@ enum AIPlanService {
         guard let content = choicesContent(data) else {
             throw AIPlanServiceError.emptyAnswer
         }
-        return stripCodeFences(content)
+        return ClipPlanParser.extractJSON(from: content) ?? stripCodeFences(content)
     }
 
     /// "user" message: brief JSON + pedido + plano anterior (or "nenhum").
@@ -228,19 +260,10 @@ enum AIPlanService {
     }
 
     /// Some models wrap the JSON in ```json fences despite instructions.
+    /// Kept as a thin wrapper — the real logic lives in ClipPlanParser, which
+    /// also recovers the JSON when the model answers with prose around it.
     static func stripCodeFences(_ text: String) -> String {
-        var result = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard result.hasPrefix("```") else { return result }
-        result = String(result.dropFirst(3))
-        // Optional language tag right after the backticks (```json).
-        while result.first?.isLetter == true {
-            result = String(result.dropFirst())
-        }
-        result = result.trimmingCharacters(in: .whitespacesAndNewlines)
-        if result.hasSuffix("```") {
-            result = String(result.dropLast(3))
-        }
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+        ClipPlanParser.stripCodeFences(text)
     }
 
     /// First ~`limit` characters of an error body, flattened to one line.

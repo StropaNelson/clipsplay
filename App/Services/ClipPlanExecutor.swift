@@ -77,6 +77,44 @@ enum ClipPlanExecutor {
         min(0.2, max(0.02, size))
     }
 
+    /// Timeline ranges of an output's pieces placed sequentially (the same
+    /// layout the storyline produces): merged source ranges mapped to
+    /// cumulative 0-based positions. `at_segment` indexes into this list.
+    static func cumulativeRanges(of merged: [ClosedRange<Double>]) -> [ClosedRange<Double>] {
+        var result: [ClosedRange<Double>] = []
+        var cursor = 0.0
+        for range in merged {
+            let duration = range.upperBound - range.lowerBound
+            result.append(cursor...cursor + duration)
+            cursor += duration
+        }
+        return result
+    }
+
+    /// Resolves a text/overlay start into absolute timeline seconds:
+    /// `atSegment` (1-based) anchors to the given anchor ranges — cumulative
+    /// positions for outputs, storyline positions for episodes — and `at`
+    /// picks the range's start ("start", default) or end; a negative `startMs`
+    /// counts back from the timeline end when no anchor is given.
+    static func resolveStart(
+        startMs: Int?,
+        atSegment: Int?,
+        at: String?,
+        anchorRanges: [ClosedRange<Double>],
+        timelineDuration: Double
+    ) -> Double {
+        let shift = Double(startMs ?? 0) / 1000
+        if let atSegment = atSegment, anchorRanges.indices.contains(atSegment - 1) {
+            let anchor = anchorRanges[atSegment - 1]
+            let base = at == "end" ? anchor.upperBound : anchor.lowerBound
+            return max(0, base + shift)
+        }
+        if shift < 0 {
+            return max(0, timelineDuration + shift)
+        }
+        return max(0, shift)
+    }
+
     private static func mergeRanges(_ ranges: [ClosedRange<Double>]) -> [ClosedRange<Double>] {
         var result: [ClosedRange<Double>] = []
         for range in ranges.sorted(by: { $0.lowerBound < $1.lowerBound }) where range.upperBound > range.lowerBound {
