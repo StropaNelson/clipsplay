@@ -128,6 +128,9 @@ struct TrackRenderInfo {
 /// then draws every track with the same geometry math as the instruction pipeline.
 final class ClipFilterCompositor: NSObject, AVVideoCompositing {
 
+    /// Export color space: render targets are Rec.709 SDR buffers, matching
+    /// `supportsWideColorSourceFrames = false` and the H.264 output tagging.
+    private let outputColorSpace = CGColorSpace(name: CGColorSpace.itur_709) ?? CGColorSpaceCreateDeviceRGB()
     private let ciContext = CIContext()
     private let contextQueue = DispatchQueue(label: "clipstudio.filtercompositor.rendercontext")
     private let framingQueue = DispatchQueue(label: "clipstudio.filtercompositor.framing")
@@ -174,7 +177,15 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
             }
             let frame = compositeFrame(request: request)
             let size = request.renderContext.videoComposition.renderSize
-            ciContext.render(frame, to: buffer, bounds: CGRect(origin: .zero, size: size), colorSpace: nil)
+            ciContext.render(frame, to: buffer, bounds: CGRect(origin: .zero, size: size), colorSpace: outputColorSpace)
+            // Tag the buffer so the encoder records the right color metadata;
+            // untagged output gets misinterpreted and comes out darker.
+            CVBufferSetAttachment(buffer, kCVImageBufferColorPrimariesKey,
+                                  kCVImageBufferColorPrimaries_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate)
+            CVBufferSetAttachment(buffer, kCVImageBufferTransferFunctionKey,
+                                  kCVImageBufferTransferFunction_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate)
+            CVBufferSetAttachment(buffer, kCVImageBufferYCbCrMatrixKey,
+                                  kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate)
             request.finish(withComposedVideoFrame: buffer)
         }
     }
