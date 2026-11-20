@@ -583,7 +583,7 @@ class HomeViewModel: ObservableObject {
         let videos = await importer.sortedByRecording(importer.probeVideos(urls))
         guard !videos.isEmpty else { return }
         if videos.count == 1 {
-            await createProject(name: name, from: videos.map(\.url), operation: operation)
+            await createProject(name: name, from: videos.map { $0.url }, operation: operation)
         } else {
             pendingImport = PendingImport(name: name, operation: operation, videos: videos, tempURLs: [])
         }
@@ -601,16 +601,16 @@ class HomeViewModel: ObservableObject {
             return
         }
         if videos.count == 1 {
-            await createProject(name: name, from: videos.map(\.url), operation: operation)
-            cleanupTempFiles(videos.map(\.url))
+            await createProject(name: name, from: videos.map { $0.url }, operation: operation)
+            cleanupTempFiles(videos.map { $0.url })
         } else {
-            pendingImport = PendingImport(name: name, operation: operation, videos: videos, tempURLs: videos.map(\.url))
+            pendingImport = PendingImport(name: name, operation: operation, videos: videos, tempURLs: videos.map { $0.url })
         }
     }
 
     func confirmPendingImport() async {
         guard let pending = pendingImport else { return }
-        await createProject(name: pending.name, from: pending.videos.map(\.url), operation: pending.operation)
+        await createProject(name: pending.name, from: pending.videos.map { $0.url }, operation: pending.operation)
         cleanupTempFiles(pending.tempURLs)
         pendingImport = nil
     }

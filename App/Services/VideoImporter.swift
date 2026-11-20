@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import CoreTransferable
 import PhotosUI
+import SwiftUI
 import UniformTypeIdentifiers
 import UIKit
 
@@ -226,8 +227,8 @@ actor VideoImporter {
         let asset = AVURLAsset(url: url)
         if let metadata = try? await asset.load(.metadata) {
             for item in metadata where item.commonKey == .commonKeyCreationDate
-                || item.identifier == .quickTimeMetadataKeyCreationDate {
-                if let date = item.dateValue {
+                || item.identifier == AVMetadataIdentifier.quickTimeMetadataKeyCreationDate {
+                if let date = try? await item.load(.dateValue) {
                     return date
                 }
             }

@@ -26,7 +26,7 @@ struct ReorderSourcesSheet: View {
                     .onMove(perform: move)
                 }
                 .listStyle(.plain)
-                .environment(\.editMode, .constant(.active))
+                .environment(\.editMode, .constant(EditMode.active))
 
                 Button(action: onConfirm) {
                     Text("Criar projeto")
