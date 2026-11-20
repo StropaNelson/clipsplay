@@ -633,7 +633,7 @@ struct MediaAsset: Codable, Identifiable, Hashable {
     var createdAt: Date
     var thumbnailURL: String?
     
-    init(name: String, fileURL: URL, type: AssetType, duration: Double, naturalSize: CGSize, fileSize: Int64, thumbnailURL: URL?) {
+    init(name: String, fileURL: URL, type: AssetType, duration: Double, naturalSize: CGSize, fileSize: Int64, thumbnailURL: URL?, createdAt: Date? = nil) {
         self.id = UUID()
         self.name = name
         self.fileURL = fileURL.path
@@ -641,7 +641,7 @@ struct MediaAsset: Codable, Identifiable, Hashable {
         self.duration = duration
         self.naturalSize = CGSizeCodable(naturalSize)
         self.fileSize = fileSize
-        self.createdAt = Date()
+        self.createdAt = createdAt ?? Date()
         self.thumbnailURL = thumbnailURL?.path
     }
     

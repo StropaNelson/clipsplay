@@ -31,6 +31,12 @@ struct HomeView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(Color(.systemBackground).opacity(0.8))
                 }
+
+                if viewModel.isPreparingImport {
+                    ProgressView("Preparando vídeos…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color(.systemBackground).opacity(0.8))
+                }
             }
             .navigationTitle("ClipStudio")
             .navigationBarTitleDisplayMode(.large)
@@ -82,7 +88,7 @@ struct HomeView: View {
                     pendingProjectName = nil
                     let operation = pendingOperation ?? .multiply
                     pendingOperation = nil
-                    Task { await viewModel.createProject(name: name, from: urls, operation: operation) }
+                    Task { await viewModel.prepareImport(name: name, operation: operation, urls: urls) }
                 case .failure(let error):
                     pendingProjectName = nil
                     pendingOperation = nil
@@ -104,6 +110,21 @@ struct HomeView: View {
             }
             .sheet(item: $viewModel.shareItem) { item in
                 ShareSheet(items: [item.url])
+            }
+            .sheet(isPresented: Binding(
+                get: { viewModel.pendingImport != nil },
+                set: { isPresented in
+                    if !isPresented { viewModel.cancelPendingImport() }
+                }
+            )) {
+                ReorderSourcesSheet(
+                    videos: Binding(
+                        get: { viewModel.pendingImport?.videos ?? [] },
+                        set: { viewModel.pendingImport?.videos = $0 }
+                    ),
+                    onConfirm: { Task { await viewModel.confirmPendingImport() } },
+                    onCancel: { viewModel.cancelPendingImport() }
+                )
             }
             .alert("Erro", isPresented: .constant(viewModel.errorMessage != nil)) {
                 Button("OK") { viewModel.errorMessage = nil }
@@ -219,7 +240,7 @@ struct HomeView: View {
         pendingProjectName = nil
         let operation = pendingOperation ?? .multiply
         pendingOperation = nil
-        Task { await viewModel.createProject(name: name, from: items, operation: operation) }
+        Task { await viewModel.prepareImport(name: name, operation: operation, photosItems: items) }
     }
 }
 
@@ -400,7 +421,7 @@ struct NewProjectSheet: View {
                 }
                 
                 Section("Importação") {
-                    Text("Ao escolher mais de um vídeo, todos entram na timeline em sequência e são analisados juntos, preservando a ordem da seleção quando o iOS a disponibiliza.")
+                    Text("Os vídeos entram na timeline na ordem de gravação — dá para reordenar antes de criar.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -458,13 +479,25 @@ struct DuplicateProjectSheet: View {
 
 @MainActor
 class HomeViewModel: ObservableObject {
+    /// Selection of probed videos waiting for the user to confirm the order
+    /// before the project is created. `tempURLs` holds gallery temp files to
+    /// delete on confirm or cancel.
+    struct PendingImport {
+        var name: String
+        var operation: ProjectOperation
+        var videos: [PendingVideo]
+        var tempURLs: [URL]
+    }
+
     @Published var projects: [ProjectSummary] = []
     @Published var isLoading = false
+    @Published var isPreparingImport = false
     @Published var errorMessage: String?
     @Published var selectedProject: Project?
     @Published var selectedProjectOperation: ProjectOperation?
     @Published var shareItem: ProjectShareItem?
-    
+    @Published var pendingImport: PendingImport?
+
     private let storage = ProjectStorage.shared
     private let importer = VideoImporter.shared
     
@@ -541,23 +574,56 @@ class HomeViewModel: ObservableObject {
         project.updateTimestamp()
     }
 
-    func createProject(name: String, from items: [PhotosPickerItem], operation: ProjectOperation) async {
-        errorMessage = nil
-        var urls: [URL] = []
-        defer {
-            for url in urls { try? FileManager.default.removeItem(at: url) }
+    /// Probes the selected files and either creates the project right away
+    /// (single video) or opens the reorder sheet with `pendingImport`.
+    func prepareImport(name: String, operation: ProjectOperation, urls: [URL]) async {
+        isPreparingImport = true
+        defer { isPreparingImport = false }
+
+        let videos = await importer.sortedByRecording(importer.probeVideos(urls))
+        guard !videos.isEmpty else { return }
+        if videos.count == 1 {
+            await createProject(name: name, from: videos.map(\.url), operation: operation)
+        } else {
+            pendingImport = PendingImport(name: name, operation: operation, videos: videos, tempURLs: [])
         }
-        do {
-            for item in items {
-                guard let video = try await item.loadTransferable(type: GalleryVideo.self) else {
-                    errorMessage = "Não foi possível ler o vídeo selecionado."
-                    return
-                }
-                urls.append(video.url)
-            }
-            await createProject(name: name, from: urls, operation: operation)
-        } catch {
-            errorMessage = "Erro ao importar vídeo da galeria: \(error.localizedDescription)"
+    }
+
+    /// Gallery variant: the probed urls are temp files that must stay alive
+    /// until the user confirms or cancels the reorder sheet.
+    func prepareImport(name: String, operation: ProjectOperation, photosItems: [PhotosPickerItem]) async {
+        isPreparingImport = true
+        defer { isPreparingImport = false }
+
+        let videos = await importer.sortedByRecording(importer.probeGalleryItems(photosItems))
+        guard !videos.isEmpty else {
+            errorMessage = "Não foi possível ler o vídeo selecionado."
+            return
+        }
+        if videos.count == 1 {
+            await createProject(name: name, from: videos.map(\.url), operation: operation)
+            cleanupTempFiles(videos.map(\.url))
+        } else {
+            pendingImport = PendingImport(name: name, operation: operation, videos: videos, tempURLs: videos.map(\.url))
+        }
+    }
+
+    func confirmPendingImport() async {
+        guard let pending = pendingImport else { return }
+        await createProject(name: pending.name, from: pending.videos.map(\.url), operation: pending.operation)
+        cleanupTempFiles(pending.tempURLs)
+        pendingImport = nil
+    }
+
+    func cancelPendingImport() {
+        guard let pending = pendingImport else { return }
+        cleanupTempFiles(pending.tempURLs)
+        pendingImport = nil
+    }
+
+    private func cleanupTempFiles(_ urls: [URL]) {
+        for url in urls {
+            try? FileManager.default.removeItem(at: url)
         }
     }
     
