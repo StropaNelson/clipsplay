@@ -181,11 +181,11 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
             // Tag the buffer so the encoder records the right color metadata;
             // untagged output gets misinterpreted and comes out darker.
             CVBufferSetAttachment(buffer, kCVImageBufferColorPrimariesKey,
-                                  kCVImageBufferColorPrimaries_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate)
+                                  kCVImageBufferColorPrimaries_ITU_R_709_2, CVAttachmentMode.shouldPropagate)
             CVBufferSetAttachment(buffer, kCVImageBufferTransferFunctionKey,
-                                  kCVImageBufferTransferFunction_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate)
+                                  kCVImageBufferTransferFunction_ITU_R_709_2, CVAttachmentMode.shouldPropagate)
             CVBufferSetAttachment(buffer, kCVImageBufferYCbCrMatrixKey,
-                                  kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate)
+                                  kCVImageBufferYCbCrMatrix_ITU_R_709_2, CVAttachmentMode.shouldPropagate)
             request.finish(withComposedVideoFrame: buffer)
         }
     }
