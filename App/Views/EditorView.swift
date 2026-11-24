@@ -2126,7 +2126,8 @@ class EditorViewModel: ObservableObject {
         } else if let element = selectedMotionElement {
             var copy = element
             copy.id = UUID()
-            copy.startTime = min(element.endTime, max(0, timelineDuration - copy.duration))
+            let latestStart: Double = max(0, timelineDuration - copy.duration)
+            copy.startTime = min(element.endTime, latestStart)
             mutateSelectedEpisode(reloadPreview: false) { $0.motionElements.append(copy) }
             selectedSegmentID = copy.id
         }
@@ -2603,8 +2604,10 @@ class EditorViewModel: ObservableObject {
 
     func addMotionElement(_ element: MotionElement) {
         var item = element
-        item.startTime = min(currentTime, max(0, timelineDuration - 0.3))
-        item.duration = max(0.3, min(item.duration, max(0.3, timelineDuration - item.startTime)))
+        let latestStart: Double = max(0, timelineDuration - 0.3)
+        item.startTime = min(currentTime, latestStart)
+        let availableDuration: Double = max(0.3, timelineDuration - item.startTime)
+        item.duration = max(0.3, min(item.duration, availableDuration))
         mutateSelectedEpisode(reloadPreview: false) { $0.motionElements.append(item) }
         selectedSegmentID = item.id
     }
@@ -2641,11 +2644,16 @@ class EditorViewModel: ObservableObject {
 
     func retimeMotionElement(_ id: UUID, start: Double, duration: Double) {
         guard var element = selectedEpisode?.motionElements.first(where: { $0.id == id }) else { return }
-        if abs(duration - element.duration) < 0.001 {
-            element.startTime = min(max(0, start), max(0, timelineDuration - element.duration))
+        let durationDifference: Double = abs(duration - element.duration)
+        let moveTolerance: Double = 0.001
+        if durationDifference < moveTolerance {
+            let latestMoveStart: Double = max(0, timelineDuration - element.duration)
+            element.startTime = min(max(0, start), latestMoveStart)
         } else {
-            element.startTime = min(max(0, start), max(0, timelineDuration - 0.3))
-            element.duration = max(0.3, min(duration, max(0.3, timelineDuration - element.startTime)))
+            let latestTrimStart: Double = max(0, timelineDuration - 0.3)
+            element.startTime = min(max(0, start), latestTrimStart)
+            let availableDuration: Double = max(0.3, timelineDuration - element.startTime)
+            element.duration = max(0.3, min(duration, availableDuration))
         }
         updateMotionElement(element)
     }

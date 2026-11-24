@@ -10,50 +10,11 @@ struct MotionLayer: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let size = geometry.size
+            let size: CGSize = geometry.size
             ZStack(alignment: .topLeading) {
-                Canvas { context, canvasSize in
-                    context.withCGContext { cgContext in
-                        for element in elements {
-                            MotionRenderer.draw(element, at: currentTime, canvasSize: canvasSize, in: cgContext)
-                        }
-                    }
-                }
-                .allowsHitTesting(false)
+                canvas
                 ForEach(elements) { element in
-                    let rect = MotionRenderer.frameRect(element, canvasSize: size)
-                    Color.white.opacity(0.001)
-                        .frame(width: rect.width, height: rect.height)
-                        .overlay(
-                            Rectangle()
-                                .stroke(
-                                    Color.white,
-                                    style: StrokeStyle(lineWidth: 1.5, dash: [5, 3])
-                                )
-                                .opacity(element.id == selectedID ? 1 : 0)
-                                .allowsHitTesting(false)
-                        )
-                        .position(x: rect.midX, y: rect.midY)
-                        .onTapGesture { onSelect(element.id) }
-                        .gesture(
-                            DragGesture(coordinateSpace: .named("motionCanvas"))
-                                .onChanged { value in
-                                    onMove(
-                                        element.id,
-                                        clamp(value.location.x / size.width),
-                                        clamp(value.location.y / size.height),
-                                        false
-                                    )
-                                }
-                                .onEnded { value in
-                                    onMove(
-                                        element.id,
-                                        clamp(value.location.x / size.width),
-                                        clamp(value.location.y / size.height),
-                                        true
-                                    )
-                                }
-                        )
+                    hitArea(for: element, size: size)
                 }
             }
             .frame(width: size.width, height: size.height)
@@ -61,8 +22,54 @@ struct MotionLayer: View {
         }
     }
 
+    private var canvas: some View {
+        Canvas { context, canvasSize in
+            context.withCGContext { cgContext in
+                for element in elements {
+                    MotionRenderer.draw(element, at: currentTime, canvasSize: canvasSize, in: cgContext)
+                }
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func hitArea(for element: MotionElement, size: CGSize) -> some View {
+        let rect: CGRect = MotionRenderer.frameRect(element, canvasSize: size)
+        return Color.white.opacity(0.001)
+            .frame(width: rect.width, height: rect.height)
+            .overlay(
+                Rectangle()
+                    .stroke(
+                        Color.white,
+                        style: StrokeStyle(lineWidth: 1.5, dash: [5, 3])
+                    )
+                    .opacity(element.id == selectedID ? 1 : 0)
+                    .allowsHitTesting(false)
+            )
+            .position(x: rect.midX, y: rect.midY)
+            .onTapGesture { onSelect(element.id) }
+            .gesture(dragGesture(for: element.id, size: size))
+    }
+
+    private func dragGesture(for id: UUID, size: CGSize) -> some Gesture {
+        DragGesture(coordinateSpace: .named("motionCanvas"))
+            .onChanged { value in
+                let x: CGFloat = value.location.x / size.width
+                let y: CGFloat = value.location.y / size.height
+                onMove(id, clamp(x), clamp(y), false)
+            }
+            .onEnded { value in
+                let x: CGFloat = value.location.x / size.width
+                let y: CGFloat = value.location.y / size.height
+                onMove(id, clamp(x), clamp(y), true)
+            }
+    }
+
     private func clamp(_ value: CGFloat) -> Double {
-        Double(min(0.98, max(0.02, value)))
+        let minimum: CGFloat = 0.02
+        let maximum: CGFloat = 0.98
+        let clamped: CGFloat = min(maximum, max(minimum, value))
+        return Double(clamped)
     }
 }
 
@@ -73,8 +80,10 @@ struct AddMotionSheet: View {
 
     @Environment(\.dismiss) private var dismiss
 
-    private var start: Double { min(currentTime, max(0, timelineDuration - 0.3)) }
-    private var duration: Double { max(0.3, min(3, timelineDuration - start)) }
+    private var latestStart: Double { max(0, timelineDuration - 0.3) }
+    private var start: Double { min(currentTime, latestStart) }
+    private var remainingDuration: Double { timelineDuration - start }
+    private var duration: Double { max(0.3, min(3, remainingDuration)) }
 
     var body: some View {
         NavigationStack {
@@ -146,14 +155,27 @@ struct MotionElementEditorSheet: View {
     private var hasFill: Binding<Bool> {
         Binding(
             get: { element.fillColor != nil },
-            set: { element.fillColor = $0 ? (element.fillColor ?? RGBAColor(red: 0, green: 0, blue: 0, alpha: 0.6)) : nil }
+            set: {
+                if $0 {
+                    let defaultColor = RGBAColor(red: 0, green: 0, blue: 0, alpha: 0.6)
+                    element.fillColor = element.fillColor ?? defaultColor
+                } else {
+                    element.fillColor = nil
+                }
+            }
         )
     }
 
     private var hasStroke: Binding<Bool> {
         Binding(
             get: { element.strokeColor != nil },
-            set: { element.strokeColor = $0 ? (element.strokeColor ?? element.textColor) : nil }
+            set: {
+                if $0 {
+                    element.strokeColor = element.strokeColor ?? element.textColor
+                } else {
+                    element.strokeColor = nil
+                }
+            }
         )
     }
 
@@ -187,121 +209,69 @@ struct MotionElementEditorSheet: View {
     }
 
     private var previewTime: Double {
-        element.startTime + min(element.duration, element.entranceDuration + 0.1)
+        let entrancePreviewDuration: Double = element.entranceDuration + 0.1
+        let previewOffset: Double = min(element.duration, entrancePreviewDuration)
+        return element.startTime + previewOffset
     }
+
+    private struct Position: Identifiable {
+        let title: String
+        let x: Double
+        let y: Double
+
+        var id: String { title }
+    }
+
+    private static let positions: [Position] = [
+        Position(title: "↖︎", x: 0.25, y: 0.22),
+        Position(title: "↑", x: 0.5, y: 0.22),
+        Position(title: "↗︎", x: 0.75, y: 0.22),
+        Position(title: "←", x: 0.25, y: 0.5),
+        Position(title: "•", x: 0.5, y: 0.5),
+        Position(title: "→", x: 0.75, y: 0.5),
+        Position(title: "↙︎", x: 0.25, y: 0.78),
+        Position(title: "↓", x: 0.5, y: 0.78),
+        Position(title: "↘︎", x: 0.75, y: 0.78)
+    ]
+
+    private static let positionColumns = Array(repeating: GridItem(.flexible()), count: 3)
+
+    private var countDurationRange: ClosedRange<Double> { 0.3...5 }
+    private var fontScaleRange: ClosedRange<Double> { 0.02...0.2 }
+    private var widthRange: ClosedRange<Double> { 0.05...1 }
+    private var heightRange: ClosedRange<Double> { 0.04...0.8 }
+    private var cornerRadiusRange: ClosedRange<Double> { 0...0.5 }
+    private var strokeWidthRange: ClosedRange<Double> { 0.001...0.04 }
+    private var opacityRange: ClosedRange<Double> { 0.05...1 }
+    private var rotationRange: ClosedRange<Double> { -180...180 }
+    private var entranceDurationRange: ClosedRange<Double> { 0.1...3 }
+    private var exitDurationRange: ClosedRange<Double> { 0.1...2 }
+    private var startRange: ClosedRange<Double> { 0...max(episodeDuration - 0.3, 0.1) }
+    private var durationRange: ClosedRange<Double> { 0.3...max(maxDuration, 0.4) }
+
+    private var countDurationLabel: String { String(format: "%.1fs", element.countDuration) }
+    private var fontScaleLabel: String { "\(Int(element.fontScale * 100))%" }
+    private var widthLabel: String { "\(Int(element.widthFraction * 100))%" }
+    private var heightLabel: String { "\(Int(element.heightFraction * 100))%" }
+    private var cornerRadiusLabel: String { "\(Int(element.cornerRadius * 100))%" }
+    private var strokeWidthLabel: String { "\(Int(element.strokeWidth * 1000))‰" }
+    private var opacityLabel: String { "\(Int(element.opacity * 100))%" }
+    private var rotationLabel: String { "\(Int(element.rotation))°" }
+    private var entranceDurationLabel: String { String(format: "%.1fs", element.entranceDuration) }
+    private var exitDurationLabel: String { String(format: "%.1fs", element.exitDuration) }
+    private var durationLabel: String { String(format: "%.1fs", element.duration) }
+    private var startLabel: String { TimelineView.rulerLabel(element.startTime) }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section {
-                    Canvas { context, size in
-                        context.withCGContext { cgContext in
-                            MotionRenderer.draw(element, at: previewTime, canvasSize: size, in: cgContext)
-                        }
-                    }
-                    .frame(height: 150)
-                    .frame(maxWidth: .infinity)
-                    .background(Color.black)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                }
-
-                Section("Conteúdo") {
-                    switch element.kind {
-                    case .text:
-                        TextField("Texto", text: $element.text, axis: .vertical)
-                            .lineLimit(1...4)
-                    case .counter:
-                        TextField("De", value: $element.counterFrom, format: .number)
-                            .keyboardType(.decimalPad)
-                        TextField("Até", value: $element.counterTo, format: .number)
-                            .keyboardType(.decimalPad)
-                        TextField("Prefixo", text: $element.prefix)
-                        TextField("Sufixo", text: $element.suffix)
-                        Stepper("Casas decimais: \(element.decimals)", value: $element.decimals, in: 0...2)
-                        sliderRow("Duração da contagem", value: $element.countDuration, range: 0.3...5, label: String(format: "%.1fs", element.countDuration))
-                    case .shape:
-                        Picker("Forma", selection: $element.shape) {
-                            ForEach(MotionShape.allCases) { shape in
-                                Text(shape.rawValue).tag(shape)
-                            }
-                        }
-                    }
-                }
-
-                Section("Aparência") {
-                    if isLineShape {
-                        ColorPicker("Cor da linha", selection: lineColor, supportsOpacity: true)
-                    } else {
-                        ColorPicker("Cor do texto", selection: textColor, supportsOpacity: true)
-                        Toggle("Preenchimento", isOn: hasFill)
-                        if element.fillColor != nil {
-                            ColorPicker("Cor do preenchimento", selection: fillColor, supportsOpacity: true)
-                        }
-                        Toggle("Contorno", isOn: hasStroke)
-                        if element.strokeColor != nil {
-                            ColorPicker("Cor do contorno", selection: strokeColor, supportsOpacity: true)
-                        }
-                    }
-                    Toggle("Negrito", isOn: $element.isBold)
-                    sliderRow("Tamanho da fonte", value: $element.fontScale, range: 0.02...0.2, label: "\(Int(element.fontScale * 100))%")
-                    sliderRow("Largura", value: $element.widthFraction, range: 0.05...1, label: "\(Int(element.widthFraction * 100))%")
-                    sliderRow("Altura", value: $element.heightFraction, range: 0.04...0.8, label: "\(Int(element.heightFraction * 100))%")
-                    sliderRow("Cantos", value: $element.cornerRadius, range: 0...0.5, label: "\(Int(element.cornerRadius * 100))%")
-                    sliderRow("Espessura do contorno", value: $element.strokeWidth, range: 0.001...0.04, label: "\(Int(element.strokeWidth * 1000))‰")
-                    sliderRow("Opacidade", value: $element.opacity, range: 0.05...1, label: "\(Int(element.opacity * 100))%")
-                    sliderRow("Rotação", value: $element.rotation, range: -180...180, label: "\(Int(element.rotation))°")
-                }
-
-                Section("Animação") {
-                    Picker("Entrada", selection: $element.entrance) {
-                        ForEach(element.kind.entranceOptions) { animation in
-                            Text(animation.rawValue).tag(animation)
-                        }
-                    }
-                    Picker("Saída", selection: $element.exit) {
-                        ForEach(element.kind.exitOptions) { animation in
-                            Text(animation.rawValue).tag(animation)
-                        }
-                    }
-                    sliderRow("Duração da entrada", value: $element.entranceDuration, range: 0.1...3, label: String(format: "%.1fs", element.entranceDuration))
-                    sliderRow("Duração da saída", value: $element.exitDuration, range: 0.1...2, label: String(format: "%.1fs", element.exitDuration))
-                }
-
-                Section {
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 3), spacing: 8) {
-                        positionButton("↖︎", x: 0.25, y: 0.22)
-                        positionButton("↑", x: 0.5, y: 0.22)
-                        positionButton("↗︎", x: 0.75, y: 0.22)
-                        positionButton("←", x: 0.25, y: 0.5)
-                        positionButton("•", x: 0.5, y: 0.5)
-                        positionButton("→", x: 0.75, y: 0.5)
-                        positionButton("↙︎", x: 0.25, y: 0.78)
-                        positionButton("↓", x: 0.5, y: 0.78)
-                        positionButton("↘︎", x: 0.75, y: 0.78)
-                    }
-                    .buttonStyle(.bordered)
-                } header: {
-                    Text("Posição")
-                } footer: {
-                    Text("Você também pode arrastar direto na prévia.")
-                }
-
-                Section("Tempo") {
-                    sliderRow("Início", value: $element.startTime, range: 0...max(episodeDuration - 0.3, 0.1), label: TimelineView.rulerLabel(element.startTime))
-                    sliderRow(
-                        "Duração",
-                        value: $element.duration,
-                        range: 0.3...max(maxDuration, 0.4),
-                        label: String(format: "%.1fs", element.duration)
-                    )
-                }
-
-                Section {
-                    Button("Remover elemento", role: .destructive) {
-                        onDelete()
-                        dismiss()
-                    }
-                }
+                previewSection
+                contentSection
+                appearanceSection
+                animationSection
+                positionSection
+                timeSection
+                deleteSection
             }
             .navigationTitle("Editar motion")
             .navigationBarTitleDisplayMode(.inline)
@@ -319,8 +289,152 @@ struct MotionElementEditorSheet: View {
         }
     }
 
+    private var previewSection: some View {
+        Section {
+            Canvas { context, size in
+                context.withCGContext { cgContext in
+                    MotionRenderer.draw(element, at: previewTime, canvasSize: size, in: cgContext)
+                }
+            }
+            .frame(height: 150)
+            .frame(maxWidth: .infinity)
+            .background(Color.black)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    private var contentSection: some View {
+        Section("Conteúdo") {
+            contentRows
+        }
+    }
+
+    @ViewBuilder
+    private var contentRows: some View {
+        switch element.kind {
+        case .text:
+            TextField("Texto", text: $element.text, axis: .vertical)
+                .lineLimit(1...4)
+        case .counter:
+            TextField("De", value: $element.counterFrom, format: .number)
+                .keyboardType(.decimalPad)
+            TextField("Até", value: $element.counterTo, format: .number)
+                .keyboardType(.decimalPad)
+            TextField("Prefixo", text: $element.prefix)
+            TextField("Sufixo", text: $element.suffix)
+            Stepper("Casas decimais: \(element.decimals)", value: $element.decimals, in: 0...2)
+            sliderRow(
+                "Duração da contagem",
+                value: $element.countDuration,
+                range: countDurationRange,
+                label: countDurationLabel
+            )
+        case .shape:
+            Picker("Forma", selection: $element.shape) {
+                ForEach(MotionShape.allCases) { shape in
+                    Text(shape.rawValue).tag(shape)
+                }
+            }
+        }
+    }
+
+    private var appearanceSection: some View {
+        Section("Aparência") {
+            colorRows
+            sizeRows
+        }
+    }
+
+    @ViewBuilder
+    private var colorRows: some View {
+        if isLineShape {
+            ColorPicker("Cor da linha", selection: lineColor, supportsOpacity: true)
+        } else {
+            ColorPicker("Cor do texto", selection: textColor, supportsOpacity: true)
+            Toggle("Preenchimento", isOn: hasFill)
+            if element.fillColor != nil {
+                ColorPicker("Cor do preenchimento", selection: fillColor, supportsOpacity: true)
+            }
+            Toggle("Contorno", isOn: hasStroke)
+            if element.strokeColor != nil {
+                ColorPicker("Cor do contorno", selection: strokeColor, supportsOpacity: true)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var sizeRows: some View {
+        Toggle("Negrito", isOn: $element.isBold)
+        sliderRow("Tamanho da fonte", value: $element.fontScale, range: fontScaleRange, label: fontScaleLabel)
+        sliderRow("Largura", value: $element.widthFraction, range: widthRange, label: widthLabel)
+        sliderRow("Altura", value: $element.heightFraction, range: heightRange, label: heightLabel)
+        sliderRow("Cantos", value: $element.cornerRadius, range: cornerRadiusRange, label: cornerRadiusLabel)
+        sliderRow("Espessura do contorno", value: $element.strokeWidth, range: strokeWidthRange, label: strokeWidthLabel)
+        sliderRow("Opacidade", value: $element.opacity, range: opacityRange, label: opacityLabel)
+        sliderRow("Rotação", value: $element.rotation, range: rotationRange, label: rotationLabel)
+    }
+
+    private var animationSection: some View {
+        Section("Animação") {
+            Picker("Entrada", selection: $element.entrance) {
+                ForEach(element.kind.entranceOptions) { animation in
+                    Text(animation.rawValue).tag(animation)
+                }
+            }
+            Picker("Saída", selection: $element.exit) {
+                ForEach(element.kind.exitOptions) { animation in
+                    Text(animation.rawValue).tag(animation)
+                }
+            }
+            sliderRow(
+                "Duração da entrada",
+                value: $element.entranceDuration,
+                range: entranceDurationRange,
+                label: entranceDurationLabel
+            )
+            sliderRow(
+                "Duração da saída",
+                value: $element.exitDuration,
+                range: exitDurationRange,
+                label: exitDurationLabel
+            )
+        }
+    }
+
+    private var positionSection: some View {
+        Section {
+            LazyVGrid(columns: Self.positionColumns, spacing: 8) {
+                ForEach(Self.positions) { position in
+                    positionButton(position.title, x: position.x, y: position.y)
+                }
+            }
+            .buttonStyle(.bordered)
+        } header: {
+            Text("Posição")
+        } footer: {
+            Text("Você também pode arrastar direto na prévia.")
+        }
+    }
+
+    private var timeSection: some View {
+        Section("Tempo") {
+            sliderRow("Início", value: $element.startTime, range: startRange, label: startLabel)
+            sliderRow("Duração", value: $element.duration, range: durationRange, label: durationLabel)
+        }
+    }
+
+    private var deleteSection: some View {
+        Section {
+            Button("Remover elemento", role: .destructive) {
+                onDelete()
+                dismiss()
+            }
+        }
+    }
+
     private var maxDuration: Double {
-        max(0.4, episodeDuration - element.startTime)
+        let remainingDuration: Double = episodeDuration - element.startTime
+        return max(0.4, remainingDuration)
     }
 
     private func sliderRow(

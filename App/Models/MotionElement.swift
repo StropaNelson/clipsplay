@@ -99,14 +99,19 @@ struct MotionElement: Codable, Identifiable, Hashable {
             element.textColor = RGBAColor(red: 1, green: 0.84, blue: 0.04, alpha: 1)
         case .shape:
             element.shape = shape
-            element.widthFraction = shape == .line || shape == .arrow ? 0.58 : 0.36
-            element.heightFraction = shape == .line || shape == .arrow ? 0.08 : 0.24
-            element.fillColor = shape == .roundedRect
+            let isLine: Bool = shape == .line || shape == .arrow
+            let width: Double = isLine ? 0.58 : 0.36
+            let height: Double = isLine ? 0.08 : 0.24
+            element.widthFraction = width
+            element.heightFraction = height
+            let fillColor: RGBAColor? = shape == .roundedRect
                 ? RGBAColor(red: 0.16, green: 0.62, blue: 1, alpha: 0.85)
                 : nil
-            element.strokeColor = shape == .line || shape == .arrow
+            element.fillColor = fillColor
+            let strokeColor: RGBAColor = isLine
                 ? .white
                 : RGBAColor(red: 0.16, green: 0.62, blue: 1, alpha: 1)
+            element.strokeColor = strokeColor
         }
         if kind == .shape {
             element.entrance = .draw

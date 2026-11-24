@@ -326,10 +326,10 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
             renderSize: renderSize
         ) else { return canvas }
         let rect = MotionRenderer.boundingRect(element, canvasSize: renderSize)
-        let placed = image.transformed(by: CGAffineTransform(
-            translationX: rect.minX,
-            y: renderSize.height - rect.maxY
-        ))
+        let ciOriginX: CGFloat = rect.minX
+        let ciOriginY: CGFloat = renderSize.height - rect.maxY
+        let imagePlacement = CGAffineTransform(translationX: ciOriginX, y: ciOriginY)
+        let placed = image.transformed(by: imagePlacement)
         return placed.composited(over: canvas)
     }
 
@@ -829,7 +829,9 @@ final class MotionElementRasterizer {
 
     func image(for element: MotionElement, at time: Double, renderSize: CGSize) -> CIImage? {
         let canCache = MotionMath.isStatic(element, time: time)
-        let key = "\(element.hashValue):\(Int(renderSize.width))x\(Int(renderSize.height))"
+        let renderWidth: Int = Int(renderSize.width)
+        let renderHeight: Int = Int(renderSize.height)
+        let key = "\(element.hashValue):\(renderWidth)x\(renderHeight)"
         return queue.sync {
             if canCache, let cached = cache[key] { return cached }
             guard let rendered = render(element, at: time, renderSize: renderSize) else { return nil }

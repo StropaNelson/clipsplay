@@ -207,7 +207,11 @@ struct TimelineView: View {
 
     private var contentHeight: CGFloat {
         let videoHeight = clipHeight * CGFloat(videoRows.count) + laneSpacing * CGFloat(max(0, videoRows.count - 1))
-        return rulerHeight + 4 + videoHeight + laneHeight * CGFloat(4 + audioRows.count) + laneSpacing * CGFloat(4 + videoRows.count + audioRows.count)
+        let fixedLanes: CGFloat = CGFloat(4 + audioRows.count)
+        let spacings: CGFloat = CGFloat(4 + videoRows.count + audioRows.count)
+        let lanesHeight: CGFloat = laneHeight * fixedLanes
+        let spacingHeight: CGFloat = laneSpacing * spacings
+        return rulerHeight + 4 + videoHeight + lanesHeight + spacingHeight
     }
 
     private func xPosition(for time: Double) -> CGFloat {
@@ -537,32 +541,58 @@ struct TimelineView: View {
                 .contentShape(Rectangle())
                 .onTapGesture { onSelect(nil) }
             ForEach(motionElements.sorted { $0.duration > $1.duration }) { element in
-                let drag = laneDrag?.id == element.id ? laneDrag : nil
-                let start = max(0, element.startTime + (drag?.move ?? 0) + (drag?.left ?? 0))
-                let duration = max(0.3, element.duration - (drag?.left ?? 0) + (drag?.right ?? 0))
-                let title: String
-                switch element.kind {
-                case .text: title = element.text
-                case .counter: title = MotionMath.counterText(element, progress: 1)
-                case .shape: title = element.shape.rawValue
-                }
-                laneItem(
-                    id: element.id,
-                    title: title,
-                    icon: element.kind == .text ? "textformat" : (element.kind == .counter ? "number" : "square.dashed"),
-                    color: .pink,
-                    start: start,
-                    duration: duration,
-                    isSelected: element.id == selectedID
-                ) { move, left, right in
-                    let newStart = max(0, element.startTime + move + left)
-                    let newEnd = element.endTime + move + right
-                    let newDuration = max(0.3, newEnd - newStart)
-                    onMoveMotion(element.id, newStart, newDuration)
-                }
+                motionItem(element)
             }
         }
         .frame(width: contentWidth, height: laneHeight, alignment: .topLeading)
+    }
+
+    private func motionItem(_ element: MotionElement) -> some View {
+        let span: (start: Double, duration: Double) = motionSpan(element)
+        let start: Double = span.start
+        let duration: Double = span.duration
+        let title: String = motionTitle(element)
+        let icon: String = motionIcon(element)
+        return laneItem(
+            id: element.id,
+            title: title,
+            icon: icon,
+            color: .pink,
+            start: start,
+            duration: duration,
+            isSelected: element.id == selectedID
+        ) { move, left, right in
+            let newStart: Double = max(0, element.startTime + move + left)
+            let newEnd: Double = element.endTime + move + right
+            let newDuration: Double = max(0.3, newEnd - newStart)
+            onMoveMotion(element.id, newStart, newDuration)
+        }
+    }
+
+    private func motionSpan(_ element: MotionElement) -> (start: Double, duration: Double) {
+        let drag: LaneDrag? = laneDrag?.id == element.id ? laneDrag : nil
+        let move: Double = drag?.move ?? 0
+        let left: Double = drag?.left ?? 0
+        let right: Double = drag?.right ?? 0
+        let start: Double = max(0, element.startTime + move + left)
+        let duration: Double = max(0.3, element.duration - left + right)
+        return (start, duration)
+    }
+
+    private func motionTitle(_ element: MotionElement) -> String {
+        switch element.kind {
+        case .text: return element.text
+        case .counter: return MotionMath.counterText(element, progress: 1)
+        case .shape: return element.shape.rawValue
+        }
+    }
+
+    private func motionIcon(_ element: MotionElement) -> String {
+        switch element.kind {
+        case .text: return "textformat"
+        case .counter: return "number"
+        case .shape: return "square.dashed"
+        }
     }
 
     /// One row per audio kind, stacking overlapping clips of the same kind onto extra rows.

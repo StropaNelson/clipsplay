@@ -14,10 +14,17 @@ struct MotionState {
 enum MotionMath {
     static func state(for element: MotionElement, at time: Double) -> MotionState {
         var state = MotionState()
-        let entranceDuration = element.entrance == .typewriter
-            ? max(element.entranceDuration, 0.05 * Double(element.text.count))
-            : max(element.entranceDuration, 0.001)
-        let entrance = easeOutCubic(clamp((time - element.startTime) / entranceDuration))
+        let minimumEntranceDuration: Double = 0.001
+        let typewriterCharacterDuration: Double = 0.05 * Double(element.text.count)
+        let entranceDuration: Double
+        if element.entrance == .typewriter {
+            entranceDuration = max(element.entranceDuration, typewriterCharacterDuration)
+        } else {
+            entranceDuration = max(element.entranceDuration, minimumEntranceDuration)
+        }
+        let entranceElapsed: Double = time - element.startTime
+        let entranceLinearProgress: Double = clamp(entranceElapsed / entranceDuration)
+        let entrance: Double = easeOutCubic(entranceLinearProgress)
         switch element.entrance {
         case .none, .countUp: break
         case .fade:
@@ -35,11 +42,17 @@ enum MotionMath {
         }
 
         if element.entrance == .countUp {
-            state.countProgress = easeOutCubic(clamp((time - element.startTime) / max(element.countDuration, 0.001)))
+            let countDuration: Double = max(element.countDuration, 0.001)
+            let countElapsed: Double = time - element.startTime
+            let countLinearProgress: Double = clamp(countElapsed / countDuration)
+            state.countProgress = easeOutCubic(countLinearProgress)
         }
 
         if element.exit != .none {
-            let exit = easeOutCubic(clamp((element.endTime - time) / max(element.exitDuration, 0.001)))
+            let remainingTime: Double = element.endTime - time
+            let exitDuration: Double = max(element.exitDuration, 0.001)
+            let exitLinearProgress: Double = clamp(remainingTime / exitDuration)
+            let exit: Double = easeOutCubic(exitLinearProgress)
             switch element.exit {
             case .none, .draw, .countUp, .typewriter: break
             case .fade:
@@ -58,30 +71,44 @@ enum MotionMath {
     static func isStatic(_ element: MotionElement, time: Double) -> Bool {
         guard time >= element.startTime, time < element.endTime else { return false }
         if element.entrance != .none {
-            let duration = element.entrance == .typewriter
-                ? max(element.entranceDuration, 0.05 * Double(element.text.count))
-                : max(element.entranceDuration, 0.001)
-            if time < element.startTime + duration { return false }
+            let minimumEntranceDuration: Double = 0.001
+            let typewriterCharacterDuration: Double = 0.05 * Double(element.text.count)
+            let entranceDuration: Double
+            if element.entrance == .typewriter {
+                entranceDuration = max(element.entranceDuration, typewriterCharacterDuration)
+            } else {
+                entranceDuration = max(element.entranceDuration, minimumEntranceDuration)
+            }
+            let entranceEnd: Double = element.startTime + entranceDuration
+            if time < entranceEnd { return false }
         }
-        if element.entrance == .countUp,
-           time < element.startTime + max(element.countDuration, 0.001) {
-            return false
+        if element.entrance == .countUp {
+            let countDuration: Double = max(element.countDuration, 0.001)
+            let countEnd: Double = element.startTime + countDuration
+            if time < countEnd { return false }
         }
-        if element.exit != .none,
-           time >= element.endTime - max(element.exitDuration, 0.001) {
-            return false
+        if element.exit != .none {
+            let exitDuration: Double = max(element.exitDuration, 0.001)
+            let exitStart: Double = element.endTime - exitDuration
+            if time >= exitStart { return false }
         }
         return true
     }
 
     static func counterText(_ element: MotionElement, progress: Double) -> String {
-        let value = element.counterFrom + (element.counterTo - element.counterFrom) * clamp(progress)
+        let progressValue: Double = clamp(progress)
+        let valueRange: Double = element.counterTo - element.counterFrom
+        let valueOffset: Double = valueRange * progressValue
+        let value: Double = element.counterFrom + valueOffset
         let formatter = NumberFormatter()
         formatter.locale = Locale(identifier: "pt_BR")
         formatter.numberStyle = .decimal
-        formatter.minimumFractionDigits = min(2, max(0, element.decimals))
-        formatter.maximumFractionDigits = min(2, max(0, element.decimals))
-        return element.prefix + (formatter.string(from: NSNumber(value: value)) ?? "\(value)") + element.suffix
+        let fractionDigits: Int = min(2, max(0, element.decimals))
+        formatter.minimumFractionDigits = fractionDigits
+        formatter.maximumFractionDigits = fractionDigits
+        let formattedValue: String = formatter.string(from: NSNumber(value: value)) ?? "\(value)"
+        let prefixedValue: String = element.prefix + formattedValue
+        return prefixedValue + element.suffix
     }
 
     private static func clamp(_ value: Double) -> Double {
@@ -89,17 +116,25 @@ enum MotionMath {
     }
 
     private static func easeOutCubic(_ value: Double) -> Double {
-        1 - pow(1 - value, 3)
+        let inverse: Double = 1 - value
+        let cubed: Double = pow(inverse, 3)
+        return 1 - cubed
     }
 }
 
 enum MotionRenderer {
     static func frameRect(_ element: MotionElement, canvasSize: CGSize) -> CGRect {
-        let width = max(1, CGFloat(element.widthFraction) * canvasSize.width)
-        let height = max(1, CGFloat(element.heightFraction) * canvasSize.height)
+        let widthFraction: CGFloat = CGFloat(element.widthFraction)
+        let heightFraction: CGFloat = CGFloat(element.heightFraction)
+        let width: CGFloat = max(1, widthFraction * canvasSize.width)
+        let height: CGFloat = max(1, heightFraction * canvasSize.height)
+        let centerX: CGFloat = CGFloat(element.centerX) * canvasSize.width
+        let centerY: CGFloat = CGFloat(element.centerY) * canvasSize.height
+        let originX: CGFloat = centerX - width / 2
+        let originY: CGFloat = centerY - height / 2
         return CGRect(
-            x: CGFloat(element.centerX) * canvasSize.width - width / 2,
-            y: CGFloat(element.centerY) * canvasSize.height - height / 2,
+            x: originX,
+            y: originY,
             width: width,
             height: height
         )
@@ -107,17 +142,21 @@ enum MotionRenderer {
 
     static func boundingRect(_ element: MotionElement, canvasSize: CGSize) -> CGRect {
         let frame = frameRect(element, canvasSize: canvasSize)
-        let radians = CGFloat(element.rotation * .pi / 180)
-        let rotated = frame.applying(CGAffineTransform(translationX: -frame.midX, y: -frame.midY))
-            .applying(CGAffineTransform(rotationAngle: radians))
-            .applying(CGAffineTransform(translationX: frame.midX, y: frame.midY))
-        let strokeMargin = CGFloat(element.strokeWidth) * canvasSize.height / 2
-        let margin = max(2, strokeMargin + 2)
-        let movement = element.entrance == .slideUp || element.exit == .slideUp
-            ? canvasSize.height * 0.08
-            : 0
-        let expanded = rotated.insetBy(dx: -margin, dy: -margin - movement).integral
-        return expanded.intersection(CGRect(origin: .zero, size: canvasSize)).integral
+        let rotationDegrees: CGFloat = CGFloat(element.rotation)
+        let radians: CGFloat = rotationDegrees * .pi / 180
+        let toOrigin = CGAffineTransform(translationX: -frame.midX, y: -frame.midY)
+        let rotate = CGAffineTransform(rotationAngle: radians)
+        let toCenter = CGAffineTransform(translationX: frame.midX, y: frame.midY)
+        let rotated = frame.applying(toOrigin).applying(rotate).applying(toCenter)
+        let strokeFraction: CGFloat = CGFloat(element.strokeWidth)
+        let strokeMargin: CGFloat = strokeFraction * canvasSize.height / 2
+        let margin: CGFloat = max(2, strokeMargin + 2)
+        let movesVertically: Bool = element.entrance == .slideUp || element.exit == .slideUp
+        let movement: CGFloat = movesVertically ? canvasSize.height * 0.08 : 0
+        let verticalMargin: CGFloat = margin + movement
+        let expanded = rotated.insetBy(dx: -margin, dy: -verticalMargin).integral
+        let canvasRect = CGRect(origin: .zero, size: canvasSize)
+        return expanded.intersection(canvasRect).integral
     }
 
     static func draw(_ element: MotionElement, at time: Double, canvasSize: CGSize, in context: CGContext) {
@@ -125,14 +164,25 @@ enum MotionRenderer {
         guard state.opacity > 0.001 else { return }
         let frame = frameRect(element, canvasSize: canvasSize)
         context.saveGState()
-        context.setAlpha(CGFloat(min(1, max(0, element.opacity * state.opacity))))
+        let combinedOpacity: Double = element.opacity * state.opacity
+        let clampedOpacity: Double = min(1, max(0, combinedOpacity))
+        context.setAlpha(CGFloat(clampedOpacity))
+        let verticalOffset: CGFloat = CGFloat(state.dy) * canvasSize.height
+        let centerY: CGFloat = frame.midY + verticalOffset
         context.translateBy(
             x: frame.midX,
-            y: frame.midY + CGFloat(state.dy) * canvasSize.height
+            y: centerY
         )
-        context.rotate(by: CGFloat(element.rotation * .pi / 180))
-        context.scaleBy(x: CGFloat(state.scale), y: CGFloat(state.scale))
-        let localRect = CGRect(x: -frame.width / 2, y: -frame.height / 2, width: frame.width, height: frame.height)
+        let rotationDegrees: CGFloat = CGFloat(element.rotation)
+        let rotationRadians: CGFloat = rotationDegrees * .pi / 180
+        context.rotate(by: rotationRadians)
+        let scale: CGFloat = CGFloat(state.scale)
+        context.scaleBy(x: scale, y: scale)
+        let localWidth: CGFloat = frame.width
+        let localHeight: CGFloat = frame.height
+        let localOriginX: CGFloat = -localWidth / 2
+        let localOriginY: CGFloat = -localHeight / 2
+        let localRect = CGRect(x: localOriginX, y: localOriginY, width: localWidth, height: localHeight)
         switch element.kind {
         case .text:
             drawText(element.text, element: element, state: state, rect: localRect, canvasSize: canvasSize, context: context)
@@ -159,7 +209,9 @@ enum MotionRenderer {
         canvasSize: CGSize,
         context: CGContext
     ) {
-        let radius = min(rect.width, rect.height) * CGFloat(element.cornerRadius)
+        let shortSide: CGFloat = min(rect.width, rect.height)
+        let radiusFraction: CGFloat = CGFloat(element.cornerRadius)
+        let radius: CGFloat = shortSide * radiusFraction
         let backgroundPath = CGPath(
             roundedRect: rect,
             cornerWidth: radius,
@@ -172,19 +224,22 @@ enum MotionRenderer {
             context.fillPath()
         }
         if let strokeColor = element.strokeColor {
-            context.setLineWidth(max(1, CGFloat(element.strokeWidth) * canvasSize.height))
+            let strokeFraction: CGFloat = CGFloat(element.strokeWidth)
+            let strokeWidth: CGFloat = strokeFraction * canvasSize.height
+            context.setLineWidth(max(1, strokeWidth))
             context.setStrokeColor(strokeColor.uiColor.cgColor)
             context.addPath(backgroundPath)
             context.strokePath()
         }
-        let visible = element.entrance == .typewriter && state.typedFraction < 1
-            ? String(text.prefix(Int(Double(text.count) * state.typedFraction)))
-            : text
+        let isTyping: Bool = element.entrance == .typewriter && state.typedFraction < 1
+        let typedCount: Int = Int(Double(text.count) * state.typedFraction)
+        let visible: String = isTyping ? String(text.prefix(typedCount)) : text
         guard !visible.isEmpty else { return }
-        let fontSize = max(
-            8,
-            CGFloat(element.fontScale) * max(1, rect.height / CGFloat(max(0.001, element.heightFraction)))
-        )
+        let heightFraction: CGFloat = CGFloat(max(0.001, element.heightFraction))
+        let canvasHeight: CGFloat = max(1, rect.height / heightFraction)
+        let fontScale: CGFloat = CGFloat(element.fontScale)
+        let scaledFontSize: CGFloat = fontScale * canvasHeight
+        let fontSize: CGFloat = max(8, scaledFontSize)
         let font = UIFont.systemFont(ofSize: fontSize, weight: element.isBold ? .bold : .regular)
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
@@ -193,16 +248,21 @@ enum MotionRenderer {
             string: visible,
             attributes: [.font: font, .foregroundColor: element.textColor.uiColor, .paragraphStyle: paragraph]
         )
+        let horizontalInset: CGFloat = 12
+        let availableWidth: CGFloat = max(1, rect.width - horizontalInset)
+        let textSize = CGSize(width: availableWidth, height: .greatestFiniteMagnitude)
         let textRect = attributed.boundingRect(
-            with: CGSize(width: max(1, rect.width - 12), height: .greatestFiniteMagnitude),
+            with: textSize,
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             context: nil
         )
+        let fittedHeight: CGFloat = min(rect.height, textRect.height)
+        let fittedY: CGFloat = rect.midY - fittedHeight / 2
         let fitted = CGRect(
             x: rect.minX + 6,
-            y: rect.midY - min(rect.height, textRect.height) / 2,
-            width: max(1, rect.width - 12),
-            height: min(rect.height, textRect.height)
+            y: fittedY,
+            width: availableWidth,
+            height: fittedHeight
         )
         UIGraphicsPushContext(context)
         attributed.draw(
@@ -220,24 +280,36 @@ enum MotionRenderer {
         canvasSize: CGSize,
         context: CGContext
     ) {
-        let lineWidth = max(1, CGFloat(element.strokeWidth) * canvasSize.height)
+        let strokeFraction: CGFloat = CGFloat(element.strokeWidth)
+        let requestedLineWidth: CGFloat = strokeFraction * canvasSize.height
+        let lineWidth: CGFloat = max(1, requestedLineWidth)
         let stroke = (element.strokeColor ?? element.textColor).uiColor.cgColor
         context.saveGState()
         context.setLineWidth(lineWidth)
         context.setLineCap(.round)
         if element.shape == .line || element.shape == .arrow {
-            let progress = CGFloat(min(1, max(0, state.drawProgress)))
+            let clampedProgress: Double = min(1, max(0, state.drawProgress))
+            let progress: CGFloat = CGFloat(clampedProgress)
             let start = CGPoint(x: rect.minX, y: rect.midY)
-            let tip = CGPoint(x: rect.minX + rect.width * progress, y: rect.midY)
+            let progressWidth: CGFloat = rect.width * progress
+            let tipX: CGFloat = rect.minX + progressWidth
+            let tip = CGPoint(x: tipX, y: rect.midY)
             context.setStrokeColor(stroke)
             context.move(to: start)
             context.addLine(to: tip)
             context.strokePath()
             if element.shape == .arrow, progress > 0 {
-                let head = max(lineWidth * 3, min(rect.height * 0.55, rect.width * 0.12))
-                context.move(to: CGPoint(x: tip.x - head, y: tip.y - head * 0.65))
+                let minimumHead: CGFloat = lineWidth * 3
+                let heightHead: CGFloat = rect.height * 0.55
+                let widthHead: CGFloat = rect.width * 0.12
+                let head: CGFloat = max(minimumHead, min(heightHead, widthHead))
+                let headVerticalOffset: CGFloat = head * 0.65
+                let upperHeadY: CGFloat = tip.y - headVerticalOffset
+                let lowerHeadY: CGFloat = tip.y + headVerticalOffset
+                let headStartX: CGFloat = tip.x - head
+                context.move(to: CGPoint(x: headStartX, y: upperHeadY))
                 context.addLine(to: tip)
-                context.addLine(to: CGPoint(x: tip.x - head, y: tip.y + head * 0.65))
+                context.addLine(to: CGPoint(x: headStartX, y: lowerHeadY))
                 context.strokePath()
             }
             context.restoreGState()
@@ -247,11 +319,16 @@ enum MotionRenderer {
         if element.shape == .circle {
             fullPath = CGPath(ellipseIn: rect, transform: nil)
         } else {
-            let radius = min(rect.width, rect.height) * CGFloat(element.cornerRadius)
+            let shortSide: CGFloat = min(rect.width, rect.height)
+            let radiusFraction: CGFloat = CGFloat(element.cornerRadius)
+            let radius: CGFloat = shortSide * radiusFraction
             fullPath = CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil)
         }
         if state.drawProgress < 1 {
-            context.clip(to: CGRect(x: rect.minX, y: rect.minY, width: rect.width * CGFloat(state.drawProgress), height: rect.height))
+            let progress: CGFloat = CGFloat(state.drawProgress)
+            let clipWidth: CGFloat = rect.width * progress
+            let clipRect = CGRect(x: rect.minX, y: rect.minY, width: clipWidth, height: rect.height)
+            context.clip(to: clipRect)
         }
         if let fillColor = element.fillColor {
             context.addPath(fullPath)
