@@ -556,7 +556,8 @@ struct TimelineView: View {
                     isSelected: element.id == selectedID
                 ) { move, left, right in
                     let newStart = max(0, element.startTime + move + left)
-                    let newDuration = max(0.3, element.duration - left + right)
+                    let newEnd = element.endTime + move + right
+                    let newDuration = max(0.3, newEnd - newStart)
                     onMoveMotion(element.id, newStart, newDuration)
                 }
             }

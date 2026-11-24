@@ -2641,8 +2641,12 @@ class EditorViewModel: ObservableObject {
 
     func retimeMotionElement(_ id: UUID, start: Double, duration: Double) {
         guard var element = selectedEpisode?.motionElements.first(where: { $0.id == id }) else { return }
-        element.startTime = min(max(0, start), max(0, timelineDuration - 0.3))
-        element.duration = max(0.3, min(duration, max(0.3, timelineDuration - element.startTime)))
+        if abs(duration - element.duration) < 0.001 {
+            element.startTime = min(max(0, start), max(0, timelineDuration - element.duration))
+        } else {
+            element.startTime = min(max(0, start), max(0, timelineDuration - 0.3))
+            element.duration = max(0.3, min(duration, max(0.3, timelineDuration - element.startTime)))
+        }
         updateMotionElement(element)
     }
 
