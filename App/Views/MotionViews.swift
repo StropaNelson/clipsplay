@@ -37,8 +37,9 @@ struct MotionLayer: View {
 
     private func hitArea(for element: MotionElement, size: CGSize) -> some View {
         let rect: CGRect = MotionRenderer.frameRect(element, canvasSize: size)
-        let hitWidth: CGFloat = max(60, rect.width)
-        let hitHeight: CGFloat = max(60, rect.height)
+        let isSelected: Bool = element.id == selectedID
+        let hitWidth: CGFloat = isSelected ? max(60, rect.width) : rect.width
+        let hitHeight: CGFloat = isSelected ? max(60, rect.height) : rect.height
         return Color.white.opacity(0.001)
             .frame(width: hitWidth, height: hitHeight)
             .overlay {
@@ -48,7 +49,7 @@ struct MotionLayer: View {
                         style: StrokeStyle(lineWidth: 1.5, dash: [5, 3])
                     )
                     .frame(width: rect.width, height: rect.height)
-                    .opacity(element.id == selectedID ? 1 : 0)
+                    .opacity(isSelected ? 1 : 0)
                     .allowsHitTesting(false)
             }
             .position(x: rect.midX, y: rect.midY)
@@ -56,6 +57,7 @@ struct MotionLayer: View {
             .onTapGesture { onSelect(element.id) }
             .gesture(dragGesture(for: element.id, size: size))
             .simultaneousGesture(pinchGesture(for: element.id))
+            .zIndex(isSelected ? 1 : 0)
     }
 
     private func dragGesture(for id: UUID, size: CGSize) -> some Gesture {
