@@ -2673,9 +2673,21 @@ class EditorViewModel: ObservableObject {
         }
         guard let base = motionResizeBase else { return }
         var resizedElement = base
-        let scaledWidth: Double = base.widthFraction * scale
-        let scaledHeight: Double = base.heightFraction * scale
-        let scaledFont: Double = base.fontScale * scale
+        let baseWidth: Double = max(0.0001, base.widthFraction)
+        let baseHeight: Double = max(0.0001, base.heightFraction)
+        let baseFont: Double = max(0.0001, base.fontScale)
+        let widthMinimumScale: Double = 0.03 / baseWidth
+        let heightMinimumScale: Double = 0.02 / baseHeight
+        let fontMinimumScale: Double = 0.015 / baseFont
+        let minScale: Double = max(widthMinimumScale, max(heightMinimumScale, fontMinimumScale))
+        let widthMaximumScale: Double = 1.5 / baseWidth
+        let heightMaximumScale: Double = 1.5 / baseHeight
+        let fontMaximumScale: Double = 0.4 / baseFont
+        let maxScale: Double = min(widthMaximumScale, min(heightMaximumScale, fontMaximumScale))
+        let appliedScale: Double = minScale <= maxScale ? min(maxScale, max(minScale, scale)) : scale
+        let scaledWidth: Double = base.widthFraction * appliedScale
+        let scaledHeight: Double = base.heightFraction * appliedScale
+        let scaledFont: Double = base.fontScale * appliedScale
         resizedElement.widthFraction = min(1.5, max(0.03, scaledWidth))
         resizedElement.heightFraction = min(1.5, max(0.02, scaledHeight))
         resizedElement.fontScale = min(0.4, max(0.015, scaledFont))
