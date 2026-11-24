@@ -135,13 +135,14 @@ enum MotionRenderer {
         let localRect = CGRect(x: -frame.width / 2, y: -frame.height / 2, width: frame.width, height: frame.height)
         switch element.kind {
         case .text:
-            drawText(element.text, element: element, state: state, rect: localRect, context: context)
+            drawText(element.text, element: element, state: state, rect: localRect, canvasSize: canvasSize, context: context)
         case .counter:
             drawText(
                 MotionMath.counterText(element, progress: state.countProgress),
                 element: element,
                 state: state,
                 rect: localRect,
+                canvasSize: canvasSize,
                 context: context
             )
         case .shape:
@@ -155,18 +156,26 @@ enum MotionRenderer {
         element: MotionElement,
         state: MotionState,
         rect: CGRect,
+        canvasSize: CGSize,
         context: CGContext
     ) {
+        let radius = min(rect.width, rect.height) * CGFloat(element.cornerRadius)
+        let backgroundPath = CGPath(
+            roundedRect: rect,
+            cornerWidth: radius,
+            cornerHeight: radius,
+            transform: nil
+        )
         if let fillColor = element.fillColor {
-            let radius = min(rect.width, rect.height) * CGFloat(element.cornerRadius)
             context.setFillColor(fillColor.uiColor.cgColor)
-            context.addPath(CGPath(
-                roundedRect: rect,
-                cornerWidth: radius,
-                cornerHeight: radius,
-                transform: nil
-            ))
+            context.addPath(backgroundPath)
             context.fillPath()
+        }
+        if let strokeColor = element.strokeColor {
+            context.setLineWidth(max(1, CGFloat(element.strokeWidth) * canvasSize.height))
+            context.setStrokeColor(strokeColor.uiColor.cgColor)
+            context.addPath(backgroundPath)
+            context.strokePath()
         }
         let visible = element.entrance == .typewriter && state.typedFraction < 1
             ? String(text.prefix(Int(Double(text.count) * state.typedFraction)))

@@ -175,6 +175,17 @@ struct MotionElementEditorSheet: View {
         )
     }
 
+    private var lineColor: Binding<Color> {
+        Binding(
+            get: { (element.strokeColor ?? element.textColor).color },
+            set: { element.strokeColor = RGBAColor($0) }
+        )
+    }
+
+    private var isLineShape: Bool {
+        element.kind == .shape && (element.shape == .line || element.shape == .arrow)
+    }
+
     private var previewTime: Double {
         element.startTime + min(element.duration, element.entranceDuration + 0.1)
     }
@@ -218,14 +229,18 @@ struct MotionElementEditorSheet: View {
                 }
 
                 Section("Aparência") {
-                    ColorPicker("Cor do texto", selection: textColor, supportsOpacity: true)
-                    Toggle("Preenchimento", isOn: hasFill)
-                    if element.fillColor != nil {
-                        ColorPicker("Cor do preenchimento", selection: fillColor, supportsOpacity: true)
-                    }
-                    Toggle("Contorno", isOn: hasStroke)
-                    if element.strokeColor != nil {
-                        ColorPicker("Cor do contorno", selection: strokeColor, supportsOpacity: true)
+                    if isLineShape {
+                        ColorPicker("Cor da linha", selection: lineColor, supportsOpacity: true)
+                    } else {
+                        ColorPicker("Cor do texto", selection: textColor, supportsOpacity: true)
+                        Toggle("Preenchimento", isOn: hasFill)
+                        if element.fillColor != nil {
+                            ColorPicker("Cor do preenchimento", selection: fillColor, supportsOpacity: true)
+                        }
+                        Toggle("Contorno", isOn: hasStroke)
+                        if element.strokeColor != nil {
+                            ColorPicker("Cor do contorno", selection: strokeColor, supportsOpacity: true)
+                        }
                     }
                     Toggle("Negrito", isOn: $element.isBold)
                     sliderRow("Tamanho da fonte", value: $element.fontScale, range: 0.02...0.2, label: "\(Int(element.fontScale * 100))%")
