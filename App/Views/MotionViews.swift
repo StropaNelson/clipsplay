@@ -122,7 +122,7 @@ struct AddMotionSheet: View {
         .presentationDetents([.medium, .large])
     }
 
-    private func preset(_ title: String, icon: String, element: () -> MotionElement) -> some View {
+    private func preset(_ title: String, icon: String, element: @escaping () -> MotionElement) -> some View {
         Button {
             onAdd(element())
             dismiss()
