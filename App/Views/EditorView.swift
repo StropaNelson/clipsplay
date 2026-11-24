@@ -2826,7 +2826,8 @@ class EditorViewModel: ObservableObject {
            !orderedSegments.contains(where: { $0.id == selectedSegmentID }),
            !episode.resolvedOverlays(global: project.globalOverlays).contains(where: { $0.id == selectedSegmentID }),
            !episode.resolvedAudioClips(global: project.globalAudioClips).contains(where: { $0.id == selectedSegmentID }),
-           !episode.mediaOverlays.contains(where: { $0.id == selectedSegmentID }) {
+           !episode.mediaOverlays.contains(where: { $0.id == selectedSegmentID }),
+           !episode.motionElements.contains(where: { $0.id == selectedSegmentID }) {
             self.selectedSegmentID = nil
         }
         durationString = timeString(timelineDuration)
