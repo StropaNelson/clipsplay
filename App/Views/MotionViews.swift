@@ -8,7 +8,10 @@ struct MotionLayer: View {
     let onSelect: (UUID) -> Void
     let onMove: (UUID, Double, Double, Bool) -> Void
     let onResize: (UUID, Double, Bool) -> Void
+    let onResizeEnd: () -> Void
     let onEdit: (UUID) -> Void
+
+    @GestureState private var pinchingID: UUID?
 
     var body: some View {
         GeometryReader { geometry in
@@ -21,6 +24,11 @@ struct MotionLayer: View {
             }
             .frame(width: size.width, height: size.height)
             .coordinateSpace(name: "motionCanvas")
+        }
+        .onChange(of: pinchingID) { value in
+            if value == nil {
+                onResizeEnd()
+            }
         }
     }
 
@@ -76,6 +84,7 @@ struct MotionLayer: View {
 
     private func pinchGesture(for id: UUID) -> some Gesture {
         MagnificationGesture()
+            .updating($pinchingID) { _, state, _ in state = id }
             .onChanged { onResize(id, Double($0), false) }
             .onEnded { onResize(id, Double($0), true) }
     }

@@ -561,6 +561,7 @@ struct EditorView: View {
                         onResize: { id, scale, finished in
                             viewModel.resizeMotionElement(id, scale: scale, finished: finished)
                         },
+                        onResizeEnd: { viewModel.endMotionResize() },
                         onEdit: { id in
                             if let element = viewModel.selectedEpisode?.motionElements.first(where: { $0.id == id }) {
                                 viewModel.selectedSegmentID = id
@@ -1601,7 +1602,6 @@ class EditorViewModel: ObservableObject {
     private var redoStack: [UndoState] = []
     private var isDraggingOverlay = false
     private var motionResizeBase: MotionElement?
-    private var motionResizeLastUpdate: Date = .distantPast
     private var narrationStartTime: Double?
     private var transcriptSaveTask: Task<Void, Never>?
     @Published var canUndo = false
@@ -2654,9 +2654,6 @@ class EditorViewModel: ObservableObject {
     }
 
     func resizeMotionElement(_ id: UUID, scale: Double, finished: Bool) {
-        let updateDate: Date = Date()
-        let timeSinceLastUpdate: TimeInterval = updateDate.timeIntervalSince(motionResizeLastUpdate)
-        motionResizeLastUpdate = updateDate
         guard let episodeIndex = selectedEpisodeIndex,
               let index = episodes[episodeIndex].motionElements.firstIndex(where: { $0.id == id }) else {
             if finished {
@@ -2665,8 +2662,7 @@ class EditorViewModel: ObservableObject {
             }
             return
         }
-        let startsNewGesture: Bool = motionResizeBase?.id != id || timeSinceLastUpdate > 0.3
-        if startsNewGesture {
+        if motionResizeBase?.id != id {
             motionResizeBase = episodes[episodeIndex].motionElements[index]
             isDraggingOverlay = true
             checkpoint()
@@ -2699,6 +2695,13 @@ class EditorViewModel: ObservableObject {
             isDraggingOverlay = false
             Task { await persistProjectChanges(reloadPreview: false) }
         }
+    }
+
+    func endMotionResize() {
+        guard motionResizeBase != nil else { return }
+        motionResizeBase = nil
+        isDraggingOverlay = false
+        Task { await persistProjectChanges(reloadPreview: false) }
     }
 
     func retimeMotionElement(_ id: UUID, start: Double, duration: Double) {
