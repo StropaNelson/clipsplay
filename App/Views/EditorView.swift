@@ -1601,6 +1601,7 @@ class EditorViewModel: ObservableObject {
     private var redoStack: [UndoState] = []
     private var isDraggingOverlay = false
     private var motionResizeBase: MotionElement?
+    private var motionResizeLastUpdate: Date = .distantPast
     private var narrationStartTime: Double?
     private var transcriptSaveTask: Task<Void, Never>?
     @Published var canUndo = false
@@ -2653,6 +2654,9 @@ class EditorViewModel: ObservableObject {
     }
 
     func resizeMotionElement(_ id: UUID, scale: Double, finished: Bool) {
+        let updateDate: Date = Date()
+        let timeSinceLastUpdate: TimeInterval = updateDate.timeIntervalSince(motionResizeLastUpdate)
+        motionResizeLastUpdate = updateDate
         guard let episodeIndex = selectedEpisodeIndex,
               let index = episodes[episodeIndex].motionElements.firstIndex(where: { $0.id == id }) else {
             if finished {
@@ -2661,12 +2665,11 @@ class EditorViewModel: ObservableObject {
             }
             return
         }
-        if motionResizeBase?.id != id {
+        let startsNewGesture: Bool = motionResizeBase?.id != id || timeSinceLastUpdate > 0.3
+        if startsNewGesture {
             motionResizeBase = episodes[episodeIndex].motionElements[index]
-            if !isDraggingOverlay {
-                isDraggingOverlay = true
-                checkpoint()
-            }
+            isDraggingOverlay = true
+            checkpoint()
         }
         guard let base = motionResizeBase else { return }
         var resizedElement = base
