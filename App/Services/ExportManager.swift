@@ -19,6 +19,7 @@ actor ExportManager {
         additionalAssets: [UUID: URL],
         progressHandler: @escaping @Sendable (ExportProgress) -> Void
     ) async throws -> ExportResult {
+        defer { MotionElementRasterizer.shared.removeAll() }
         progressHandler(ExportProgress(stage: .preparing, episode: episodeNumber, progress: 0, message: "Preparando composição..."))
         
         let output = try await timelineEngine.buildEpisodeComposition(

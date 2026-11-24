@@ -821,7 +821,11 @@ final class MotionElementRasterizer {
 
     private let queue = DispatchQueue(label: "clipstudio.motionrasterizer")
     private var cache: [String: CIImage] = [:]
-    private let cacheLimit = 64
+    private let cacheLimit = 16
+
+    func removeAll() {
+        queue.sync { cache.removeAll() }
+    }
 
     func image(for element: MotionElement, at time: Double, renderSize: CGSize) -> CIImage? {
         let canCache = MotionMath.isStatic(element, time: time)
