@@ -557,7 +557,16 @@ struct EditorView: View {
                         currentTime: viewModel.currentTime,
                         selectedID: viewModel.selectedSegmentID,
                         onSelect: { viewModel.selectedSegmentID = $0 },
-                        onMove: { id, x, y, finished in viewModel.moveMotionElement(id, x: x, y: y, finished: finished) }
+                        onMove: { id, x, y, finished in viewModel.moveMotionElement(id, x: x, y: y, finished: finished) },
+                        onResize: { id, scale, finished in
+                            viewModel.resizeMotionElement(id, scale: scale, finished: finished)
+                        },
+                        onEdit: { id in
+                            if let element = viewModel.selectedEpisode?.motionElements.first(where: { $0.id == id }) {
+                                viewModel.selectedSegmentID = id
+                                editingMotionElement = element
+                            }
+                        }
                     )
                     TextOverlayLayer(
                         overlays: viewModel.visibleOverlays,
@@ -1591,6 +1600,7 @@ class EditorViewModel: ObservableObject {
     private var undoStack: [UndoState] = []
     private var redoStack: [UndoState] = []
     private var isDraggingOverlay = false
+    private var motionResizeBase: MotionElement?
     private var narrationStartTime: Double?
     private var transcriptSaveTask: Task<Void, Never>?
     @Published var canUndo = false
@@ -2637,6 +2647,40 @@ class EditorViewModel: ObservableObject {
         episodes[episodeIndex].motionElements[index].centerY = y
         selectedEpisode = episodes[episodeIndex]
         if finished {
+            isDraggingOverlay = false
+            Task { await persistProjectChanges(reloadPreview: false) }
+        }
+    }
+
+    func resizeMotionElement(_ id: UUID, scale: Double, finished: Bool) {
+        guard let episodeIndex = selectedEpisodeIndex,
+              let index = episodes[episodeIndex].motionElements.firstIndex(where: { $0.id == id }) else {
+            if finished {
+                motionResizeBase = nil
+                isDraggingOverlay = false
+            }
+            return
+        }
+        if motionResizeBase?.id != id {
+            motionResizeBase = episodes[episodeIndex].motionElements[index]
+            if !isDraggingOverlay {
+                isDraggingOverlay = true
+                checkpoint()
+            }
+        }
+        guard let base = motionResizeBase else { return }
+        var resizedElement = base
+        let scaledWidth: Double = base.widthFraction * scale
+        let scaledHeight: Double = base.heightFraction * scale
+        let scaledFont: Double = base.fontScale * scale
+        resizedElement.widthFraction = min(1.5, max(0.03, scaledWidth))
+        resizedElement.heightFraction = min(1.5, max(0.02, scaledHeight))
+        resizedElement.fontScale = min(0.4, max(0.015, scaledFont))
+        selectedSegmentID = id
+        episodes[episodeIndex].motionElements[index] = resizedElement
+        selectedEpisode = episodes[episodeIndex]
+        if finished {
+            motionResizeBase = nil
             isDraggingOverlay = false
             Task { await persistProjectChanges(reloadPreview: false) }
         }

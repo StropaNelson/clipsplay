@@ -115,7 +115,28 @@ struct TimelineView: View {
         return rows.isEmpty ? [[]] : rows
     }
 
+    private var motionRows: [[MotionElement]] {
+        var rows: [[MotionElement]] = []
+        let orderedElements = motionElements.sorted { $0.startTime < $1.startTime }
+        for element in orderedElements {
+            var rowIndex = 0
+            while rowIndex < rows.count && rows[rowIndex].contains(where: { overlapping($0, element) }) {
+                rowIndex += 1
+            }
+            if rowIndex == rows.count {
+                rows.append([element])
+            } else {
+                rows[rowIndex].append(element)
+            }
+        }
+        return rows.isEmpty ? [[]] : rows
+    }
+
     private func overlapping(_ first: TimelineSegment, _ second: TimelineSegment) -> Bool {
+        first.startTime < second.endTime - 0.01 && second.startTime < first.endTime - 0.01
+    }
+
+    private func overlapping(_ first: MotionElement, _ second: MotionElement) -> Bool {
         first.startTime < second.endTime - 0.01 && second.startTime < first.endTime - 0.01
     }
 
@@ -163,7 +184,13 @@ struct TimelineView: View {
             header(icon: "waveform", title: "Som", height: laneHeight)
             header(icon: "rectangle.on.rectangle", title: "PiP", height: laneHeight, action: onAddOverlay)
             header(icon: "textformat", title: "Texto", height: laneHeight, action: onAddText)
-            header(icon: "sparkles", title: "Motion", height: laneHeight, action: onAddMotion)
+            ForEach(motionRows.indices, id: \.self) { row in
+                if row == 0 {
+                    header(icon: "sparkles", title: "Motion", height: laneHeight, action: onAddMotion)
+                } else {
+                    header(icon: "sparkles", title: "", height: laneHeight)
+                }
+            }
             ForEach(audioRows.indices, id: \.self) { row in
                 let kind = audioRows[row].kind
                 let isSingleEmpty = audioRows.count == 1 && audioRows[row].clips.isEmpty
@@ -207,8 +234,8 @@ struct TimelineView: View {
 
     private var contentHeight: CGFloat {
         let videoHeight = clipHeight * CGFloat(videoRows.count) + laneSpacing * CGFloat(max(0, videoRows.count - 1))
-        let fixedLanes: CGFloat = CGFloat(4 + audioRows.count)
-        let spacings: CGFloat = CGFloat(4 + videoRows.count + audioRows.count)
+        let fixedLanes: CGFloat = CGFloat(3 + motionRows.count + audioRows.count)
+        let spacings: CGFloat = CGFloat(3 + motionRows.count + videoRows.count + audioRows.count)
         let lanesHeight: CGFloat = laneHeight * fixedLanes
         let spacingHeight: CGFloat = laneSpacing * spacings
         return rulerHeight + 4 + videoHeight + lanesHeight + spacingHeight
@@ -232,7 +259,9 @@ struct TimelineView: View {
                 videoAudioLane
                 overlayLane
                 textLane
-                motionLane
+                ForEach(motionRows.indices, id: \.self) { row in
+                    motionLane(for: motionRows[row])
+                }
                 ForEach(audioRows.indices, id: \.self) { row in
                     audioLaneRow(clips: audioRows[row].clips)
                 }
@@ -254,7 +283,8 @@ struct TimelineView: View {
         let videoHeight = clipHeight * CGFloat(videoRows.count) + laneSpacing * CGFloat(max(0, videoRows.count - 1))
         let pipTop = videoTop + videoHeight + laneSpacing + laneHeight + laneSpacing
         let textTop = pipTop + laneHeight + laneSpacing
-        let audioTop = textTop + 2 * (laneHeight + laneSpacing)
+        let audioLaneOffset: CGFloat = CGFloat(1 + motionRows.count) * (laneHeight + laneSpacing)
+        let audioTop = textTop + audioLaneOffset
         let track: TrackType
         if location.y >= audioTop {
             track = .audio
@@ -534,13 +564,13 @@ struct TimelineView: View {
         .frame(width: contentWidth, height: laneHeight, alignment: .topLeading)
     }
 
-    private var motionLane: some View {
+    private func motionLane(for row: [MotionElement]) -> some View {
         ZStack(alignment: .topLeading) {
             Color.white.opacity(0.03)
                 .frame(width: contentWidth, height: laneHeight)
                 .contentShape(Rectangle())
                 .onTapGesture { onSelect(nil) }
-            ForEach(motionElements.sorted { $0.duration > $1.duration }) { element in
+            ForEach(row.sorted { $0.duration > $1.duration }) { element in
                 motionItem(element)
             }
         }

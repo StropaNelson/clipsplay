@@ -7,6 +7,8 @@ struct MotionLayer: View {
     let selectedID: UUID?
     let onSelect: (UUID) -> Void
     let onMove: (UUID, Double, Double, Bool) -> Void
+    let onResize: (UUID, Double, Bool) -> Void
+    let onEdit: (UUID) -> Void
 
     var body: some View {
         GeometryReader { geometry in
@@ -35,20 +37,25 @@ struct MotionLayer: View {
 
     private func hitArea(for element: MotionElement, size: CGSize) -> some View {
         let rect: CGRect = MotionRenderer.frameRect(element, canvasSize: size)
+        let hitWidth: CGFloat = max(60, rect.width)
+        let hitHeight: CGFloat = max(60, rect.height)
         return Color.white.opacity(0.001)
-            .frame(width: rect.width, height: rect.height)
-            .overlay(
+            .frame(width: hitWidth, height: hitHeight)
+            .overlay {
                 Rectangle()
                     .stroke(
                         Color.white,
                         style: StrokeStyle(lineWidth: 1.5, dash: [5, 3])
                     )
+                    .frame(width: rect.width, height: rect.height)
                     .opacity(element.id == selectedID ? 1 : 0)
                     .allowsHitTesting(false)
-            )
+            }
             .position(x: rect.midX, y: rect.midY)
+            .onTapGesture(count: 2) { onEdit(element.id) }
             .onTapGesture { onSelect(element.id) }
             .gesture(dragGesture(for: element.id, size: size))
+            .simultaneousGesture(pinchGesture(for: element.id))
     }
 
     private func dragGesture(for id: UUID, size: CGSize) -> some Gesture {
@@ -63,6 +70,12 @@ struct MotionLayer: View {
                 let y: CGFloat = value.location.y / size.height
                 onMove(id, clamp(x), clamp(y), true)
             }
+    }
+
+    private func pinchGesture(for id: UUID) -> some Gesture {
+        MagnificationGesture()
+            .onChanged { onResize(id, Double($0), false) }
+            .onEnded { onResize(id, Double($0), true) }
     }
 
     private func clamp(_ value: CGFloat) -> Double {
@@ -108,7 +121,7 @@ struct AddMotionSheet: View {
                         MotionElement.preset(.shape, shape: .arrow, start: start, duration: duration)
                     }
                 } footer: {
-                    Text("O elemento começa no cursor. Depois arraste na prévia para posicionar.")
+                    Text("O elemento começa no cursor. Na prévia: arraste para mover, use pinça para redimensionar e toque duas vezes para editar.")
                 }
             }
             .navigationTitle("Adicionar motion")
