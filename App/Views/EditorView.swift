@@ -66,6 +66,8 @@ struct EditorView: View {
     @State private var narrationRequest: NarrationRequest?
     @State private var showingAddOverlay = false
     @State private var editingMediaOverlay: MediaOverlay?
+    @State private var showingAddMotion = false
+    @State private var editingMotionElement: MotionElement?
     @State private var didOpenInitialOperation = false
 
     init(project: Project, initialOperation: ProjectOperation? = nil) {
@@ -91,6 +93,7 @@ struct EditorView: View {
                     overlays: viewModel.resolvedOverlays,
                     audioClips: viewModel.resolvedAudioClips,
                     mediaOverlays: viewModel.selectedEpisode?.mediaOverlays ?? [],
+                    motionElements: viewModel.selectedEpisode?.motionElements ?? [],
                     markers: viewModel.selectedEpisode?.markers.map(\.time) ?? [],
                     totalDuration: viewModel.timelineDuration,
                     currentTime: viewModel.currentTime,
@@ -103,6 +106,8 @@ struct EditorView: View {
                     onAddIntro: { clipPickRequest = ClipPickRequest(track: .intro) },
                     onAddOutro: { clipPickRequest = ClipPickRequest(track: .outro) },
                     onAddText: { textEditRequest = viewModel.newTextRequest() },
+                    onAddMotion: { showingAddMotion = true },
+                    onMoveMotion: { viewModel.retimeMotionElement($0, start: $1, duration: $2) },
                     onAddAudio: { showingAddAudio = true },
                     onTransitionTap: { transitionSegment = $0 },
                     maxSourceTime: { viewModel.maxSourceTime(for: $0) },
@@ -547,6 +552,13 @@ struct EditorView: View {
                         onSelect: { viewModel.selectedSegmentID = $0 },
                         onMove: { id, x, y, finished in viewModel.moveMediaOverlay(id, x: x, y: y, finished: finished) }
                     )
+                    MotionLayer(
+                        elements: viewModel.visibleMotionElements,
+                        currentTime: viewModel.currentTime,
+                        selectedID: viewModel.selectedSegmentID,
+                        onSelect: { viewModel.selectedSegmentID = $0 },
+                        onMove: { id, x, y, finished in viewModel.moveMotionElement(id, x: x, y: y, finished: finished) }
+                    )
                     TextOverlayLayer(
                         overlays: viewModel.visibleOverlays,
                         currentTime: viewModel.currentTime,
@@ -773,6 +785,12 @@ struct EditorView: View {
                     }
                     toolButton("Duplicar", icon: "plus.square.on.square") { viewModel.duplicateSelected() }
                     toolButton("Excluir", icon: "trash", role: .destructive) { viewModel.removeOverlay(overlay.id) }
+                } else if let motion = viewModel.selectedMotionElement {
+                    toolButton("Fechar", icon: "xmark") { viewModel.selectedSegmentID = nil }
+                    Divider().frame(height: 30).overlay(EditorTheme.divider)
+                    toolButton("Editar", icon: "slider.horizontal.3") { editingMotionElement = motion }
+                    toolButton("Duplicar", icon: "plus.square.on.square") { viewModel.duplicateSelected() }
+                    toolButton("Excluir", icon: "trash", role: .destructive) { viewModel.removeMotionElement(motion.id) }
                 } else if let media = viewModel.selectedMediaOverlay {
                     toolButton("Fechar", icon: "xmark") { viewModel.selectedSegmentID = nil }
                     Divider().frame(height: 30).overlay(EditorTheme.divider)
@@ -794,6 +812,7 @@ struct EditorView: View {
                     toolButton("Clipe", icon: "plus.rectangle.on.rectangle") { clipPickRequest = ClipPickRequest(track: .main) }
                     toolButton("Sobrepor", icon: "rectangle.on.rectangle") { showingAddOverlay = true }
                     toolButton("Texto", icon: "textformat") { textEditRequest = viewModel.newTextRequest() }
+                    toolButton("Motion", icon: "sparkles") { showingAddMotion = true }
                     toolButton("Áudio", icon: "music.note") { showingAddAudio = true }
                     toolButton("Narrar", icon: "mic.fill") { narrationRequest = NarrationRequest(segment: nil) }
                     toolButton("Transições", icon: "square.on.square") {
@@ -881,6 +900,21 @@ struct EditorView: View {
                     assetDuration: viewModel.mediaAssets.first { $0.id == overlay.assetID }?.duration ?? overlay.duration,
                     onSave: { viewModel.updateMediaOverlay($0) },
                     onDelete: { viewModel.removeMediaOverlay(overlay.id) }
+                )
+            }
+            .sheet(isPresented: $showingAddMotion) {
+                AddMotionSheet(
+                    currentTime: viewModel.currentTime,
+                    timelineDuration: viewModel.timelineDuration,
+                    onAdd: { viewModel.addMotionElement($0) }
+                )
+            }
+            .sheet(item: $editingMotionElement) { element in
+                MotionElementEditorSheet(
+                    element: element,
+                    episodeDuration: viewModel.timelineDuration,
+                    onSave: { viewModel.updateMotionElement($0) },
+                    onDelete: { viewModel.removeMotionElement(element.id) }
                 )
             }
             .sheet(item: $narrationRequest) { request in
@@ -2089,6 +2123,12 @@ class EditorViewModel: ObservableObject {
             copy.id = UUID()
             copy.startTime = min(overlay.endTime, max(0, timelineDuration - copy.duration))
             saveOverlay(copy)
+        } else if let element = selectedMotionElement {
+            var copy = element
+            copy.id = UUID()
+            copy.startTime = min(element.endTime, max(0, timelineDuration - copy.duration))
+            mutateSelectedEpisode(reloadPreview: false) { $0.motionElements.append(copy) }
+            selectedSegmentID = copy.id
         }
     }
 
@@ -2548,6 +2588,64 @@ class EditorViewModel: ObservableObject {
         updateMediaOverlay(overlay)
     }
 
+    // MARK: Motion elements
+
+    var selectedMotionElement: MotionElement? {
+        guard let selectedSegmentID = selectedSegmentID else { return nil }
+        return selectedEpisode?.motionElements.first { $0.id == selectedSegmentID }
+    }
+
+    var visibleMotionElements: [MotionElement] {
+        (selectedEpisode?.motionElements ?? []).filter {
+            $0.isVisible(at: currentTime) || (!isPlaying && $0.id == selectedSegmentID)
+        }
+    }
+
+    func addMotionElement(_ element: MotionElement) {
+        var item = element
+        item.startTime = min(currentTime, max(0, timelineDuration - 0.3))
+        item.duration = max(0.3, min(item.duration, max(0.3, timelineDuration - item.startTime)))
+        mutateSelectedEpisode(reloadPreview: false) { $0.motionElements.append(item) }
+        selectedSegmentID = item.id
+    }
+
+    func updateMotionElement(_ element: MotionElement) {
+        mutateSelectedEpisode(reloadPreview: false) { episode in
+            if let index = episode.motionElements.firstIndex(where: { $0.id == element.id }) {
+                episode.motionElements[index] = element
+            }
+        }
+    }
+
+    func removeMotionElement(_ id: UUID) {
+        if selectedSegmentID == id { selectedSegmentID = nil }
+        mutateSelectedEpisode(reloadPreview: false) { $0.motionElements.removeAll { $0.id == id } }
+    }
+
+    func moveMotionElement(_ id: UUID, x: Double, y: Double, finished: Bool) {
+        guard let episodeIndex = selectedEpisodeIndex,
+              let index = episodes[episodeIndex].motionElements.firstIndex(where: { $0.id == id }) else { return }
+        if !isDraggingOverlay {
+            isDraggingOverlay = true
+            checkpoint()
+        }
+        selectedSegmentID = id
+        episodes[episodeIndex].motionElements[index].centerX = x
+        episodes[episodeIndex].motionElements[index].centerY = y
+        selectedEpisode = episodes[episodeIndex]
+        if finished {
+            isDraggingOverlay = false
+            Task { await persistProjectChanges(reloadPreview: false) }
+        }
+    }
+
+    func retimeMotionElement(_ id: UUID, start: Double, duration: Double) {
+        guard var element = selectedEpisode?.motionElements.first(where: { $0.id == id }) else { return }
+        element.startTime = min(max(0, start), max(0, timelineDuration - 0.3))
+        element.duration = max(0.3, min(duration, max(0.3, timelineDuration - element.startTime)))
+        updateMotionElement(element)
+    }
+
     func dropAsset(_ id: UUID, on track: TrackType, at time: Double) {
         guard let asset = mediaAssets.first(where: { $0.id == id }) else { return }
         seek(to: time)
@@ -2964,6 +3062,12 @@ class EditorViewModel: ObservableObject {
                 return moved
             }
             episode.mediaOverlays = episode.mediaOverlays.compactMap { item in
+                guard let start = shifted(item.startTime, item.duration) else { return nil }
+                var moved = item
+                moved.startTime = start
+                return moved
+            }
+            episode.motionElements = episode.motionElements.compactMap { item in
                 guard let start = shifted(item.startTime, item.duration) else { return nil }
                 var moved = item
                 moved.startTime = start

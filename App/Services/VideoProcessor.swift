@@ -494,10 +494,11 @@ actor VideoProcessor {
     func applyTextOverlays(
         _ overlays: [TextOverlay],
         images: [ImageOverlayRender] = [],
+        motion: [MotionElement] = [],
         to videoComposition: AVVideoComposition
     ) -> AVVideoComposition {
         let visible = overlays.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.duration > 0 }
-        guard !visible.isEmpty || !images.isEmpty else { return videoComposition }
+        guard !visible.isEmpty || !images.isEmpty || !motion.isEmpty else { return videoComposition }
         // Preserve the custom compositor + track metadata through the copy.
         let mutable = FilterVideoComposition()
         mutable.renderSize = videoComposition.renderSize
@@ -512,6 +513,7 @@ actor VideoProcessor {
         }
         mutable.textOverlays = visible
         mutable.imageOverlays = images
+        mutable.motionElements = motion.filter { $0.duration > 0 }
         mutable.installCustomInstructions()
         return mutable
     }

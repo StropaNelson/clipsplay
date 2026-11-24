@@ -390,6 +390,11 @@ extension Episode {
         set { storedMediaOverlays = newValue }
     }
 
+    var motionElements: [MotionElement] {
+        get { storedMotionElements ?? [] }
+        set { storedMotionElements = newValue }
+    }
+
     var markers: [TimelineMarker] {
         get { storedMarkers ?? [] }
         set { storedMarkers = newValue.sorted { $0.time < $1.time } }

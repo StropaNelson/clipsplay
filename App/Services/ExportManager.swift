@@ -50,6 +50,7 @@ actor ExportManager {
         let videoComposition = await processor.applyTextOverlays(
             overlays,
             images: images,
+            motion: episode.motionElements,
             to: output.videoComposition
         )
         try await processor.exportComposition(

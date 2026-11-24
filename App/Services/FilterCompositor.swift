@@ -16,6 +16,8 @@ final class FilterVideoComposition: AVMutableVideoComposition, @unchecked Sendab
     var textOverlays: [TextOverlay] = []
     /// Burned-in image/video overlays already rasterized to CGImage.
     var imageOverlays: [ImageOverlayRender] = []
+    /// Burned-in animated graphic elements in episode timeline time.
+    var motionElements: [MotionElement] = []
 
     /// AVFoundation copies video compositions on assignment, and the copy loses
     /// this subclass — so render data travels inside the instruction objects,
@@ -27,7 +29,8 @@ final class FilterVideoComposition: AVMutableVideoComposition, @unchecked Sendab
             fadeEdges: fadeEdges,
             contentDuration: contentDuration,
             textOverlays: textOverlays,
-            imageOverlays: imageOverlays
+            imageOverlays: imageOverlays,
+            motionElements: motionElements
         )
         instructions = instructions.map { instruction in
             let custom = FilterCompositionInstruction(
@@ -57,7 +60,8 @@ final class FilterVideoComposition: AVMutableVideoComposition, @unchecked Sendab
             fadeEdges: fadeEdges,
             contentDuration: contentDuration,
             textOverlays: textOverlays,
-            imageOverlays: imageOverlays
+            imageOverlays: imageOverlays,
+            motionElements: motionElements
         )
     }
 }
@@ -71,16 +75,19 @@ final class FilterRenderPayload: @unchecked Sendable {
     let contentDuration: Double
     let textOverlays: [TextOverlay]
     let imageOverlays: [ImageOverlayRender]
+    let motionElements: [MotionElement]
 
     init(trackRenders: [CMPersistentTrackID: [TrackRenderInfo]], fitMode: FitMode,
          fadeEdges: Bool, contentDuration: Double,
-         textOverlays: [TextOverlay], imageOverlays: [ImageOverlayRender]) {
+         textOverlays: [TextOverlay], imageOverlays: [ImageOverlayRender],
+         motionElements: [MotionElement]) {
         self.trackRenders = trackRenders
         self.fitMode = fitMode
         self.fadeEdges = fadeEdges
         self.contentDuration = contentDuration
         self.textOverlays = textOverlays
         self.imageOverlays = imageOverlays
+        self.motionElements = motionElements
     }
 }
 
@@ -302,10 +309,28 @@ final class ClipFilterCompositor: NSObject, AVVideoCompositing {
         for render in payload.imageOverlays where render.overlay.isVisible(at: time) {
             result = compositeImageOverlay(render, over: result, time: time, renderSize: renderSize)
         }
+        for element in payload.motionElements where element.isVisible(at: time) {
+            result = compositeMotionElement(element, over: result, time: time, renderSize: renderSize)
+        }
         for overlay in payload.textOverlays where overlay.isVisible(at: time) {
             result = compositeTextOverlay(overlay, over: result, time: time, renderSize: renderSize)
         }
         return result
+    }
+
+    private func compositeMotionElement(_ element: MotionElement, over canvas: CIImage,
+                                       time: Double, renderSize: CGSize) -> CIImage {
+        guard let image = MotionElementRasterizer.shared.image(
+            for: element,
+            at: time,
+            renderSize: renderSize
+        ) else { return canvas }
+        let rect = MotionRenderer.boundingRect(element, canvasSize: renderSize)
+        let placed = image.transformed(by: CGAffineTransform(
+            translationX: rect.minX,
+            y: renderSize.height - rect.maxY
+        ))
+        return placed.composited(over: canvas)
     }
 
     /// PiP-style image overlay: centered at normalized top-left-origin point,
@@ -788,5 +813,41 @@ final class TextOverlayRasterizer {
             result.append(piece)
         }
         return result
+    }
+}
+
+final class MotionElementRasterizer {
+    static let shared = MotionElementRasterizer()
+
+    private let queue = DispatchQueue(label: "clipstudio.motionrasterizer")
+    private var cache: [String: CIImage] = [:]
+    private let cacheLimit = 64
+
+    func image(for element: MotionElement, at time: Double, renderSize: CGSize) -> CIImage? {
+        let canCache = MotionMath.isStatic(element, time: time)
+        let key = "\(element.hashValue):\(Int(renderSize.width))x\(Int(renderSize.height))"
+        return queue.sync {
+            if canCache, let cached = cache[key] { return cached }
+            guard let rendered = render(element, at: time, renderSize: renderSize) else { return nil }
+            if canCache {
+                if cache.count >= cacheLimit { cache.removeAll() }
+                cache[key] = rendered
+            }
+            return rendered
+        }
+    }
+
+    private func render(_ element: MotionElement, at time: Double, renderSize: CGSize) -> CIImage? {
+        let rect = MotionRenderer.boundingRect(element, canvasSize: renderSize)
+        guard !rect.isNull, !rect.isEmpty else { return nil }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = false
+        let uiImage = UIGraphicsImageRenderer(size: rect.size, format: format).image { context in
+            context.cgContext.translateBy(x: -rect.minX, y: -rect.minY)
+            MotionRenderer.draw(element, at: time, canvasSize: renderSize, in: context.cgContext)
+        }
+        guard let cgImage = uiImage.cgImage else { return nil }
+        return CIImage(cgImage: cgImage)
     }
 }

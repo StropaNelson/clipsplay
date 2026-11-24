@@ -46,6 +46,7 @@ struct TimelineView: View {
     let overlays: [TextOverlay]
     let audioClips: [AudioClip]
     let mediaOverlays: [MediaOverlay]
+    let motionElements: [MotionElement]
     let markers: [Double]
     let totalDuration: Double
     let currentTime: Double
@@ -58,6 +59,8 @@ struct TimelineView: View {
     let onAddIntro: () -> Void
     let onAddOutro: () -> Void
     let onAddText: () -> Void
+    let onAddMotion: () -> Void
+    let onMoveMotion: (UUID, Double, Double) -> Void
     let onAddAudio: () -> Void
     let onTransitionTap: (TimelineSegment) -> Void
     let maxSourceTime: (TimelineSegment) -> Double
@@ -160,6 +163,7 @@ struct TimelineView: View {
             header(icon: "waveform", title: "Som", height: laneHeight)
             header(icon: "rectangle.on.rectangle", title: "PiP", height: laneHeight, action: onAddOverlay)
             header(icon: "textformat", title: "Texto", height: laneHeight, action: onAddText)
+            header(icon: "sparkles", title: "Motion", height: laneHeight, action: onAddMotion)
             ForEach(audioRows.indices, id: \.self) { row in
                 let kind = audioRows[row].kind
                 let isSingleEmpty = audioRows.count == 1 && audioRows[row].clips.isEmpty
@@ -203,7 +207,7 @@ struct TimelineView: View {
 
     private var contentHeight: CGFloat {
         let videoHeight = clipHeight * CGFloat(videoRows.count) + laneSpacing * CGFloat(max(0, videoRows.count - 1))
-        return rulerHeight + 4 + videoHeight + laneHeight * CGFloat(3 + audioRows.count) + laneSpacing * CGFloat(3 + videoRows.count + audioRows.count)
+        return rulerHeight + 4 + videoHeight + laneHeight * CGFloat(4 + audioRows.count) + laneSpacing * CGFloat(4 + videoRows.count + audioRows.count)
     }
 
     private func xPosition(for time: Double) -> CGFloat {
@@ -224,6 +228,7 @@ struct TimelineView: View {
                 videoAudioLane
                 overlayLane
                 textLane
+                motionLane
                 ForEach(audioRows.indices, id: \.self) { row in
                     audioLaneRow(clips: audioRows[row].clips)
                 }
@@ -245,7 +250,7 @@ struct TimelineView: View {
         let videoHeight = clipHeight * CGFloat(videoRows.count) + laneSpacing * CGFloat(max(0, videoRows.count - 1))
         let pipTop = videoTop + videoHeight + laneSpacing + laneHeight + laneSpacing
         let textTop = pipTop + laneHeight + laneSpacing
-        let audioTop = textTop + laneHeight + laneSpacing
+        let audioTop = textTop + 2 * (laneHeight + laneSpacing)
         let track: TrackType
         if location.y >= audioTop {
             track = .audio
@@ -519,6 +524,40 @@ struct TimelineView: View {
                     let newStart = max(0, overlay.startTime + move + left)
                     let newDuration = max(0.3, overlay.duration - left + right)
                     onMoveOverlay(overlay.id, newStart, newDuration)
+                }
+            }
+        }
+        .frame(width: contentWidth, height: laneHeight, alignment: .topLeading)
+    }
+
+    private var motionLane: some View {
+        ZStack(alignment: .topLeading) {
+            Color.white.opacity(0.03)
+                .frame(width: contentWidth, height: laneHeight)
+                .contentShape(Rectangle())
+                .onTapGesture { onSelect(nil) }
+            ForEach(motionElements.sorted { $0.duration > $1.duration }) { element in
+                let drag = laneDrag?.id == element.id ? laneDrag : nil
+                let start = max(0, element.startTime + (drag?.move ?? 0) + (drag?.left ?? 0))
+                let duration = max(0.3, element.duration - (drag?.left ?? 0) + (drag?.right ?? 0))
+                let title: String
+                switch element.kind {
+                case .text: title = element.text
+                case .counter: title = MotionMath.counterText(element, progress: 1)
+                case .shape: title = element.shape.rawValue
+                }
+                laneItem(
+                    id: element.id,
+                    title: title,
+                    icon: element.kind == .text ? "textformat" : (element.kind == .counter ? "number" : "square.dashed"),
+                    color: .pink,
+                    start: start,
+                    duration: duration,
+                    isSelected: element.id == selectedID
+                ) { move, left, right in
+                    let newStart = max(0, element.startTime + move + left)
+                    let newDuration = max(0.3, element.duration - left + right)
+                    onMoveMotion(element.id, newStart, newDuration)
                 }
             }
         }
